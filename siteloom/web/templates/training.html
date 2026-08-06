@@ -30,6 +30,15 @@
     border: 1px solid light-dark(#e2e2e6, #2c2c31); }
   .cov a.ready { background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
     border-color: transparent; }
+  .cov a.extra { display: none; }
+  .cov.all a.extra { display: inline; }
+  /* Keep the review controls reachable while scrolling a long grid —
+     otherwise Apply is a scroll-to-top away after every screenful. */
+  .actions { position: sticky; top: 0; z-index: 5; padding: 0.55rem 0;
+    display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+    background: light-dark(#f5f5f7, #111114);
+    border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31); }
+  .marked { font-variant-numeric: tabular-nums; }
 </style>
 
 <h2 style="font-size:1.05rem;">Training data</h2>
@@ -58,15 +67,24 @@
     Green = at least {{ min_samples }} verified samples, enough to include in a fine-tune.
     Shown as verified / proposed.
   </p>
-  <div class="cov">
-    {% for name, n in coverage %}
+  {# Sorted so the people worth reviewing (most proposals awaiting a
+     decision) come first; with 80+ people an unsorted list buries them. #}
+  {% set ranked = coverage | sort(attribute='1', reverse=true) %}
+  <div class="cov" id="cov">
+    {% for name, n in ranked %}
       {% set v = verified_coverage.get(name, 0) %}
-      <a href="/training?person={{ name | urlencode }}" class="{% if v >= min_samples %}ready{% endif %}">
+      <a href="/training?person={{ name | urlencode }}"
+         class="{% if v >= min_samples %}ready{% endif %}{% if loop.index > 18 %} extra{% endif %}">
         {{ name }} <strong>{{ v }}</strong>/{{ n }}
       </a>
     {% endfor %}
     {% if not coverage %}<span class="muted" style="font-size:0.8rem;">No people imported yet.</span>{% endif %}
   </div>
+  {% if coverage | length > 18 %}
+  <button class="btn" id="cov-toggle" style="margin-top:0.5rem;">
+    Show all {{ coverage | length }} people
+  </button>
+  {% endif %}
 </div>
 
 {% if filters.person %}
@@ -74,11 +92,17 @@
 {% endif %}
 
 {% if proposals %}
-<div style="display:flex; gap:0.5rem; margin-bottom:0.7rem; flex-wrap:wrap; align-items:center;">
+<div class="actions">
   <button class="btn" id="b-all-confirm">Confirm all shown</button>
   <button class="btn" id="b-all-clear">Clear marks</button>
   <button class="btn primary" id="b-apply">Apply</button>
+  <span class="muted marked" id="marked"></span>
   <span class="muted" id="status" style="font-size:0.8rem;"></span>
+  {% if not filters.person %}
+  <span class="muted" style="font-size:0.78rem; margin-left:auto;">
+    Tip: click a person above to review one face at a time — far safer to bulk-confirm.
+  </span>
+  {% endif %}
 </div>
 
 <div class="facegrid" id="grid">
@@ -141,12 +165,30 @@
 {% endif %}
 
 <script>
+const covToggle = document.getElementById('cov-toggle');
+if (covToggle) {
+  covToggle.onclick = () => {
+    const cov = document.getElementById('cov');
+    cov.classList.toggle('all');
+    covToggle.textContent = cov.classList.contains('all')
+      ? 'Show fewer' : covToggle.dataset.more || covToggle.textContent;
+  };
+  covToggle.dataset.more = covToggle.textContent;
+}
+
 const grid = document.getElementById('grid');
 if (grid) {
+  function updateMarked() {
+    const c = grid.querySelectorAll('.face[data-state="confirm"]').length;
+    const r = grid.querySelectorAll('.face[data-state="reject"]').length;
+    document.getElementById('marked').textContent =
+      (c || r) ? `${c} to confirm · ${r} to reject` : '';
+  }
   function setState(card, state) {
     card.dataset.state = state;
     card.classList.toggle('confirm', state === 'confirm');
     card.classList.toggle('reject', state === 'reject');
+    updateMarked();
   }
   grid.addEventListener('click', e => {
     const btn = e.target.closest('button[data-act]');
@@ -163,6 +205,7 @@ if (grid) {
   document.getElementById('b-all-clear').onclick = () => {
     grid.querySelectorAll('.face').forEach(c => setState(c, 'none'));
   };
+  updateMarked();
   document.getElementById('b-apply').onclick = async () => {
     const decisions = [];
     grid.querySelectorAll('.face').forEach(c => {
