@@ -299,6 +299,69 @@ class CustomClass(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class OperationRun(Base):
+    """A long-running operator task: archive import, library indexing.
+
+    Heartbeated to the database every batch, which is what makes these
+    jobs observable rather than opaque: progress can be read from the web
+    UI or a second terminal while the work happens in a third, and a run
+    that died leaves its last known position behind instead of vanishing.
+    """
+
+    __tablename__ = "operation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, index=True)
+    target: Mapped[str] = mapped_column(String, default="")
+    phase: Mapped[str] = mapped_column(String, default="")
+    # running | complete | interrupted | failed
+    status: Mapped[str] = mapped_column(String, default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    current: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    # Domain counters (faces detected, certain, matched…) as JSON.
+    counters: Mapped[str] = mapped_column(Text, default="{}")
+    # Per-phase elapsed seconds, so slow stages are identifiable after
+    # the fact rather than guessed at.
+    phase_timings: Mapped[str] = mapped_column(Text, default="{}")
+    message: Mapped[str] = mapped_column(Text, default="")
+    # Exact command to continue an interrupted run.
+    resume_command: Mapped[str] = mapped_column(Text, default="")
+    pid: Mapped[int] = mapped_column(Integer, default=0)
+
+    @property
+    def percent(self) -> float:
+        return (self.current / self.total * 100.0) if self.total else 0.0
+
+    @property
+    def elapsed_s(self) -> float:
+        end = self.finished_at or self.updated_at
+        return max(0.0, (end - self.started_at).total_seconds())
+
+    @property
+    def rate(self) -> float:
+        """Items per second over the run so far."""
+        return self.current / self.elapsed_s if self.elapsed_s > 0 else 0.0
+
+    @property
+    def eta_s(self) -> float | None:
+        if self.status != "running" or not self.total or self.rate <= 0:
+            return None
+        return max(0.0, (self.total - self.current) / self.rate)
+
+    @property
+    def is_stale(self) -> bool:
+        """A 'running' row whose heartbeat stopped — the process died."""
+        if self.status != "running":
+            return False
+        from datetime import timezone as _tz
+
+        now = datetime.now(_tz.utc).replace(tzinfo=None)
+        return (now - self.updated_at).total_seconds() > 120
+
+
 class TrainingRun(Base):
     """A completed training/evaluation run, for provenance in the UI."""
 

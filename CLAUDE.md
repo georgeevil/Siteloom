@@ -49,6 +49,14 @@ The compute/state split is deliberate and must be preserved: `modules/identity.p
 - **Custom sub-classes are k-NN, not a model** (`identity/classes.py`): examples are labeled crops embedded with the existing generic embedder, stored in the `class-examples` collection. Adding an example improves the class immediately; there is no training run. Rebuild after the embedder changes, or stale vectors from an old embedding space silently degrade voting.
 - YOLO face-detector training improves **detection only**; identification stays with the embedding pipeline. Say so plainly rather than implying otherwise.
 
+### Long-running operations (`siteloom/progress.py`)
+
+Any operation that can run for minutes must go through `ProgressReporter` — it is the single place that provides all three things such a job needs. Wrap the work in `with ProgressReporter(...) as p:` and each stage in `with p.phase(name, total=n):`, calling `p.advance(**counters)` per item and `p.check_interrupt()` right after each commit.
+
+- **Heartbeat, not just a bar**: every tick writes an `OperationRun` row, which is what makes a run visible to `siteloom jobs`, `/jobs`, and other terminals. A row still marked `running` whose `updated_at` went cold reports `is_stale` — a dead process must never look healthy.
+- **Non-TTY must not go silent**: the reporter renders a Rich bar on a terminal and periodic log lines when redirected. Don't add bare `print`/bar code that only works interactively.
+- **Ctrl-C is a feature**: the first interrupt sets a flag, the loop finishes its batch, commits, records `interrupted`, and prints the resume command; a second aborts. Every long operation must therefore be resumable — batch commits plus a skip-what's-done query, never a single transaction over the whole job.
+
 ### Audio, backfill, guests
 
 - `modules/audio.py`: loud-duration episodes only (dBFS RMS threshold + min duration + release gap) — classification/transcription intentionally absent (NFR5). `detect_episodes` is a pure function; test changes there.

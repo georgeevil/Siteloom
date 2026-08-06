@@ -162,8 +162,12 @@ class LibraryIndexer:
         source_id: int | None = None,
         limit: int = 100,
         identify: bool = True,
+        progress=None,
     ) -> ProcessResult:
         """Run detection (+ identification) over pending items."""
+        from siteloom.library.takeout import _NullProgress
+
+        progress = progress or _NullProgress()
         processed = failed = annotation_count = 0
         with self.Session() as session:
             q = select(LibraryItem).filter_by(status="pending")
@@ -171,19 +175,26 @@ class LibraryIndexer:
                 q = q.filter_by(source_id=source_id)
             items = session.scalars(q.order_by(LibraryItem.id).limit(limit)).all()
 
-            for item in items:
-                try:
-                    annotation_count += self._process_item(session, item, identify)
-                    item.status = "indexed"
-                    item.error = None
-                    processed += 1
-                except Exception as exc:
-                    item.status = "failed"
-                    item.error = f"{type(exc).__name__}: {exc}"
-                    failed += 1
-                    log.warning("indexing failed for %s: %s", item.path, exc)
-                item.indexed_at = _now()
-                session.commit()
+            with progress.phase("Indexing media", total=len(items)):
+                for item in items:
+                    boxes = 0
+                    try:
+                        boxes = self._process_item(session, item, identify)
+                        annotation_count += boxes
+                        item.status = "indexed"
+                        item.error = None
+                        processed += 1
+                    except Exception as exc:
+                        item.status = "failed"
+                        item.error = f"{type(exc).__name__}: {exc}"
+                        failed += 1
+                        log.warning("indexing failed for %s: %s", item.path, exc)
+                    item.indexed_at = _now()
+                    session.commit()
+                    progress.advance(
+                        boxes=boxes, failed=1 if item.status == "failed" else 0
+                    )
+                    progress.check_interrupt()
 
             remaining = session.scalar(
                 select(func.count()).select_from(LibraryItem).filter_by(status="pending")

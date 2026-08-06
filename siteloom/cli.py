@@ -7,13 +7,20 @@ from pathlib import Path
 
 import typer
 
-from siteloom.cli_library import classes_app, library_app, takeout_app, train_app
+from siteloom.cli_library import (
+    classes_app,
+    jobs_app,
+    library_app,
+    takeout_app,
+    train_app,
+)
 
 app = typer.Typer(help="Siteloom — video & audio intelligence platform.")
 app.add_typer(library_app, name="library")
 app.add_typer(takeout_app, name="takeout")
 app.add_typer(classes_app, name="classes")
 app.add_typer(train_app, name="train")
+app.add_typer(jobs_app, name="jobs")
 
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
 

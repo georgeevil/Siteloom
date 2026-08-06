@@ -22,6 +22,7 @@ from siteloom.store import (
     ItemTag,
     LibraryItem,
     LibrarySource,
+    OperationRun,
     TrainingRun,
 )
 
@@ -476,6 +477,53 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         return RedirectResponse(
             f"/identities/{new_id}?split_from={identity_id}", status_code=303
         )
+
+    # -- jobs dashboard ----------------------------------------------------
+
+    def _run_payload(run: OperationRun) -> dict:
+        from siteloom.progress import humanize
+
+        return {
+            "id": run.id,
+            "kind": run.kind,
+            "target": run.target,
+            "phase": run.phase,
+            "status": "stale" if run.is_stale else run.status,
+            "current": run.current,
+            "total": run.total,
+            "percent": round(run.percent, 1),
+            "rate": round(run.rate, 2),
+            "elapsed": humanize(run.elapsed_s),
+            "eta": humanize(run.eta_s),
+            "counters": json.loads(run.counters or "{}"),
+            "phase_timings": json.loads(run.phase_timings or "{}"),
+            "started_at": run.started_at.strftime("%Y-%m-%d %H:%M"),
+            "resume_command": run.resume_command,
+            "message": run.message,
+        }
+
+    @app.get("/jobs")
+    def jobs_page(request: Request):
+        with Session() as session:
+            runs = session.scalars(
+                select(OperationRun).order_by(OperationRun.id.desc()).limit(25)
+            ).all()
+            payload = [_run_payload(r) for r in runs]
+        return templates.TemplateResponse(
+            request,
+            "jobs.html",
+            ctx(runs=payload, running=[r for r in payload if r["status"] == "running"]),
+        )
+
+    @app.get("/api/jobs")
+    def jobs_api():
+        """Polled by the dashboard so a run started in a terminal is
+        visible in the browser without a page reload."""
+        with Session() as session:
+            runs = session.scalars(
+                select(OperationRun).order_by(OperationRun.id.desc()).limit(25)
+            ).all()
+            return JSONResponse([_run_payload(r) for r in runs])
 
     # -- training review ---------------------------------------------------
 

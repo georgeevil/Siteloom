@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Jobs{% endblock %}
+{% block content %}
+<style>
+  .job { background: light-dark(#fff, #1c1c20); border: 1px solid light-dark(#e2e2e6, #2c2c31);
+    border-radius: 10px; padding: 0.8rem 1rem; margin-bottom: 0.7rem; }
+  .job.running { border-color: light-dark(#0a63c9, #2d6fd0); }
+  .job.failed, .job.stale { border-color: light-dark(#b3261e, #ff9d96); }
+  .job h3 { margin: 0 0 0.15rem; font-size: 0.95rem; display: flex; gap: 0.5rem;
+    align-items: center; flex-wrap: wrap; }
+  .job .target { font-size: 0.76rem; opacity: 0.5; word-break: break-all; }
+  .bar { height: 8px; border-radius: 999px; margin: 0.55rem 0 0.4rem;
+    background: light-dark(#e9e9ee, #2a2a30); overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 999px; transition: width 0.4s ease;
+    background: light-dark(#0a63c9, #2d6fd0); }
+  .job.complete .bar > div { background: light-dark(#1c7c3c, #3f9d63); }
+  .job.failed .bar > div, .job.stale .bar > div { background: light-dark(#b3261e, #d4453c); }
+  .job.interrupted .bar > div { background: light-dark(#8a6410, #c99a2e); }
+  .facts { display: flex; gap: 1.1rem; flex-wrap: wrap; font-size: 0.8rem; }
+  .facts b { font-variant-numeric: tabular-nums; }
+  .counters { margin-top: 0.35rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .counters span { font-size: 0.74rem; padding: 0.1rem 0.45rem; border-radius: 999px;
+    background: light-dark(#f0f0f4, #26262b); }
+  .resume { margin-top: 0.45rem; font-size: 0.78rem; }
+  .resume code { background: light-dark(#f0f0f4, #26262b); padding: 0.15rem 0.4rem;
+    border-radius: 5px; user-select: all; }
+</style>
+
+<div style="display:flex; align-items:baseline; gap:0.8rem;">
+  <h2 style="font-size:1.05rem; margin:0.2rem 0;">Jobs</h2>
+  <span class="muted" style="font-size:0.82rem;" id="live">
+    {% if running %}{{ running | length }} running — updating live{% else %}nothing running{% endif %}
+  </span>
+</div>
+<p class="muted" style="font-size:0.8rem; max-width:70ch;">
+  Long operations heartbeat to the database, so a run started in a terminal
+  shows up here — and a run that died leaves its last position behind
+  instead of disappearing.
+</p>
+
+<div id="jobs">
+  {% for r in runs %}
+  <div class="job {{ r.status }}" data-id="{{ r.id }}">
+    <h3>
+      <span class="badge">{{ r.kind }}</span>
+      <span class="j-phase">{{ r.phase or '—' }}</span>
+      <span class="badge {% if r.status == 'complete' %}guest{% elif r.status in ('failed','stale') %}unknown{% endif %} j-status">{{ r.status }}</span>
+      <span class="muted" style="font-size:0.76rem; font-weight:400;">#{{ r.id }} · {{ r.started_at }}</span>
+    </h3>
+    <div class="target">{{ r.target }}</div>
+    <div class="bar"><div style="width: {{ r.percent }}%"></div></div>
+    <div class="facts">
+      <span class="j-progress"><b>{{ '{:,}'.format(r.current) }}</b>{% if r.total %} / {{ '{:,}'.format(r.total) }} ({{ r.percent }}%){% endif %}</span>
+      <span>rate <b class="j-rate">{{ r.rate }}</b>/s</span>
+      <span>elapsed <b class="j-elapsed">{{ r.elapsed }}</b></span>
+      <span>eta <b class="j-eta">{{ r.eta }}</b></span>
+    </div>
+    <div class="counters j-counters">
+      {% for k, v in r.counters.items() %}<span>{{ k }} {{ '{:,}'.format(v) }}</span>{% endfor %}
+    </div>
+    {% if r.phase_timings %}
+    <div class="counters">
+      {% for k, v in r.phase_timings.items() %}<span class="muted">{{ k }}: {{ v }}s</span>{% endfor %}
+    </div>
+    {% endif %}
+    {% if r.status in ('interrupted', 'stale') and r.resume_command %}
+    <div class="resume">Resume: <code>{{ r.resume_command }}</code></div>
+    {% elif r.message %}
+    <div class="resume muted">{{ r.message }}</div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No operations recorded yet.</p>
+  {% endfor %}
+</div>
+
+<script>
+// Poll only while something is running; a finished board is static.
+let polling = {{ 'true' if running else 'false' }};
+async function refresh() {
+  if (!polling) return;
+  const res = await fetch('/api/jobs');
+  if (!res.ok) return;
+  const runs = await res.json();
+  let anyRunning = false;
+  for (const r of runs) {
+    if (r.status === 'running') anyRunning = true;
+    const el = document.querySelector(`.job[data-id="${r.id}"]`);
+    if (!el) { window.location.reload(); return; }   // a new run appeared
+    el.className = `job ${r.status}`;
+    el.querySelector('.j-phase').textContent = r.phase || '—';
+    el.querySelector('.j-status').textContent = r.status;
+    el.querySelector('.bar > div').style.width = r.percent + '%';
+    el.querySelector('.j-progress').innerHTML =
+      `<b>${r.current.toLocaleString()}</b>` +
+      (r.total ? ` / ${r.total.toLocaleString()} (${r.percent}%)` : '');
+    el.querySelector('.j-rate').textContent = r.rate;
+    el.querySelector('.j-elapsed').textContent = r.elapsed;
+    el.querySelector('.j-eta').textContent = r.eta;
+    el.querySelector('.j-counters').innerHTML = Object.entries(r.counters)
+      .map(([k, v]) => `<span>${k} ${v.toLocaleString()}</span>`).join('');
+  }
+  const live = document.getElementById('live');
+  if (!anyRunning) {
+    polling = false;
+    live.textContent = 'nothing running';
+  } else {
+    live.textContent = `${runs.filter(r => r.status === 'running').length} running — updating live`;
+  }
+}
+setInterval(refresh, 2000);
+</script>
+{% endblock %}

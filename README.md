@@ -98,11 +98,40 @@ face box, so the importer assigns them in two passes:
 ```bash
 uv run siteloom takeout inspect "~/Takeout/Google Photos"   # dry run, no writes
 uv run siteloom takeout import  "~/Takeout/Google Photos"
+uv run siteloom takeout status                              # what's named/verified
 ```
+
+Google exports edited copies as `<name>-edited.jpg` with no sidecar of their
+own; they are skipped by default, because importing them alongside their
+originals seeds the gallery with near-duplicates and inflates per-person
+coverage. Pass `--include-derivatives` to keep them.
 
 Review at `/training`: per-person coverage, confirm/reject/rename in bulk.
 **Only what you verify becomes training data** — a model trained on its own
 proposals would score well and mean nothing.
+
+### Long-running jobs
+
+Importing a large archive takes a while, so those operations are observable
+and interruptible rather than opaque:
+
+- **Progress with ETA** — a live bar with rate and per-phase counters on a
+  terminal; periodic log lines when output is redirected, so background runs
+  aren't silent either. `--log-file` adds a rotating file log.
+- **Ctrl-C is safe** — the current batch finishes, work is committed, the run
+  is recorded as interrupted, and the exact resume command is printed.
+  Everything is resumable; rerunning skips what's done.
+- **Watch from anywhere** — every batch heartbeats to the database, so a run
+  started in one terminal is visible from another and from the browser. A run
+  whose process died shows as `stale` with its last position, rather than
+  looking healthy forever.
+
+```bash
+uv run siteloom jobs list     # recent runs, progress, outcome, resume commands
+uv run siteloom jobs watch    # live view of whatever is running
+```
+
+The `/jobs` page shows the same thing with live progress bars.
 
 ### Training
 

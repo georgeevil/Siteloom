@@ -13,21 +13,23 @@ library_app = typer.Typer(help="Index and label local media directories.")
 takeout_app = typer.Typer(help="Import Google Photos Takeout archives.")
 classes_app = typer.Typer(help="Manage custom sub-classes.")
 train_app = typer.Typer(help="Train face models from verified annotations.")
+jobs_app = typer.Typer(help="Inspect long-running operations.")
 
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
+LOG_FILE_OPT = typer.Option(None, "--log-file", help="Also write logs to this file")
+QUIET_OPT = typer.Option(False, "--quiet", "-q", help="No progress bar (logs only)")
 
 
-def _setup(config_path):
+def _setup(config_path, log_file: str | None = None, level: str = "INFO"):
     """Shared bootstrap: config, DB session factory, dispatcher, resolver."""
-    logging.basicConfig(
-        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
-    )
     from siteloom.config import load_config
     from siteloom.identity import IdentityResolver, VectorStore
     from siteloom.ingest import build_dispatcher
     from siteloom.library import LibraryIndexer
+    from siteloom.progress import setup_logging
     from siteloom.store import get_session, init_db, make_engine
 
+    setup_logging(level=level, log_file=log_file)
     config = load_config(config_path)
     engine = make_engine(config.storage.db_url)
     init_db(engine)
@@ -95,19 +97,36 @@ def library_index(
     limit: int = typer.Option(None, help="Max items this run (default: config)"),
     all_pending: bool = typer.Option(False, "--all", help="Process everything pending"),
     no_identify: bool = typer.Option(False, help="Skip identification (faster pass)"),
+    log_file: str = LOG_FILE_OPT,
+    quiet: bool = QUIET_OPT,
 ):
     """Run detection over pending items. Resumable — stop and rerun freely."""
-    cfg, _Session, indexer = _setup(config)
+    cfg, Session, indexer = _setup(config, log_file)
+    from siteloom.progress import ProgressReporter
+
     batch = limit or (10**9 if all_pending else cfg.library.batch_size)
-    result = indexer.process(
-        source_id=source_id,
-        limit=batch,
-        identify=not no_identify and cfg.library.identify_on_index,
+    resume = f"siteloom library index --config {config}" + (
+        " --all" if all_pending else ""
     )
+    with ProgressReporter(
+        Session,
+        "library-index",
+        target=f"source {source_id}" if source_id else "all sources",
+        resume_command=resume,
+        enabled=not quiet,
+    ) as progress:
+        result = indexer.process(
+            source_id=source_id,
+            limit=batch,
+            identify=not no_identify and cfg.library.identify_on_index,
+            progress=progress,
+        )
     typer.echo(
         f"indexed {result.processed} items ({result.annotations} boxes), "
         f"{result.failed} failed, {result.remaining} still pending"
     )
+    if result.remaining:
+        typer.echo(f"continue with: {resume}")
 
 
 @library_app.command("status")
@@ -160,41 +179,192 @@ def takeout_import(
         False,
         help="Do not auto-verify unambiguous (1 face + 1 name) assignments",
     ),
+    log_file: str = LOG_FILE_OPT,
+    quiet: bool = QUIET_OPT,
 ):
     """Import a Takeout tree: people tags, face detection, name proposals.
 
-    Resumable — rerun the same command to continue where it stopped.
+    Resumable — Ctrl-C saves progress, and rerunning the same command
+    continues where it stopped.
     """
-    _cfg, _Session, indexer = _setup(config)
+    _cfg, Session, indexer = _setup(config, log_file)
     from siteloom.library.takeout import TakeoutImporter
+    from siteloom.progress import ProgressReporter
 
-    importer = TakeoutImporter(
-        indexer, auto_verify_unambiguous=not no_auto_verify
-    )
-    stats = importer.import_tree(
-        path,
-        limit=limit,
-        batch_size=batch_size,
-        include_derivatives=include_derivatives,
-    )
-    typer.echo(
-        f"""Takeout import complete
-  media files seen      {stats.items_seen}
-  edited copies skipped {stats.skipped_derivative}
-  sidecars matched      {stats.sidecars_matched}
-  people tags imported  {stats.people_tags} ({len(stats.people)} distinct people)
-  faces detected        {stats.faces_detected}
-  unambiguous (1:1)     {stats.unambiguous}{'  [auto-verified]' if not no_auto_verify else ''}
-  matched by gallery    {stats.matched}  [needs review]
-  unassigned faces      {stats.unresolved}
+    resume = f'siteloom takeout import "{path}" --config {config}'
+    with ProgressReporter(
+        Session,
+        "takeout-import",
+        target=str(path),
+        resume_command=resume,
+        enabled=not quiet,
+    ) as progress:
+        importer = TakeoutImporter(
+            indexer,
+            auto_verify_unambiguous=not no_auto_verify,
+            progress=progress,
+        )
+        stats = importer.import_tree(
+            path,
+            limit=limit,
+            batch_size=batch_size,
+            include_derivatives=include_derivatives,
+        )
+        timings = progress.summary_lines()
 
-Review at /training before training."""
+    _print_import_summary(stats, no_auto_verify, timings)
+
+
+def _print_import_summary(stats, no_auto_verify: bool, timings: list[str]) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    table = Table(title="Takeout import", show_header=False, title_justify="left")
+    table.add_column(style="dim")
+    table.add_column(justify="right")
+    table.add_column()
+    named = stats.unambiguous + stats.matched
+    total_faces = max(1, stats.faces_detected)
+    table.add_row("media files seen", f"{stats.items_seen:,}", "")
+    table.add_row("edited copies skipped", f"{stats.skipped_derivative:,}", "duplicates of originals")
+    table.add_row("sidecars matched", f"{stats.sidecars_matched:,}", "")
+    table.add_row(
+        "people tags", f"{stats.people_tags:,}", f"{len(stats.people)} distinct people"
     )
+    table.add_row("faces detected", f"{stats.faces_detected:,}", "")
+    table.add_row(
+        "  certain (1 face, 1 name)",
+        f"{stats.unambiguous:,}",
+        "[green]auto-verified[/]" if not no_auto_verify else "needs review",
+    )
+    table.add_row("  matched to gallery", f"{stats.matched:,}", "[yellow]needs review[/]")
+    table.add_row("  unassigned", f"{stats.unresolved:,}", "label manually if wanted")
+    table.add_row(
+        "named coverage",
+        f"{named / total_faces * 100:.0f}%",
+        f"{named:,} of {stats.faces_detected:,} faces",
+    )
+    console.print(table)
+
+    if timings:
+        console.print("[dim]" + " · ".join(t.strip() for t in timings) + "[/]")
     top = sorted(stats.people.items(), key=lambda kv: -kv[1])[:10]
     if top:
-        typer.echo("\nMost-tagged people:")
+        people = Table(title="Most-tagged people", title_justify="left")
+        people.add_column("photos", justify="right")
+        people.add_column("person")
         for name, n in top:
-            typer.echo(f"  {n:5d}  {name}")
+            people.add_row(f"{n:,}", name)
+        console.print(people)
+    console.print(
+        "\nNext: review proposals at [bold]/training[/] "
+        "(run [bold]siteloom serve[/]), then [bold]siteloom train face[/]."
+    )
+
+
+@takeout_app.command("status")
+def takeout_status(config: Path = CONFIG_OPT):
+    """How much of the imported archive is processed, named, and verified."""
+    from rich.console import Console
+    from rich.table import Table
+    from sqlalchemy import func, select
+
+    from siteloom.store import Annotation, ItemTag, LibraryItem, LibrarySource
+
+    cfg, Session, _indexer = _setup(config, level="WARNING")
+    console = Console()
+    with Session() as session:
+        sources = session.scalars(
+            select(LibrarySource).filter_by(kind="takeout")
+        ).all()
+        if not sources:
+            console.print(
+                "No Takeout source imported yet. Run "
+                "[bold]siteloom takeout import <path>[/]"
+            )
+            return
+        for source in sources:
+            items = session.scalar(
+                select(func.count())
+                .select_from(LibraryItem)
+                .filter_by(source_id=source.id)
+            )
+            tagged = session.scalar(
+                select(func.count(func.distinct(ItemTag.item_id)))
+                .select_from(ItemTag)
+                .join(LibraryItem, LibraryItem.id == ItemTag.item_id)
+                .filter(ItemTag.kind == "person", LibraryItem.source_id == source.id)
+            )
+            console.print(
+                f"[bold]{source.name}[/] — {items:,} items, {tagged:,} with people tags"
+            )
+
+        faces = session.scalar(
+            select(func.count()).select_from(Annotation).filter_by(class_name="face")
+        )
+        by_basis = dict(
+            session.execute(
+                select(Annotation.proposal_basis, func.count())
+                .filter(Annotation.class_name == "face")
+                .group_by(Annotation.proposal_basis)
+            ).all()
+        )
+        verified = session.scalar(
+            select(func.count())
+            .select_from(Annotation)
+            .filter(
+                Annotation.class_name == "face",
+                Annotation.verified.is_(True),
+                Annotation.rejected.is_(False),
+            )
+        )
+        rejected = session.scalar(
+            select(func.count())
+            .select_from(Annotation)
+            .filter(Annotation.class_name == "face", Annotation.rejected.is_(True))
+        )
+        ready = session.execute(
+            select(Annotation.proposed_name, func.count())
+            .filter(
+                Annotation.class_name == "face",
+                Annotation.verified.is_(True),
+                Annotation.rejected.is_(False),
+                Annotation.proposed_name.is_not(None),
+            )
+            .group_by(Annotation.proposed_name)
+            .having(func.count() >= cfg.training.min_samples_per_person)
+        ).all()
+        pending_review = session.scalar(
+            select(func.count())
+            .select_from(Annotation)
+            .filter(
+                Annotation.class_name == "face",
+                Annotation.verified.is_(False),
+                Annotation.rejected.is_(False),
+                Annotation.proposed_name.is_not(None),
+            )
+        )
+
+    table = Table(show_header=False, title="Faces", title_justify="left")
+    table.add_column(style="dim")
+    table.add_column(justify="right")
+    table.add_row("detected", f"{faces:,}")
+    for basis, n in sorted(by_basis.items(), key=lambda kv: -kv[1]):
+        table.add_row(f"  {basis or 'unassigned'}", f"{n:,}")
+    table.add_row("verified", f"{verified:,}")
+    table.add_row("rejected", f"{rejected:,}")
+    table.add_row("awaiting review", f"{pending_review:,}")
+    console.print(table)
+    console.print(
+        f"[green]{len(ready)} people[/] have ≥{cfg.training.min_samples_per_person} "
+        "verified samples — enough to include in a fine-tune."
+    )
+    if pending_review:
+        console.print(
+            f"[yellow]{pending_review:,} proposals await review[/] at /training "
+            "(run [bold]siteloom serve[/])."
+        )
 
 
 @takeout_app.command("inspect")
@@ -239,6 +409,163 @@ def takeout_inspect(
     typer.echo(f"{len(people_total)} distinct people tagged")
     for name, n in sorted(people_total.items(), key=lambda kv: -kv[1])[:15]:
         typer.echo(f"  {n:5d}  {name}")
+
+
+# -- jobs ------------------------------------------------------------------
+
+
+@jobs_app.command("list")
+def jobs_list(
+    config: Path = CONFIG_OPT,
+    limit: int = typer.Option(15, help="How many runs to show"),
+):
+    """Recent long-running operations and their outcome."""
+    from rich.console import Console
+    from rich.table import Table
+    from sqlalchemy import select
+
+    from siteloom.progress import humanize
+    from siteloom.store import OperationRun
+
+    _cfg, Session, _indexer = _setup(config, level="WARNING")
+    with Session() as session:
+        runs = session.scalars(
+            select(OperationRun).order_by(OperationRun.id.desc()).limit(limit)
+        ).all()
+        rows = [
+            (
+                r.id,
+                r.kind,
+                r.phase,
+                "stale" if r.is_stale else r.status,
+                r.current,
+                r.total,
+                r.percent,
+                r.elapsed_s,
+                r.eta_s,
+                json.loads(r.counters or "{}"),
+                r.started_at,
+                r.resume_command,
+                r.message,
+            )
+            for r in runs
+        ]
+    if not rows:
+        typer.echo("no operations recorded yet")
+        return
+
+    console = Console()
+    # Narrow terminals truncate every column into uselessness, so the
+    # counters column is dropped below ~110 chars and shown per row
+    # underneath instead.
+    wide = console.width >= 110
+    table = Table(title="Operations", title_justify="left", pad_edge=False)
+    table.add_column("id", justify="right", no_wrap=True)
+    table.add_column("kind", no_wrap=True)
+    table.add_column("phase", no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("progress", justify="right", no_wrap=True)
+    table.add_column("elapsed", justify="right", no_wrap=True)
+    table.add_column("eta", justify="right", no_wrap=True)
+    if wide:
+        table.add_column("counters")
+    colours = {
+        "complete": "green",
+        "running": "cyan",
+        "interrupted": "yellow",
+        "failed": "red",
+        "stale": "red",
+    }
+    for (
+        rid, kind, phase, status, current, total, pct, elapsed, eta, counters,
+        _started, _resume, _message,
+    ) in rows:
+        cells = [
+            str(rid),
+            kind.replace("takeout-import", "takeout").replace("library-index", "index"),
+            phase or "—",
+            f"[{colours.get(status, 'white')}]{status}[/]",
+            f"{current:,}/{total:,} {pct:.0f}%" if total else f"{current:,}",
+            humanize(elapsed),
+            humanize(eta),
+        ]
+        if wide:
+            cells.append(
+                " ".join(f"{k}={v:,}" for k, v in list(counters.items())[:4]) or "—"
+            )
+        table.add_row(*cells)
+    console.print(table)
+
+    for row in rows:
+        rid, status, counters, resume, message = row[0], row[3], row[9], row[11], row[12]
+        if not wide and counters:
+            console.print(
+                f"[dim]#{rid}[/] "
+                + " ".join(f"{k}={v:,}" for k, v in list(counters.items())[:5])
+            )
+        if status in ("interrupted", "stale") and resume:
+            console.print(f"[yellow]#{rid} resume:[/] {resume}")
+        elif status == "failed" and message:
+            console.print(f"[red]#{rid} failed:[/] {message}")
+
+
+@jobs_app.command("watch")
+def jobs_watch(
+    config: Path = CONFIG_OPT,
+    interval: float = typer.Option(2.0, help="Refresh seconds"),
+):
+    """Live view of the currently running operation, from any terminal."""
+    import time
+
+    from rich.console import Console
+    from rich.live import Live
+    from rich.table import Table
+    from sqlalchemy import select
+
+    from siteloom.progress import humanize
+    from siteloom.store import OperationRun
+
+    _cfg, Session, _indexer = _setup(config, level="WARNING")
+    console = Console()
+
+    def render() -> Table:
+        with Session() as session:
+            runs = session.scalars(
+                select(OperationRun)
+                .filter(OperationRun.status == "running")
+                .order_by(OperationRun.id.desc())
+            ).all()
+            table = Table(title="Running operations", title_justify="left")
+            for col in ("id", "kind", "phase", "progress", "rate", "elapsed", "eta", "counters"):
+                table.add_column(col)
+            for r in runs:
+                table.add_row(
+                    str(r.id),
+                    r.kind,
+                    r.phase or "—",
+                    f"{r.current:,}/{r.total:,} ({r.percent:.0f}%)"
+                    if r.total
+                    else f"{r.current:,}",
+                    f"{r.rate:.1f}/s",
+                    humanize(r.elapsed_s),
+                    humanize(r.eta_s),
+                    " ".join(
+                        f"{k}={v:,}"
+                        for k, v in list(json.loads(r.counters or "{}").items())[:4]
+                    )
+                    or "—",
+                )
+            if not runs:
+                table.add_row("—", "nothing running", "", "", "", "", "", "")
+            return table
+
+    with Live(render(), console=console, refresh_per_second=4) as live:
+        try:
+            while True:
+                time.sleep(interval)
+                live.update(render())
+        except KeyboardInterrupt:
+            pass
 
 
 # -- classes ---------------------------------------------------------------
