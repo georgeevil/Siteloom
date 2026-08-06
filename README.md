@@ -186,6 +186,12 @@ pytest                                     # test suite
 pip install -r requirements-plates.txt     # optional plate detection + OCR
 ```
 
+Tests use stub modules and synthetic media, so they need no model weights and
+no cameras. What they cannot check by machine — whether a job really survives a
+kill, a reboot, or a 26k-item archive — is written up as a runbook in
+[docs/testing/resumability-runbook.md](docs/testing/resumability-runbook.md),
+with `scripts/make_resume_corpus.py` to build a corpus big enough to interrupt.
+
 For UniFi Protect, put the console host/credentials under `unifi:` in your
 site YAML and use each camera's Protect id as its `source`.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Build a synthetic media corpus for the resumability runbook (CLI-11).
+"""Build a synthetic media corpus for the resumability runbook (CLD-11).
 
 The interrupt/resume paths can only be exercised over a corpus big
 enough to stop in the middle of, and the repo ships two sample files.

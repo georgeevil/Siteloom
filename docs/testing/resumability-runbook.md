@@ -1,4 +1,4 @@
-# Runbook: do long jobs actually survive Ctrl-C and a restart? (CLI-11)
+# Runbook: do long jobs actually survive Ctrl-C and a restart? (CLD-11)
 
 Scope: everything that goes through `ProgressReporter` (`siteloom/progress.py`)
 — `library index`, `takeout import`, `train enroll` — plus the observation

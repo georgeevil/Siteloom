@@ -91,4 +91,5 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 - Zone hit-testing uses the bbox bottom-center point (Frigate convention) — see `_zones_hit` in `modules/detection.py`.
 - Modules touching biometric/conversational data must be **off by default** (NFR5); voice transcription stays disabled pending legal review (PRD §9).
 - Tests must not require model weights or live cameras: stub modules + synthetic videos (see `tests/conftest.py`); the real-YOLO path is verified via the manual smoke run against `samples/`.
+- **Resumability is guarded by a differential test**, not by inspection: `tests/test_resume_equivalence.py` runs a corpus clean in one database and interrupted-then-resumed in another, and compares by content. Any change to a skip-what's-done query belongs in that harness. Interrupt deterministically with its `InterruptingReporter` (flips the flag a signal handler flips, at a chosen phase and position) — never by racing a real signal in a test.
 - License is AGPL-3.0 — network copyleft; keep it in mind when vendoring code.
