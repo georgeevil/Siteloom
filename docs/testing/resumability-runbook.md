@@ -14,8 +14,8 @@ transaction over the whole job."* Three things have to hold:
    reporting as healthy.
 
 Findings from the first pass through this runbook are in
-[Results](#results-2026-08-06) at the bottom. F1–F6 and F8 are fixed; F7, F9
-and F10 are open.
+[Results](#results-2026-08-06) at the bottom. F1–F6 and F8 are fixed, F10 is
+half built, F7 is open, and F9 moved to its own issue (CLD-12).
 Day-to-day operation of a running deployment — `doctor`, health endpoints,
 service units — is in [operations.md](../operations.md).
 
@@ -195,8 +195,10 @@ contention — neither is observable on a 900-image corpus.
 ## Results (2026-08-06)
 
 Scenario A executed end to end on a 300-image synthetic corpus (Apple M-series,
-`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1–F6 and F8 are fixed
-and re-verified against real runs; F7, F9 and F10 are open.
+`device: mps`, ~10 items/s). Scenarios B–E not yet run by hand, though
+`tests/test_resume_equivalence.py` now covers B's substance automatically.
+F1–F6 and F8 are fixed and re-verified against real runs; F9 is CLD-12; F7 and
+layers 1 and 3 of F10 are open.
 
 **What works.** Interrupt handling is sound at the layer it claims to cover.
 SIGINT at 195/300 finished the in-flight item, committed, recorded
@@ -330,7 +332,7 @@ scoped to the run's `--source-id`, so a per-source run stops reporting the whole
 library's backlog. Verified on three corrupted files: two repaired ones indexed
 on retry, the third stayed `failed` at `x2` attempts.
 
-### F9 — `backfill` and `run` are not jobs at all
+### F9 — `backfill` and `run` are not jobs at all *(split out: CLD-12)*
 
 `siteloom backfill` over a media archive is unambiguously a long-running
 operation (PRD §6.6), and `siteloom/cli.py:backfill` uses no `ProgressReporter`:
@@ -338,10 +340,15 @@ no `OperationRun` row, no bar, no Ctrl-C handling, no resume, and
 `IngestService.run_camera` has no skip-what's-done query. Same for
 `siteloom run`. Either they come under the reporter or CLAUDE.md's "any
 operation that can run for minutes must go through `ProgressReporter`" is not
-true of the codebase. Scoping call for CLI-11: this is the largest gap and
-probably its own issue.
+true of the codebase.
 
-### F10 — no automated coverage of any of this
+**Split out to CLD-12**: the reporter wrapper is trivial, but resumability needs
+a design decision — backfill has no `LibraryItem.status` to filter on, and
+per-frame resume breaks ByteTrack state (a resumed video splits one visit into
+two Events). The issue weighs per-file checkpointing, per-frame offsets, and
+idempotent re-ingest.
+
+### F10 — no automated coverage of any of this *(layer 2 built; 1 and 3 open)*
 
 `tests/test_progress.py` sets `interrupt_requested` by hand; nothing delivers a
 real signal, exercises a CLI command, or asserts that a resumed run reaches the
@@ -362,11 +369,11 @@ SIGINT/SIGTERM/SIGHUP so F4 cannot silently regress, and cover the double-signal
 abort. Add the same shape for `takeout import` and `train enroll`, whose
 post-interrupt paths were the other two F1 sites.
 
-*Layer 2 — the invariant that matters (in-process, ~a second).* **An
-interrupted run plus its resume must land exactly where an uninterrupted run
-lands.** Nothing tests this today, and it is the whole claim of the feature.
-Build it as an equivalence harness over the real `LibraryIndexer` with stub
-detection:
+*Layer 2 — the invariant that matters (in-process, ~a second).* **Built** —
+`tests/test_resume_equivalence.py`. An interrupted run plus its resume must land
+exactly where an uninterrupted run lands, which is the whole claim of the
+feature. An equivalence harness over the real `LibraryIndexer` and the real
+`TakeoutImporter` with stub detection/face modules:
 
 1. index a synthetic corpus of N items uninterrupted; snapshot
    `(item.path, status, attempts)` and `(annotation.item_id, bbox, class_name,
@@ -377,11 +384,20 @@ detection:
 3. assert the two snapshots are equal, and that no item was processed twice
    (`attempts == 1` everywhere).
 
-No signals, no sleeps, fully deterministic. Parametrise k over a batch boundary,
-one item either side of it, and the last item. Then do the same for
-`TakeoutImporter.import_tree`, interrupting in each of its three phases — that
-is where resume is three different skip-what's-done rules rather than a status
-column, and where scenario B's manual work would be replaced.
+No signals, no sleeps, fully deterministic — interrupts are injected by an
+`InterruptingReporter` that flips the same flag a signal handler flips, at a
+chosen phase and position, so the real interrupt path runs without racing a
+signal. Parametrised over k = 1, 4 and 8 of 9 items, and over each of the
+Takeout importer's three interruptible phases (`Reading metadata`, `Detecting
+faces`, `Matching names`) — that is where resume is three different
+skip-what's-done rules rather than a status column, and it covers by machine
+most of what scenario B asks an operator to do by hand.
+
+The suite is mutation-checked, because a differential test that passes against
+broken code is worse than none: dropping the `status="pending"` filter from
+`process()` fails 3 of the 8, and removing pass 1's "this item already has
+faces" skip fails 3 (including the no-duplicate-tags case). Both were restored
+after checking.
 
 *Layer 3 — one honest end-to-end (subprocess, seconds; `@pytest.mark.slow`).*
 Everything above runs in one process, so it cannot catch a signal that never
