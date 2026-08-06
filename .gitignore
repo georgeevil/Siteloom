@@ -231,3 +231,4 @@ training/
 # Local deployment configs (absolute paths, per-machine)
 site.yaml
 archive.yaml
+.playwright-mcp/
