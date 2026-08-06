@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/">
+  <select name="camera">
+    <option value="">All cameras</option>
+    {% for cam in cameras %}
+      <option value="{{ cam.id }}" {% if filters.camera == cam.id %}selected{% endif %}>{{ cam.name }}</option>
+    {% endfor %}
+  </select>
+  <select name="class">
+    <option value="">All classes</option>
+    {% for c in classes %}
+      <option value="{{ c }}" {% if filters['class'] == c %}selected{% endif %}>{{ c }}</option>
+    {% endfor %}
+  </select>
+  <input type="datetime-local" name="since" value="{{ filters.since }}" title="Since">
+  <input type="datetime-local" name="until" value="{{ filters.until }}" title="Until">
+  <button type="submit">Filter</button>
+  {% if filters.camera or filters['class'] or filters.since or filters.until %}
+    <a href="/" style="align-self:center; font-size:0.85rem;">clear</a>
+  {% endif %}
+</form>
+
+{% if events %}
+<div class="grid">
+  {% for e in events %}
+  <a class="card" href="/events/{{ e.id }}">
+    {% if e.best_crop_path %}
+      <img src="/media/{{ e.best_crop_path }}" alt="{{ e.class_name }}" loading="lazy">
+    {% else %}
+      <div class="noimg">no crop</div>
+    {% endif %}
+    <div class="meta">
+      <span class="badge">{{ e.class_name }}</span>
+      {% if e.guest_window %}<span class="badge guest">guest</span>{% endif %}
+      {% if e.track_id is not none %}<span class="muted">track {{ e.track_id }}</span>{% endif %}<br>
+      {{ e.camera.name if e.camera else e.camera_id }}<br>
+      <span class="muted">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} · {{ e.detection_count }} detections</span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+  <p class="muted">No events yet. Run <code>siteloom run --config site.yaml</code> to start ingesting.</p>
+{% endif %}
+
+<div class="pager">
+  {% if page > 1 %}<a href="?camera={{ filters.camera }}&class={{ filters['class'] }}&since={{ filters.since }}&until={{ filters.until }}&page={{ page - 1 }}">&larr; newer</a>{% endif %}
+  {% if has_next %}<a href="?camera={{ filters.camera }}&class={{ filters['class'] }}&since={{ filters.since }}&until={{ filters.until }}&page={{ page + 1 }}">older &rarr;</a>{% endif %}
+</div>
+{% endblock %}

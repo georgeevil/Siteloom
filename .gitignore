@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Siteloom runtime artifacts
+siteloom.db
+media/
+samples/
+*.pt
+identity_db/

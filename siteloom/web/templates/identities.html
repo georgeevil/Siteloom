@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Identities{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/identities">
+  <select name="identifier">
+    <option value="">All identifiers</option>
+    {% for key in identifier_keys %}
+      <option value="{{ key }}" {% if filters.identifier == key %}selected{% endif %}>{{ key }}</option>
+    {% endfor %}
+  </select>
+  <label style="align-self:center; font-size:0.85rem;">
+    <input type="checkbox" name="unlabeled" value="true" {% if filters.unlabeled %}checked{% endif %}>
+    unknown only
+  </label>
+  <button type="submit">Filter</button>
+</form>
+
+{% if identities %}
+<div class="grid">
+  {% for i in identities %}
+  <a class="card" href="/identities/{{ i.id }}">
+    {% if i.best_crop_path %}
+      <img src="/media/{{ i.best_crop_path }}" alt="{{ i.display_name }}" loading="lazy">
+    {% else %}
+      <div class="noimg">no crop</div>
+    {% endif %}
+    <div class="meta">
+      <span class="badge">{{ i.identifier_key }}</span>
+      {% if not i.label %}<span class="badge unknown">unknown</span>{% endif %}
+      {% if i.plate %}<span class="badge plate">{{ i.plate }}</span>{% endif %}<br>
+      <strong>{{ i.display_name }}</strong><br>
+      <span class="muted">seen {{ i.appearance_count }}× · last {{ i.last_seen.strftime('%Y-%m-%d %H:%M') }}</span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+  <p class="muted">No identities yet — they appear as detections are identified.</p>
+{% endif %}
+{% endblock %}

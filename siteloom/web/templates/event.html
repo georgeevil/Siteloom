@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Event {{ event.id }}{% endblock %}
+{% block content %}
+<p><a href="/">&larr; events</a></p>
+<h2 style="margin: 0.4rem 0;">
+  <span class="badge">{{ event.class_name }}</span>
+  {% if event.guest_window %}<span class="badge guest">guest window</span>{% endif %}
+  {{ camera.name if camera else event.camera_id }}
+  {% if event.track_id is not none %}<span class="muted" style="font-size:0.8em;">track {{ event.track_id }}</span>{% endif %}
+</h2>
+
+{% if identity_links %}
+<p>
+  {% for l in identity_links %}
+    <a href="/identities/{{ l.identity.id }}">
+      <span class="badge {% if not l.identity.label %}unknown{% endif %}">{{ l.identity.display_name }}</span></a>
+    {% if l.identity.plate %}<span class="badge plate">{{ l.identity.plate }}</span>{% endif %}
+    <span class="muted" style="font-size:0.8rem;">({{ l.identity.identifier_key }}, sim {{ '%.2f'|format(l.similarity) }})</span>
+  {% endfor %}
+</p>
+{% endif %}
+<p class="muted">
+  {{ event.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} &rarr; {{ event.last_seen.strftime('%H:%M:%S') }}
+  · {{ event.detection_count }} detections
+  · best confidence {{ '%.2f'|format(event.best_confidence) }}
+</p>
+
+<div class="strip">
+  {% for row in detections if row.d.crop_path %}
+    <img src="/media/{{ row.d.crop_path }}" title="{{ row.d.timestamp }} ({{ '%.2f'|format(row.d.confidence) }})" loading="lazy">
+  {% endfor %}
+</div>
+
+<table>
+  <tr><th>Time</th><th>Confidence</th><th>BBox</th><th>Zones</th></tr>
+  {% for row in detections %}
+  <tr>
+    <td>{{ row.d.timestamp.strftime('%H:%M:%S.%f')[:-3] }}</td>
+    <td>{{ '%.2f'|format(row.d.confidence) }}</td>
+    <td class="muted">{{ row.bbox | map('round') | list }}</td>
+    <td>{{ row.zones | join(', ') or '—' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

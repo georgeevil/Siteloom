@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Noise{% endblock %}
+{% block content %}
+<h2 style="font-size:1.05rem;">Noise events</h2>
+<p class="muted" style="font-size:0.85rem;">Sustained loud episodes (dBFS — relative levels, calibrated per microphone).</p>
+{% if noise_events %}
+<table>
+  <tr><th>Camera</th><th>Start</th><th>Duration</th><th>Peak</th><th>Mean</th></tr>
+  {% for n in noise_events %}
+  <tr>
+    <td>{{ n.camera_id }}</td>
+    <td>{{ n.start.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+    <td>{{ ((n.end - n.start).total_seconds() / 60) | round(1) }} min</td>
+    <td>{{ '%.1f'|format(n.peak_db) }} dB</td>
+    <td>{{ '%.1f'|format(n.mean_db) }} dB</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No noise events recorded.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ identity.display_name }}{% endblock %}
+{% block content %}
+<p><a href="/identities">&larr; identities</a></p>
+<h2 style="margin: 0.4rem 0;">
+  <span class="badge">{{ identity.identifier_key }}</span>
+  {{ identity.display_name }}
+  {% if identity.plate %}<span class="badge plate">{{ identity.plate }}</span>{% endif %}
+</h2>
+<p class="muted">
+  class {{ identity.class_name }}
+  · seen {{ identity.appearance_count }}×
+  · {{ identity.first_seen.strftime('%Y-%m-%d %H:%M') }} &rarr; {{ identity.last_seen.strftime('%Y-%m-%d %H:%M') }}
+  · {{ identity.vector_count }} embeddings stored
+</p>
+
+<form class="filters" method="post" action="/identities/{{ identity.id }}/label">
+  <input type="text" name="label" placeholder="Name this identity…" value="{{ identity.label or '' }}" style="min-width:220px;">
+  <button type="submit">{% if identity.label %}Rename{% else %}Label{% endif %}</button>
+  {% if identity.label %}<span class="muted" style="align-self:center; font-size:0.8rem;">clear the field to mark unknown again</span>{% endif %}
+</form>
+
+{% if identity.best_crop_path %}
+<div class="strip"><img src="/media/{{ identity.best_crop_path }}" alt=""></div>
+{% endif %}
+
+<h3 style="font-size:0.95rem;">Sightings</h3>
+{% if links %}
+<table>
+  <tr><th>Event</th><th>Camera</th><th>When</th><th>Similarity</th><th>Hits</th></tr>
+  {% for l in links %}
+  <tr>
+    <td><a href="/events/{{ l.event_id }}">#{{ l.event_id }}</a>
+        {% if l.event.guest_window %}<span class="badge guest">guest window</span>{% endif %}</td>
+    <td>{{ l.event.camera.name if l.event.camera else l.event.camera_id }}</td>
+    <td class="muted">{{ l.event.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+    <td>{{ '%.2f'|format(l.similarity) }}</td>
+    <td>{{ l.hit_count }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No sightings linked yet.</p>
+{% endif %}
+{% endblock %}
