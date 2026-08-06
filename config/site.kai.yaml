@@ -2,10 +2,9 @@
 # Copy to site.yaml (gitignored) and fill in the UniFi password.
 #
 # Console: UniFi Protect 7.1.87 at 192.168.1.77. Camera ids below come from
-# `siteloom cameras`; only these two cameras have RTSP enabled on the console
-# (High channel, 1080p). The other cameras (G5 Turret Ultra, Back door,
-# Gate - Puerta) need RTSP switched on in Protect > camera > Advanced before
-# they can appear here.
+# `siteloom cameras`; only cameras with RTSP enabled on the console appear
+# (High channel, 1080p). G5 Turret Ultra and Gate - Puerta still need RTSP
+# switched on in Protect > camera > Advanced before they can appear here.
 
 site_id: kai-apartments
 site_name: Kai Apartments
@@ -64,5 +63,12 @@ cameras:
     name: Backyard Puerta
     adapter: unifi
     source: 6716b1d401f04503e400095c   # High channel resolves to rtsps://…:7441/lSAtcDET6k5pOaJa
+    sample_fps: 2.0
+    modules: [detection, identity]
+
+  - id: back-door
+    name: Back door
+    adapter: unifi
+    source: 6583a69f02feb903e4000418   # High channel resolves to rtsps://…:7441/4ooKjN4eAkpuFOOq
     sample_fps: 2.0
     modules: [detection, identity]
