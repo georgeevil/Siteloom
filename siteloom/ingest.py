@@ -13,7 +13,7 @@ import signal
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -45,6 +45,13 @@ log = logging.getLogger(__name__)
 LIVE_BACKOFF_S = 2.0
 LIVE_BACKOFF_MAX_S = 60.0
 LIVE_STABLE_S = 30.0
+
+# A detection only joins an existing event if that event was last seen
+# this recently (in frame time). Track ids restart at 1 whenever a
+# tracker is rebuilt — process restart, stream reconnect, the next
+# backfill clip — so track id alone would staple today's visitor onto
+# last week's event.
+EVENT_LINK_GAP_S = 120.0
 
 
 def build_dispatcher(config: SiteConfig) -> JobDispatcher:
@@ -137,22 +144,45 @@ class IngestService:
         try:
             for stream in streams:
                 source = adapter.get_live_stream(stream.id)
-                for frame in source.frames(cam.sample_fps):
-                    self._process_frame(cam, frame)
-                    processed += 1
-                    if max_frames is not None and processed >= max_frames:
-                        return processed
+                processed += self.process_source(
+                    cam,
+                    source,
+                    max_frames=None if max_frames is None else max_frames - processed,
+                )
+                if max_frames is not None and processed >= max_frames:
+                    return processed
                 if cam.adapter == "file":
                     self._process_audio(cam, stream.id)
         finally:
             adapter.close()
         return processed
 
-    def _process_audio(self, cam: CameraConfig, media_path: str) -> None:
+    def process_source(
+        self, cam: CameraConfig, source, max_frames: int | None = None
+    ) -> int:
+        """Run one FrameSource through the frame pipeline.
+
+        This is the seam backfill shares with live ingest (PRD §6.6): a
+        historical clip is just a FrameSource whose base_time is in the
+        past, processed by exactly this code path.
+        """
+        processed = 0
+        for frame in source.frames(cam.sample_fps):
+            self._process_frame(cam, frame)
+            processed += 1
+            if max_frames is not None and processed >= max_frames:
+                break
+        return processed
+
+    def _process_audio(
+        self, cam: CameraConfig, media_path: str, base: datetime | None = None
+    ) -> None:
         """Loud-duration tracking over a file's audio stream (PRD §6.5).
 
         Live-stream audio arrives with the Celery/Ray backends; the file
-        path covers backfill and NVR exports today.
+        path covers backfill and NVR exports today. `base` is the wall
+        time of the file's first sample; without it the file's mtime is
+        used (right for archives, wrong for downloaded clips).
         """
         if "audio" not in cam.modules or not self.config.audio.enabled:
             return
@@ -160,7 +190,10 @@ class IngestService:
 
         if Path(media_path).suffix.lower() in IMAGE_EXTS:
             return
-        base = datetime.fromtimestamp(Path(media_path).stat().st_mtime)
+        if base is None:
+            base = datetime.fromtimestamp(Path(media_path).stat().st_mtime)
+        elif base.tzinfo is not None:
+            base = base.astimezone(timezone.utc).replace(tzinfo=None)
         result = self.dispatcher.submit_and_wait(
             Job(module="audio", payload={"media_path": media_path})
         )
@@ -349,6 +382,11 @@ class IngestService:
                 .order_by(Event.id.desc())
                 .first()
             )
+            if (
+                event is not None
+                and abs((ts - event.last_seen).total_seconds()) > EVENT_LINK_GAP_S
+            ):
+                event = None
         if event is None:
             event = Event(
                 camera_id=camera_id,

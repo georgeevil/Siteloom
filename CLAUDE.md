@@ -19,7 +19,7 @@ The project uses a plain `venv` + `pip` at `./.venv` (Python ≥3.12). Commands 
 
 Dependencies are pinned in `requirements.txt` (runtime, plus `-e .`), `requirements-dev.txt`, and `requirements-plates.txt`; `pyproject.toml` remains the source of truth for ranges — after changing it, re-pin the requirements files.
 
-Backfill a media archive: `siteloom backfill <path> --config ...`; sync guest bookings: `siteloom sync-bookings`. Plate OCR is optional: `pip install -r requirements-plates.txt` (without it the vehicle path degrades to visual re-ID with a logged warning).
+Backfill a media archive: `siteloom backfill <path> --config ...`; index past UniFi Protect recordings: `siteloom backfill-unifi <camera-id> --start <ts> --config ...` (NVR motion/smart-detect windows by default, `--chunk-minutes` for a full sweep; resumable, dedupes by NVR event id in the `backfill_clips` table); sync guest bookings: `siteloom sync-bookings`. The web UI's `/live` page streams shared-reader MJPEG from the same RTSP feeds (`siteloom/web/live.py` — one reader per camera regardless of viewer count, idle-stopped). Plate OCR is optional: `pip install -r requirements-plates.txt` (without it the vehicle path degrades to visual re-ID with a logged warning).
 
 Library/training sub-apps: `siteloom library add|scan|index|status`, `siteloom takeout inspect|import`, `siteloom classes list|add|rebuild`, `siteloom train status|face|export-detector|detector`. Face models (YuNet/SFace ONNX) auto-download to `~/.cache/siteloom/models`.
 

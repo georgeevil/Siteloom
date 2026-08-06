@@ -14,6 +14,7 @@ unifi:
   port: 443
   username: siteloom          # local view-only account
   password: CHANGE-ME
+  api_key: ""                 # optional; unlocks Protect's public API endpoints
   verify_ssl: false           # self-signed console cert
 
 backend:

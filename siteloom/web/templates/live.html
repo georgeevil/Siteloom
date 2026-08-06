@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Live view{% endblock %}
+{% block main_class %}flush{% endblock %}
+{% block content %}
+<style>
+  .lv-wrap { display: flex; flex-direction: column; height: 100%; }
+  .lv-toolbar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--toolbar); border-bottom: 1px solid var(--hairline);
+  }
+  .lv-group { display: flex; align-items: center; gap: 6px; }
+  .lv-group-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .lv-btn {
+    padding: 5px 10px; border-radius: 5px; border: 1px solid var(--control-border);
+    background: transparent; color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .lv-btn:hover { background: oklch(0.26 0.01 250); }
+  .lv-btn.active { background: oklch(0.29 0.05 200); border-color: var(--accent); }
+  .lv-cam-toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; cursor: pointer; }
+  .lv-cam-toggle input { accent-color: var(--accent); }
+
+  .lv-grid { flex: 1; display: grid; gap: 6px; padding: 6px; min-height: 0; overflow: hidden; }
+  .lv-grid[data-layout="1"]     { grid-template-columns: 1fr; }
+  .lv-grid[data-layout="2x2"]   { grid-template-columns: repeat(2, 1fr); grid-auto-rows: 1fr; }
+  .lv-grid[data-layout="3x3"]   { grid-template-columns: repeat(3, 1fr); grid-auto-rows: 1fr; }
+  /* Focus: first visible tile spans big, the rest stack in a right rail. */
+  .lv-grid[data-layout="focus"] { grid-template-columns: 3fr 1fr; grid-auto-rows: 1fr; }
+  .lv-grid[data-layout="focus"] .lv-tile.focused { grid-column: 1; grid-row: 1 / span 6; }
+  .lv-grid[data-layout="focus"] .lv-tile:not(.focused) { grid-column: 2; }
+
+  .lv-tile {
+    position: relative; min-height: 0; border-radius: 6px; overflow: hidden;
+    background: oklch(0.13 0.006 250); border: 1px solid var(--hairline);
+  }
+  .lv-tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .lv-tile .lv-name {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 7px;
+    padding: 5px 9px; font-size: 11px; font-weight: 600;
+    background: linear-gradient(transparent, oklch(0.1 0.005 250 / .85));
+  }
+  .lv-live-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+    animation: slpulse 2s infinite;
+  }
+  .lv-tile.offline .lv-live-dot { background: var(--red); animation: none; }
+  .lv-tile .lv-offline-msg {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    color: var(--muted); font-size: 12px;
+  }
+  .lv-tile.offline .lv-offline-msg { display: flex; }
+  .lv-empty { padding: 40px; color: var(--muted); font-size: 13px; }
+</style>
+
+<div class="lv-wrap">
+  <div class="lv-toolbar">
+    <div class="lv-group" id="lv-layouts">
+      <span class="lv-group-label">Layout</span>
+      <button class="lv-btn" data-layout="1" title="Single">1&#215;1</button>
+      <button class="lv-btn" data-layout="2x2" title="2 by 2 grid">2&#215;2</button>
+      <button class="lv-btn" data-layout="3x3" title="3 by 3 grid">3&#215;3</button>
+      <button class="lv-btn" data-layout="focus" title="One large + rail">Focus</button>
+    </div>
+    <div class="lv-group" id="lv-cams">
+      <span class="lv-group-label">Cameras</span>
+      {% for cam in live_cameras %}
+      <label class="lv-cam-toggle">
+        <input type="checkbox" value="{{ cam.id }}" checked>
+        {{ cam.name or cam.id }}
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if live_cameras %}
+  <div class="lv-grid" id="lv-grid" data-layout="2x2">
+    {% for cam in live_cameras %}
+    <div class="lv-tile" data-cam="{{ cam.id }}">
+      {# Streams start lazily from JS so hidden cameras cost nothing. #}
+      <img alt="{{ cam.name or cam.id }}" data-src="/live/{{ cam.id }}/stream.mjpeg">
+      <div class="lv-offline-msg">stream offline — retrying&#8230;</div>
+      <div class="lv-name"><span class="lv-live-dot"></span>{{ cam.name or cam.id }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="lv-empty">No live cameras configured — file-based cameras have no live stream.</div>
+  {% endif %}
+</div>
+
+<script>
+(function () {
+  var grid = document.getElementById("lv-grid");
+  if (!grid) return;
+  var tiles = Array.prototype.slice.call(grid.querySelectorAll(".lv-tile"));
+  var layoutBtns = Array.prototype.slice.call(
+    document.querySelectorAll("#lv-layouts .lv-btn"));
+  var camBoxes = Array.prototype.slice.call(
+    document.querySelectorAll("#lv-cams input"));
+  var state = { layout: "2x2", cams: null, focused: null };
+  try {
+    var saved = JSON.parse(localStorage.getItem("lv-state") || "{}");
+    if (saved.layout) state.layout = saved.layout;
+    if (Array.isArray(saved.cams)) state.cams = saved.cams;
+    if (saved.focused) state.focused = saved.focused;
+  } catch (e) { /* fresh state */ }
+
+  function save() { localStorage.setItem("lv-state", JSON.stringify(state)); }
+
+  function visibleCams() {
+    return camBoxes.filter(function (b) { return b.checked; })
+                   .map(function (b) { return b.value; });
+  }
+
+  function apply() {
+    grid.setAttribute("data-layout", state.layout);
+    layoutBtns.forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-layout") === state.layout);
+    });
+    var shown = visibleCams();
+    // Single layout shows only the focused (or first selected) camera.
+    var single = state.layout === "1";
+    var focusCam = state.focused && shown.indexOf(state.focused) !== -1
+      ? state.focused : shown[0];
+    tiles.forEach(function (tile) {
+      var cam = tile.getAttribute("data-cam");
+      var show = shown.indexOf(cam) !== -1 && (!single || cam === focusCam);
+      tile.style.display = show ? "" : "none";
+      tile.classList.toggle("focused", state.layout === "focus" && cam === focusCam);
+      var img = tile.querySelector("img");
+      if (show && !img.src) {
+        img.src = img.getAttribute("data-src");
+      } else if (!show && img.src) {
+        // Dropping src closes the MJPEG connection, releasing its
+        // server thread and (eventually) the camera reader.
+        img.removeAttribute("src");
+      }
+    });
+  }
+
+  layoutBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      state.layout = b.getAttribute("data-layout"); save(); apply();
+    });
+  });
+  camBoxes.forEach(function (b) {
+    if (state.cams) b.checked = state.cams.indexOf(b.value) !== -1;
+    b.addEventListener("change", function () {
+      state.cams = visibleCams(); save(); apply();
+    });
+  });
+  tiles.forEach(function (tile) {
+    tile.addEventListener("click", function () {
+      state.focused = tile.getAttribute("data-cam"); save(); apply();
+    });
+    var img = tile.querySelector("img");
+    img.addEventListener("error", function () {
+      tile.classList.add("offline");
+      var src = img.getAttribute("data-src");
+      setTimeout(function () {
+        if (tile.style.display !== "none") img.src = src + "?t=" + Date.now();
+      }, 4000);
+    });
+    img.addEventListener("load", function () { tile.classList.remove("offline"); });
+  });
+  apply();
+})();
+</script>
+{% endblock %}

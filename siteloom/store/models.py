@@ -21,6 +21,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     and_,
     not_,
     or_,
@@ -286,6 +287,38 @@ class Booking(Base):
     summary: Mapped[str] = mapped_column(String, default="")
     start: Mapped[datetime] = mapped_column(DateTime, index=True)
     end: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class BackfillClip(Base):
+    """One NVR recording window queued for backfill (PRD §6.6).
+
+    Same two-phase shape as LibraryItem: a cheap scan registers windows
+    as "pending" (keyed by the NVR's own event id, so re-scanning the
+    same range adds nothing), and an expensive process phase downloads
+    and ingests them in chronological order. That key is also what makes
+    the operation resumable — an interrupted run's remaining clips are
+    simply the ones still pending.
+    """
+
+    __tablename__ = "backfill_clips"
+    __table_args__ = (UniqueConstraint("camera_id", "external_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Siteloom camera id (config), not the NVR's internal camera id.
+    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id"), index=True)
+    # NVR event id, or a synthetic "chunk:<iso>" id for full-range sweeps.
+    external_id: Mapped[str] = mapped_column(String, index=True)
+    kind: Mapped[str] = mapped_column(String, default="motion")
+    start: Mapped[datetime] = mapped_column(DateTime, index=True)
+    end: Mapped[datetime] = mapped_column(DateTime)
+    # pending -> done | failed  (failed is terminal until retried, and
+    # `attempts` distinguishes always-fails from not-retried-yet —
+    # library indexer convention.)
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    frames: Mapped[int] = mapped_column(Integer, default=0)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # --------------------------------------------------------------------------

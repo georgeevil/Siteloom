@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -172,6 +173,102 @@ def backfill(
     service = IngestService(cfg)
     count = service.run_camera(cam)
     typer.echo(f"backfill complete: {count} frames processed from {path}")
+
+
+@app.command()
+def backfill_unifi(
+    ctx: typer.Context,
+    camera: str = typer.Argument(..., help="Configured camera id (adapter: unifi)"),
+    config: Path = CONFIG_OPT,
+    start: datetime = typer.Option(
+        ..., help="Range start (local time unless an offset is given)"
+    ),
+    end: datetime = typer.Option(None, help="Range end (default: now)"),
+    pad_seconds: float = typer.Option(
+        5.0, help="Padding added to each side of an NVR event window"
+    ),
+    chunk_minutes: float = typer.Option(
+        None,
+        help="Sweep the whole range in fixed chunks instead of NVR event windows",
+    ),
+    min_score: int = typer.Option(0, help="Skip NVR events scoring below this"),
+    limit: int = typer.Option(None, help="Max clips processed this run"),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Re-queue clips that failed on an earlier run"
+    ),
+    scan_only: bool = typer.Option(
+        False, "--scan-only", help="Register pending clips without processing them"
+    ),
+    log_file: str = typer.Option(None, "--log-file", help="Also write logs here"),
+    quiet: bool = typer.Option(False, "--quiet", help="No progress bar"),
+):
+    """Index past UniFi Protect recordings (PRD §6.6).
+
+    Asks the NVR for its motion/smart-detect events in the range, then
+    downloads each recorded window and runs it through the exact live
+    pipeline. Resumable — stop and rerun freely; processed windows are
+    remembered by NVR event id.
+    """
+    from siteloom.backfill import UnifiBackfill
+    from siteloom.cli_library import INTERRUPTED_EXIT, _resume_command
+    from siteloom.config import load_config
+    from siteloom.ingest import IngestService
+    from siteloom.progress import ProgressReporter, setup_logging
+
+    setup_logging(level="INFO", log_file=log_file)
+    cfg = load_config(config)
+    cams = {c.id: c for c in cfg.cameras}
+    if camera not in cams:
+        typer.echo(f"no camera {camera!r} in {config}; known: {list(cams)}", err=True)
+        raise typer.Exit(2)
+
+    # Operators type local wall time; the NVR speaks UTC.
+    start = start.astimezone()
+    end = end.astimezone() if end else datetime.now().astimezone()
+
+    service = IngestService(cfg)
+    backfill = UnifiBackfill(service, cams[camera])
+    resume = _resume_command(ctx)
+    result = None
+    with ProgressReporter(
+        service.Session,
+        "backfill-unifi",
+        target=camera,
+        resume_command=resume,
+        bar=not quiet,
+    ) as progress:
+        with progress.phase("Scanning NVR events"):
+            scan = backfill.scan(
+                start,
+                end,
+                pad_s=pad_seconds,
+                chunk_minutes=chunk_minutes,
+                min_score=min_score,
+            )
+        typer.echo(
+            f"scan: +{scan.added} new clip(s), {scan.skipped} already covered, "
+            f"{scan.pending} pending"
+        )
+        if scan_only:
+            return
+        result = backfill.process(
+            limit=limit, retry_failed=retry_failed, progress=progress
+        )
+    if result is None:
+        # Interrupted; the reporter already printed the resume command.
+        raise typer.Exit(INTERRUPTED_EXIT)
+    retried = f"retried {result.retried}, " if result.retried else ""
+    typer.echo(
+        f"{retried}processed {result.processed} clip(s) ({result.frames} frames), "
+        f"{result.failed} failed, {result.remaining} still pending"
+    )
+    if result.remaining:
+        typer.echo(f"continue with: {resume}")
+    if result.failed_total and not retry_failed:
+        typer.echo(
+            f"{result.failed_total} clip(s) failed earlier and will not be "
+            f"retried automatically; retry with: {resume} --retry-failed"
+        )
 
 
 @app.command()
