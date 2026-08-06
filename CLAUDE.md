@@ -8,14 +8,18 @@ Siteloom: a multi-site video & audio intelligence platform (PoC for Kai Apartmen
 
 ## Commands
 
-- `uv sync --extra dev` — install (uv-managed venv; Python ≥3.12)
-- `uv run pytest` — full test suite; single test: `uv run pytest tests/test_ingest.py::test_ingest_end_to_end`
-- `uv run siteloom run --config config/site.example.yaml` — ingest configured cameras (add `--max-frames N` for a quick debug run)
-- `uv run siteloom serve --config ...` — event-browser web UI on :8000
-- `uv run siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
-- `uv run siteloom init-db --config ...` — create tables (run/serve also do this implicitly)
+The project uses a plain `venv` + `pip` at `./.venv` (Python ≥3.12). Commands below use `.venv/bin/...` explicitly so they work without activating; interactively, `source .venv/bin/activate` first and drop the prefix.
 
-Backfill a media archive: `uv run siteloom backfill <path> --config ...`; sync guest bookings: `uv run siteloom sync-bookings`. Plate OCR is optional: `uv sync --extra plates` (without it the vehicle path degrades to visual re-ID with a logged warning).
+- `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt` — install (runtime + test deps, project editable)
+- `.venv/bin/pytest` — full test suite; single test: `.venv/bin/pytest tests/test_ingest.py::test_ingest_end_to_end`
+- `.venv/bin/siteloom run --config config/site.example.yaml` — ingest configured cameras (add `--max-frames N` for a quick debug run)
+- `.venv/bin/siteloom serve --config ...` — event-browser web UI on :8000
+- `.venv/bin/siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
+- `.venv/bin/siteloom init-db --config ...` — create tables (run/serve also do this implicitly)
+
+Dependencies are pinned in `requirements.txt` (runtime, plus `-e .`), `requirements-dev.txt`, and `requirements-plates.txt`; `pyproject.toml` remains the source of truth for ranges — after changing it, re-pin the requirements files.
+
+Backfill a media archive: `siteloom backfill <path> --config ...`; sync guest bookings: `siteloom sync-bookings`. Plate OCR is optional: `pip install -r requirements-plates.txt` (without it the vehicle path degrades to visual re-ID with a logged warning).
 
 Library/training sub-apps: `siteloom library add|scan|index|status`, `siteloom takeout inspect|import`, `siteloom classes list|add|rebuild`, `siteloom train status|face|export-detector|detector`. Face models (YuNet/SFace ONNX) auto-download to `~/.cache/siteloom/models`.
 

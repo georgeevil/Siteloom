@@ -74,7 +74,7 @@ integrations:
 Run it:
 
 ```bash
-uv run siteloom frigate --config site.yaml
+siteloom frigate --config site.yaml
 ```
 
 ### Published topics

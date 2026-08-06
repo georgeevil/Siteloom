@@ -63,11 +63,11 @@ is recognized on a camera immediately.
 in one sitting can be done in chunks:
 
 ```bash
-uv run siteloom library add ~/Pictures/archive     # register a source
-uv run siteloom library scan                       # cheap: register files as pending
-uv run siteloom library index --limit 200          # expensive: detect + identify 200
-uv run siteloom library index --all                # ...come back and finish later
-uv run siteloom library status
+siteloom library add ~/Pictures/archive     # register a source
+siteloom library scan                       # cheap: register files as pending
+siteloom library index --limit 200          # expensive: detect + identify 200
+siteloom library index --all                # ...come back and finish later
+siteloom library status
 ```
 
 **Labeling** lives at `/library/<id>`: draw and correct bounding boxes on a
@@ -96,9 +96,9 @@ face box, so the importer assigns them in two passes:
    proposals; always requires review.
 
 ```bash
-uv run siteloom takeout inspect "~/Takeout/Google Photos"   # dry run, no writes
-uv run siteloom takeout import  "~/Takeout/Google Photos"
-uv run siteloom takeout status                              # what's named/verified
+siteloom takeout inspect "~/Takeout/Google Photos"   # dry run, no writes
+siteloom takeout import  "~/Takeout/Google Photos"
+siteloom takeout status                              # what's named/verified
 ```
 
 Google exports edited copies as `<name>-edited.jpg` with no sidecar of their
@@ -127,8 +127,8 @@ and interruptible rather than opaque:
   looking healthy forever.
 
 ```bash
-uv run siteloom jobs list     # recent runs, progress, outcome, resume commands
-uv run siteloom jobs watch    # live view of whatever is running
+siteloom jobs list     # recent runs, progress, outcome, resume commands
+siteloom jobs watch    # live view of whatever is running
 ```
 
 The `/jobs` page shows the same thing with live progress bars.
@@ -136,9 +136,9 @@ The `/jobs` page shows the same thing with live progress bars.
 ### Training
 
 ```bash
-uv run siteloom train status            # verified samples per person
-uv run siteloom train face              # fine-tune the face embedding
-uv run siteloom train detector          # train a YOLO face detector
+siteloom train status            # verified samples per person
+siteloom train face              # fine-tune the face embedding
+siteloom train detector          # train a YOLO face detector
 ```
 
 `train face` learns a linear projection over SFace features with a
@@ -155,24 +155,27 @@ face belongs to remains the embedding pipeline's job.
 
 ## Quickstart
 
-Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/).
+Requires Python ≥ 3.12.
 
 ```bash
-uv sync --extra dev            # creates ./.venv and installs everything
+python3 -m venv .venv
+source .venv/bin/activate               # every command below assumes this
+pip install -r requirements-dev.txt     # runtime + test deps, project editable
+
 cp config/site.example.yaml site.yaml   # then edit for your site
 
-uv run siteloom run --config site.yaml     # ingest configured cameras
-uv run siteloom serve --config site.yaml   # web UI at http://127.0.0.1:8000
+siteloom run --config site.yaml     # ingest configured cameras
+siteloom serve --config site.yaml   # web UI at http://127.0.0.1:8000
 ```
 
 Useful commands:
 
 ```bash
-uv run siteloom cameras                    # list streams adapters can see (UniFi camera ids)
-uv run siteloom backfill ~/old-footage     # run a photo/video archive through the same pipeline
-uv run siteloom sync-bookings              # pull guest bookings from the configured iCal feed
-uv run pytest                              # test suite
-uv sync --extra plates                     # optional plate detection + OCR
+siteloom cameras                           # list streams adapters can see (UniFi camera ids)
+siteloom backfill ~/old-footage            # run a photo/video archive through the same pipeline
+siteloom sync-bookings                     # pull guest bookings from the configured iCal feed
+pytest                                     # test suite
+pip install -r requirements-plates.txt     # optional plate detection + OCR
 ```
 
 For UniFi Protect, put the console host/credentials under `unifi:` in your
