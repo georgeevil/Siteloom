@@ -260,6 +260,22 @@ def cameras(config: Path = CONFIG_OPT):
         finally:
             adapter.close()
 
+    # First-time setup: a configured console must be listable before any
+    # camera entry references it — this command is how those entries get
+    # their ids in the first place.
+    if "unifi:" not in seen and cfg.unifi.host:
+        from siteloom.adapters.unifi import UniFiProtectAdapter
+
+        adapter = UniFiProtectAdapter(unifi=cfg.unifi)
+        try:
+            adapter.connect()
+            for stream in adapter.list_streams():
+                typer.echo(f"[unifi] {stream.id}  {stream.name}")
+        except Exception as exc:
+            typer.echo(f"[unifi] error: {exc}", err=True)
+        finally:
+            adapter.close()
+
 
 if __name__ == "__main__":
     app()

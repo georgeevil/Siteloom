@@ -1,0 +1,74 @@
+# Kai Apartments — real-site template (CLD-13).
+# Copy to site.yaml (gitignored) and fill in the UniFi password.
+#
+# Console: UniFi Protect 7.1.87 at 192.168.1.77. Camera ids below come from
+# `siteloom cameras`; only cameras with RTSP enabled on the console appear
+# (High channel, 1080p). G5 Turret Ultra and Gate - Puerta still need RTSP
+# switched on in Protect > camera > Advanced before they can appear here.
+
+site_id: kai-apartments
+site_name: Kai Apartments
+
+unifi:
+  host: 192.168.1.77
+  port: 443
+  username: siteloom          # local view-only account
+  password: CHANGE-ME
+  verify_ssl: false           # self-signed console cert
+
+backend:
+  kind: local
+
+detection:
+  model: yolo11n.pt
+  device: mps
+  confidence: 0.4
+
+storage:
+  db_url: sqlite:///siteloom.db
+  media_dir: media
+
+identity:
+  enabled: true
+  vector_db_path: identity_db
+  auto_add_classes: true
+
+audio:
+  enabled: false              # UniFi live path is video-only for now
+
+guests:
+  ical: ""
+  arrival_pre_hours: 2
+  arrival_post_hours: 4
+
+integrations:
+  mqtt:
+    enabled: false
+  frigate:
+    enabled: false
+  recognition_api:
+    enabled: true
+    api_key: ""
+  webhooks: []
+
+cameras:
+  - id: front-yard
+    name: Front Yard
+    adapter: unifi
+    source: 65741eb001071203e4000656   # High channel resolves to rtsps://…:7441/m9rVUe1z8kE7ixAM
+    sample_fps: 2.0
+    modules: [detection, identity]
+
+  - id: backyard-puerta
+    name: Backyard Puerta
+    adapter: unifi
+    source: 6716b1d401f04503e400095c   # High channel resolves to rtsps://…:7441/lSAtcDET6k5pOaJa
+    sample_fps: 2.0
+    modules: [detection, identity]
+
+  - id: back-door
+    name: Back door
+    adapter: unifi
+    source: 6583a69f02feb903e4000418   # High channel resolves to rtsps://…:7441/4ooKjN4eAkpuFOOq
+    sample_fps: 2.0
+    modules: [detection, identity]
