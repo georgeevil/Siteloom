@@ -1,74 +1,204 @@
 {% extends "base.html" %}
-{% block title %}Library{% endblock %}
+{% block title %}Media library{% endblock %}
+{% block subtitle %}archive · {{ site_name }}{% endblock %}
+{% block main_class %}flush{% endblock %}
+
+{% block styles %}
+<style>
+  .filterbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 12px 20px; background: var(--toolbar);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .chip {
+    padding: 5px 10px; border-radius: 20px; font-size: 12px; line-height: 1;
+    border: 1px solid var(--control-border); background: transparent;
+    color: oklch(0.74 0.008 250); text-decoration: none; white-space: nowrap;
+  }
+  .chip:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .chip.on {
+    background: oklch(0.29 0.06 200); border-color: oklch(0.55 0.1 200);
+    color: oklch(0.9 0.08 200);
+  }
+  .chip-sep { width: 1px; height: 18px; background: var(--hairline); margin: 0 2px; }
+  .filterbar select {
+    padding: 5px 8px; border-radius: 6px; font: inherit; font-size: 11px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .retention { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+
+  .scroller { flex: 1; overflow: auto; padding: 16px 20px; }
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  }
+  .mcard {
+    display: block; overflow: hidden; text-decoration: none; color: inherit;
+    background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px;
+  }
+  .mcard:hover { border-color: oklch(0.5 0.06 200); color: inherit; }
+  .media { position: relative; aspect-ratio: 16/9; overflow: hidden; }
+  .media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .media .ph {
+    width: 100%; height: 100%;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 6px, transparent 6px 13px),
+      oklch(0.26 0.01 250);
+  }
+  .state {
+    position: absolute; top: 7px; left: 7px; display: inline-flex; align-items: center;
+    gap: 5px; padding: 3px 7px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .06em; background: oklch(0.16 0.01 250 / .8);
+  }
+  .state i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+  .state.indexed { color: oklch(0.85 0.1 145); } .state.indexed i { background: var(--green); }
+  .state.pending { color: oklch(0.87 0.1 85); }  .state.pending i { background: var(--amber); }
+  .state.failed  { color: oklch(0.86 0.12 30); } .state.failed i  { background: var(--red); }
+  .state.skipped { color: var(--muted); }        .state.skipped i { background: oklch(0.5 0.01 250); }
+  .res {
+    position: absolute; top: 7px; right: 7px; padding: 3px 7px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 9px; color: var(--text);
+    background: oklch(0.16 0.01 250 / .8);
+  }
+  .mbody { padding: 10px 11px; }
+  .mname {
+    font-size: 13px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .msrc { font-size: 11px; color: var(--muted); margin-bottom: 7px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .counts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .cchip {
+    padding: 2px 6px; border-radius: 3px; font-family: var(--font-mono); font-size: 9px;
+    background: var(--raised); color: var(--muted); border: 1px solid var(--hairline);
+  }
+  .cchip.review { color: var(--amber); border-color: oklch(0.42 0.08 85); }
+  .errline {
+    margin-top: 7px; font-family: var(--font-mono); font-size: 9.5px;
+    color: oklch(0.82 0.12 30); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .empty { padding: 40px 4px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+  .pager { display: flex; gap: 16px; margin-top: 20px; font-family: var(--font-mono); font-size: 11px; }
+  .note {
+    margin-top: 16px; padding: 11px; border: 1px dashed var(--control-border);
+    border-radius: 7px; font-size: 11.5px; color: var(--muted); line-height: 1.6;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;">
-  <h2 style="font-size:1.05rem; margin:0.2rem 0;">Media library</h2>
-  <span class="muted" style="font-size:0.85rem;">
-    {% for status, n in counts.items() %}{{ n }} {{ status }}{% if not loop.last %} · {% endif %}{% endfor %}
+{%- set state = {'source_id': filters.source_id, 'status': filters.status,
+                 'person': filters.person, 'needs_review': filters.needs_review} -%}
+<div class="filterbar">
+  {% for tab in status_tabs %}
+    <a class="chip{% if filters.status == tab %} on{% endif %}"
+       href="{{ library_url(state, status=tab, page=1) }}">
+      {{ tab | capitalize if tab else 'All' }}
+      {%- if tab and counts.get(tab) %} · {{ counts[tab] }}{% endif %}
+    </a>
+  {% endfor %}
+  <span class="chip-sep"></span>
+  <a class="chip{% if filters.needs_review %} on{% endif %}"
+     href="{{ library_url(state, needs_review=not filters.needs_review, page=1) }}">Needs review</a>
+
+  <form method="get" action="/library" style="display:flex; gap:6px;">
+    {% if filters.status %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+    {% if filters.needs_review %}<input type="hidden" name="needs_review" value="true">{% endif %}
+    <select name="source_id" onchange="this.form.submit()">
+      <option value="">All sources</option>
+      {% for s in sources %}
+        <option value="{{ s.id }}" {% if filters.source_id == s.id %}selected{% endif %}>
+          {{ s.name or s.path }}
+        </option>
+      {% endfor %}
+    </select>
+    <select name="person" onchange="this.form.submit()">
+      <option value="">Any person tag</option>
+      {% for p in people %}
+        <option value="{{ p }}" {% if filters.person == p %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button type="submit" class="chip">Apply</button></noscript>
+  </form>
+
+  <span class="retention">
+    {{ matched }} of {{ total }} items
+    {%- if counts.get('failed') %} · {{ counts['failed'] }} failed{% endif %}
   </span>
 </div>
 
-<form class="filters" method="get" action="/library">
-  <select name="source_id">
-    <option value="">All sources</option>
-    {% for s in sources %}
-      <option value="{{ s.id }}" {% if filters.source_id == s.id %}selected{% endif %}>{{ s.name }} ({{ s.kind }})</option>
+<div class="scroller">
+  {% if items %}
+  <div class="grid">
+    {% for i in items %}
+    <a class="mcard" href="/library/{{ i.id }}">
+      <div class="media">
+        {% if i.thumb_path %}
+          <img src="/media/{{ i.thumb_path }}" alt="" loading="lazy">
+        {% else %}
+          <div class="ph"></div>
+        {% endif %}
+        <span class="state {{ i.status }}"><i></i>{{ i.status }}</span>
+        {% if i.width and i.height %}
+          <span class="res">{{ i.width }}×{{ i.height }}</span>
+        {% elif i.kind %}
+          <span class="res">{{ i.kind }}</span>
+        {% endif %}
+      </div>
+      <div class="mbody">
+        <div class="mname">{{ i.name }}</div>
+        <div class="msrc">
+          {{ source_names.get(i.source_id, 'unknown source') }}
+          {%- if i.taken_at %} · {{ i.taken_at.strftime('%Y-%m-%d') }}{% endif %}
+        </div>
+        <div class="counts">
+          <span class="cchip">{{ box_counts.get(i.id, 0) }} box{{ '' if box_counts.get(i.id, 0) == 1 else 'es' }}</span>
+          {% if i.kind == 'video' and i.duration_s %}
+            <span class="cchip">{{ i.duration_s | round | int }}s</span>
+          {% endif %}
+          {% if i.reviewed %}
+            <span class="cchip">reviewed</span>
+          {% elif box_counts.get(i.id, 0) %}
+            <span class="cchip review">needs review</span>
+          {% endif %}
+          {% if i.status == 'failed' and i.attempts %}
+            <span class="cchip">{{ i.attempts }} attempt{{ '' if i.attempts == 1 else 's' }}</span>
+          {% endif %}
+        </div>
+        {% if i.status == 'failed' and i.error %}
+          <div class="errline" title="{{ i.error }}">{{ i.error }}</div>
+        {% endif %}
+      </div>
+    </a>
     {% endfor %}
-  </select>
-  <select name="status">
-    <option value="">Any status</option>
-    {% for s in ['pending', 'indexed', 'failed', 'skipped'] %}
-      <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s }}</option>
-    {% endfor %}
-  </select>
-  <select name="person">
-    <option value="">Any person tag</option>
-    {% for p in people %}
-      <option value="{{ p }}" {% if filters.person == p %}selected{% endif %}>{{ p }}</option>
-    {% endfor %}
-  </select>
-  <label style="align-self:center; font-size:0.85rem;">
-    <input type="checkbox" name="needs_review" value="true" {% if filters.needs_review %}checked{% endif %}>
-    needs review
-  </label>
-  <button type="submit">Filter</button>
-  <a href="/library" style="align-self:center; font-size:0.85rem;">clear</a>
-</form>
+  </div>
 
-{% if items %}
-<div class="grid">
-  {% for i in items %}
-  <a class="card" href="/library/{{ i.id }}">
-    {% if i.thumb_path %}
-      <img src="/media/{{ i.thumb_path }}" alt="{{ i.name }}" loading="lazy">
-    {% else %}
-      <div class="noimg">{{ i.status }}</div>
-    {% endif %}
-    <div class="meta">
-      <span class="badge">{{ i.kind }}</span>
-      {% if i.status == 'failed' %}<span class="badge unknown">failed</span>
-      {% elif i.status == 'pending' %}<span class="badge">pending</span>{% endif %}
-      {% if i.reviewed %}<span class="badge guest">reviewed</span>{% endif %}<br>
-      <span style="word-break:break-all;">{{ i.name }}</span><br>
-      <span class="muted">
-        {{ box_counts.get(i.id, 0) }} box{{ '' if box_counts.get(i.id, 0) == 1 else 'es' }}
-        {%- if i.taken_at %} · {{ i.taken_at.strftime('%Y-%m-%d') }}{% endif %}
-      </span>
-    </div>
-  </a>
-  {% endfor %}
-</div>
-{% else %}
-  <p class="muted">
-    Nothing indexed yet. Add a directory with
-    <code>siteloom library add &lt;path&gt;</code> then
-    <code>siteloom library index</code>.
+  {% if filters.status == 'failed' %}
+  <p class="note">
+    Failed items are not pending — nothing retries them on the next pass.
+    Re-queue them explicitly with
+    <code>siteloom library index --retry-failed</code>. A file that fails for
+    a structural reason will fail again identically, which is why the retry
+    is opt-in and <code>attempts</code> is recorded.
   </p>
-{% endif %}
+  {% endif %}
 
-<div class="pager">
-  {% set qs = 'source_id=' ~ filters.source_id ~ '&status=' ~ filters.status ~ '&person=' ~ filters.person ~ ('&needs_review=true' if filters.needs_review else '') %}
-  {% if page > 1 %}<a href="?{{ qs }}&page={{ page - 1 }}">&larr; previous</a>{% endif %}
-  {% if has_next %}<a href="?{{ qs }}&page={{ page + 1 }}">next &rarr;</a>{% endif %}
+  <div class="pager">
+    {% if page > 1 %}<a href="{{ library_url(state, page=page-1) }}">&larr; previous</a>{% endif %}
+    {% if has_next %}<a href="{{ library_url(state, page=page+1) }}">next &rarr;</a>{% endif %}
+  </div>
+  {% else %}
+  <p class="empty">
+    {% if filters.status or filters.person or filters.needs_review or filters.source_id %}
+      Nothing matches these filters. <a href="/library">Clear them</a>.
+    {% else %}
+      Nothing indexed yet. Register a directory with
+      <code>siteloom library add &lt;path&gt;</code>, then
+      <code>siteloom library scan</code> to register files and
+      <code>siteloom library index</code> to process them a batch at a time.
+    {% endif %}
+  </p>
+  {% endif %}
 </div>
 {% endblock %}

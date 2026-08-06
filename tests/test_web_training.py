@@ -175,3 +175,34 @@ def test_bad_filter_values_fall_back_rather_than_error(env):
     r = client.get("/training", params={"show": "../etc", "kind": "nope", "size": "xl"})
     assert r.status_code == 200
     assert 'class="crops size-m"' in r.text
+
+
+def test_library_tabs_split_failed_from_pending(env):
+    """The whole point of the status tabs: a failed item is not queued."""
+    client, _ = env
+    assert client.get("/library", params={"status": "pending"}).text.count(
+        'class="mcard"'
+    ) == 2  # one per source
+    assert client.get("/library", params={"status": "failed"}).text.count(
+        'class="mcard"'
+    ) == 1
+    assert client.get("/library", params={"status": "indexed"}).text.count(
+        'class="mcard"'
+    ) == 2
+
+
+def test_library_explains_retry_only_where_it_applies(env):
+    """Telling someone to run --retry-failed on a page with no failures is
+    noise; omitting it on the failed tab strands the items silently."""
+    client, _ = env
+    assert "retry-failed" in client.get("/library", params={"status": "failed"}).text
+    assert "retry-failed" not in client.get("/library").text
+
+
+def test_library_filters_survive_a_tab_change(env):
+    client, _ = env
+    body = client.get(
+        "/library", params={"status": "pending", "source_id": 1}
+    ).text
+    # Every tab link must carry the source filter forward.
+    assert body.count("source_id=1") >= len(("", "indexed", "pending", "failed"))

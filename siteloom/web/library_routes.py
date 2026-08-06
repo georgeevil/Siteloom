@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -99,6 +100,20 @@ def _class_hue(name: str) -> int:
     # Stable per name rather than positional, so a class keeps its colour
     # when another is added or removed.
     return (sum(ord(c) for c in name) * 37) % 360
+
+
+def _library_url(base: dict, **overrides) -> str:
+    """A link to the library with some filters changed, keeping the rest."""
+    params: list[tuple[str, str]] = []
+    merged = {**base, **overrides}
+    for key in ("source_id", "status", "person"):
+        if merged.get(key):
+            params.append((key, str(merged[key])))
+    if merged.get("needs_review"):
+        params.append(("needs_review", "true"))
+    if merged.get("page") and int(merged["page"]) > 1:
+        params.append(("page", str(merged["page"])))
+    return "/library?" + urlencode(params) if params else "/library"
 
 
 def _class_rows(config, seen: dict) -> list[dict]:
@@ -245,6 +260,8 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     .group_by(Annotation.item_id)
                 ).all()
             )
+            matched = session.scalar(select(func.count()).select_from(q.subquery()))
+            source_names = {s.id: (s.name or s.path) for s in sources}
         return templates.TemplateResponse(
             request,
             "library.html",
@@ -252,6 +269,11 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 items=items,
                 sources=sources,
                 counts=counts,
+                matched=matched,
+                total=sum(counts.values()),
+                source_names=source_names,
+                status_tabs=("", "indexed", "pending", "failed", "skipped"),
+                library_url=_library_url,
                 people=people,
                 box_counts=box_counts,
                 filters={
