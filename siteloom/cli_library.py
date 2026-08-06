@@ -684,7 +684,14 @@ def train_status(config: Path = CONFIG_OPT):
 
 
 @train_app.command("face")
-def train_face(config: Path = CONFIG_OPT):
+def train_face(
+    config: Path = CONFIG_OPT,
+    apply_threshold: bool = typer.Option(
+        False,
+        "--apply-threshold",
+        help="Write the newly-tuned face threshold back to the config",
+    ),
+):
     """Fine-tune the face embedding on verified samples.
 
     Learns a linear projection over SFace features so your people separate
@@ -742,18 +749,44 @@ def train_face(config: Path = CONFIG_OPT):
         run.notes = result.message
         session.commit()
 
+    old_threshold = result.after.threshold
+    new_threshold = result.after.best_threshold
     typer.echo(
         f"""
   people            {result.people}
   train / val       {result.train_samples} / {result.val_samples}
   AUC               {result.before.auc:.4f} -> {result.after.auc:.4f}
-  accuracy @{result.after.threshold:.2f}    {result.before.accuracy:.4f} -> {result.after.accuracy:.4f}
   same/diff margin  {result.before.margin:.4f} -> {result.after.margin:.4f}
+  accuracy @{old_threshold:.2f}    {result.before.accuracy:.4f} -> {result.after.accuracy:.4f}
+  accuracy @{new_threshold:.2f} (tuned) {result.after.best_accuracy:.4f}
 
 {result.message}"""
     )
     if result.projection_path:
         typer.echo(f"projection: {result.projection_path}")
+
+    # A projection reshapes the similarity distribution, so the previous
+    # threshold is stale. Judging the new space at the old cutoff
+    # understates it, and leaving the cutoff unchanged in production
+    # throws away most of the gain.
+    if result.improved and abs(new_threshold - old_threshold) > 0.01:
+        if apply_threshold:
+            from siteloom.config import save_config
+
+            cfg.identity.identifiers["face"].threshold = round(new_threshold, 3)
+            written = save_config(cfg)
+            typer.echo(
+                f"\nface threshold {old_threshold:.2f} -> {new_threshold:.2f} "
+                f"written to {written}"
+            )
+        else:
+            typer.echo(
+                f"\n[!] The new embedding space wants a different threshold: "
+                f"{old_threshold:.2f} -> {new_threshold:.2f} "
+                f"(accuracy {result.after.accuracy:.4f} -> {result.after.best_accuracy:.4f}).\n"
+                f"    Re-run with --apply-threshold to write it to your config, "
+                f"or set identity.identifiers.face.threshold manually."
+            )
 
 
 @train_app.command("export-detector")

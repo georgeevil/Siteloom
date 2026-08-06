@@ -159,6 +159,21 @@ def test_evaluate_embeddings_random_is_chance():
     assert 0.3 < metrics.auc < 0.7  # no real signal
 
 
+def test_best_threshold_found_when_default_is_wrong():
+    """A fine-tune reshapes the similarity distribution, so evaluating at
+    the old cutoff understates it. The sweep must find the right one."""
+    # Same-person pairs sit near 0.8, different near 0.5 — a threshold of
+    # 0.1 calls everything a match.
+    a = np.tile(np.array([1.0, 0.0], dtype=np.float32), (4, 1))
+    b = np.tile(np.array([0.6, 0.8], dtype=np.float32), (4, 1))
+    vectors = np.vstack([a, b])
+    people = ["Ann"] * 4 + ["Bob"] * 4
+    metrics = evaluate_embeddings(vectors, people, threshold=0.1)
+    assert metrics.accuracy < 0.9  # bad at the stale cutoff
+    assert metrics.best_accuracy == 1.0  # perfect at the tuned one
+    assert 0.6 < metrics.best_threshold < 1.0
+
+
 def test_evaluate_single_class_is_degenerate():
     vectors = np.eye(3, dtype=np.float32)
     assert evaluate_embeddings(vectors, ["Ann"] * 3).auc == 0.0
