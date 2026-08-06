@@ -58,6 +58,29 @@
       background: light-dark(#fff4dd, #4a3a14); color: light-dark(#8a6410, #ffd47e);
       text-transform: none; font-family: ui-monospace, monospace;
     }
+    .badge.ok {
+      background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
+      text-transform: none;
+    }
+    .badge.bad {
+      background: light-dark(#fdeeee, #4a1f22); color: light-dark(#b3261e, #ff9d96);
+      text-transform: none;
+    }
+    .badge.missed {
+      background: light-dark(#fff4dd, #4a3a14); color: light-dark(#8a6410, #ffd47e);
+      text-transform: none;
+    }
+    .verdict { display: inline-flex; gap: 0.25rem; vertical-align: middle; }
+    .verdict button {
+      padding: 0 0.45rem; border-radius: 999px; font-size: 0.78rem; cursor: pointer;
+      border: 1px solid light-dark(#d0d0d5, #3a3a40);
+      background: light-dark(#fff, #232328); color: inherit; opacity: 0.65;
+    }
+    .verdict button:hover { opacity: 1; }
+    .verdict button.on.ok { background: light-dark(#e6f6ea, #17402a);
+      color: light-dark(#1c7c3c, #7fd89d); opacity: 1; }
+    .verdict button.on.bad { background: light-dark(#fdeeee, #4a1f22);
+      color: light-dark(#b3261e, #ff9d96); opacity: 1; }
     .muted { opacity: 0.55; }
     .pager { margin-top: 1.2rem; display: flex; gap: 1rem; font-size: 0.9rem; }
     table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }

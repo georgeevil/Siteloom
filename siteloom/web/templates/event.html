@@ -12,13 +12,33 @@
 {% if identity_links %}
 <p>
   {% for l in identity_links %}
+    <span style="white-space:nowrap;">
     <a href="/identities/{{ l.identity.id }}">
       <span class="badge {% if not l.identity.label %}unknown{% endif %}">{{ l.identity.display_name }}</span></a>
     {% if l.identity.plate %}<span class="badge plate">{{ l.identity.plate }}</span>{% endif %}
     <span class="muted" style="font-size:0.8rem;">({{ l.identity.identifier_key }}, sim {{ '%.2f'|format(l.similarity) }})</span>
+    <form class="verdict" method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/verdict">
+      <button name="verdict" value="{% if l.verdict == 'confirmed' %}clear{% else %}confirmed{% endif %}"
+              class="ok {% if l.verdict == 'confirmed' %}on{% endif %}"
+              title="{% if l.verdict == 'confirmed' %}confirmed — click to clear{% else %}mark correct{% endif %}">&#10003;</button>
+      <button name="verdict" value="{% if l.verdict == 'wrong' %}clear{% else %}wrong{% endif %}"
+              class="bad {% if l.verdict == 'wrong' %}on{% endif %}"
+              title="{% if l.verdict == 'wrong' %}marked wrong — click to clear{% else %}mark wrong{% endif %}">&#10007;</button>
+    </form>
+    </span>
   {% endfor %}
 </p>
 {% endif %}
+
+<form class="verdict" method="post" action="/events/{{ event.id }}/missed" style="margin:0.3rem 0 0.6rem;">
+  {% if event.missed_identity %}
+    <span class="badge missed">missed identity</span>
+    <button name="missed" value="0" title="clear the missed mark">undo</button>
+  {% else %}
+    <button name="missed" value="1"
+            title="an identifiable face/plate was present but nothing was claimed">mark missed identity</button>
+  {% endif %}
+</form>
 <p class="muted">
   {{ event.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} &rarr; {{ event.last_seen.strftime('%H:%M:%S') }}
   · {{ event.detection_count }} detections

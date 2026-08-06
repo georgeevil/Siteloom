@@ -51,6 +51,11 @@ class Event(Base):
     # True if the event falls inside a known guest arrival window
     # (booking correlation, PRD §6.7) — used to suppress false alarms.
     guest_window: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Operator-recorded miss (CLD-16): an identifiable subject was present
+    # but the system claimed no identity for it. Kept as a flag on the
+    # event so accuracy queries stay one-table simple.
+    missed_identity: Mapped[bool] = mapped_column(Boolean, default=False)
+    missed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     camera: Mapped[Camera] = relationship(back_populates="events")
     detections: Mapped[list["Detection"]] = relationship(back_populates="event")
@@ -116,6 +121,13 @@ class EventIdentity(Base):
     identity_id: Mapped[int] = mapped_column(ForeignKey("identities.id"), index=True)
     similarity: Mapped[float] = mapped_column(Float, default=0.0)
     hit_count: Mapped[int] = mapped_column(Integer, default=1)
+    # Human review of this identity claim (CLD-16): None = unreviewed,
+    # "confirmed" or "wrong". A wrong verdict is persisted, never deleted
+    # (the Annotation provenance philosophy — negatives are data), and it
+    # must not mutate the vector store here; resolver-side learning from
+    # verdicts is separate work.
+    verdict: Mapped[str | None] = mapped_column(String, nullable=True)
+    verdict_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="identities")
     identity: Mapped[Identity] = relationship(back_populates="events")
