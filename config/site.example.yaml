@@ -1,0 +1,47 @@
+# Example Siteloom site configuration.
+# Copy to site.yaml and adjust for your deployment.
+
+site_id: kai-apartments
+site_name: Kai Apartments
+
+unifi:
+  host: 192.168.1.1
+  port: 443
+  username: siteloom
+  password: change-me
+  verify_ssl: false
+
+backend:
+  kind: local   # PoC: synchronous in-process execution (PRD §7)
+
+detection:
+  model: yolo11n.pt
+  device: mps
+  confidence: 0.4
+
+storage:
+  db_url: sqlite:///siteloom.db
+  media_dir: media
+
+cameras:
+  # A local video file — useful for development/testing without live
+  # cameras, and the seed of the backfill path (PRD §6.6).
+  - id: sample-file
+    name: Sample clip
+    adapter: file
+    source: ./samples/sample.mp4
+    sample_fps: 2.0
+    modules: [detection]
+
+  # A UniFi Protect camera. `source` is the Protect camera id
+  # (see `siteloom cameras` to list them).
+  # - id: driveway
+  #   name: Driveway
+  #   adapter: unifi
+  #   source: 6459fabc0123456789abcdef
+  #   sample_fps: 2.0
+  #   modules: [detection]
+  #   require_zone: true
+  #   zones:
+  #     - name: driveway-entrance
+  #       points: [[0.1, 0.5], [0.9, 0.5], [0.9, 1.0], [0.1, 1.0]]

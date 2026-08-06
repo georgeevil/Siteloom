@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Siteloom{% endblock %} — {{ site_name }}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0; background: light-dark(#f5f5f7, #111114);
+      color: light-dark(#1c1c1e, #e5e5ea);
+    }
+    header {
+      padding: 0.8rem 1.2rem; display: flex; align-items: baseline; gap: 0.8rem;
+      background: light-dark(#fff, #1c1c20);
+      border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31);
+    }
+    header h1 { font-size: 1.05rem; margin: 0; }
+    header .site { opacity: 0.6; font-size: 0.9rem; }
+    main { padding: 1.2rem; max-width: 1200px; margin: 0 auto; }
+    a { color: light-dark(#0a63c9, #6cb2ff); text-decoration: none; }
+    .filters { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .filters select, .filters input, .filters button {
+      padding: 0.35rem 0.55rem; border-radius: 7px; font-size: 0.85rem;
+      border: 1px solid light-dark(#d0d0d5, #3a3a40);
+      background: light-dark(#fff, #232328); color: inherit;
+    }
+    .grid {
+      display: grid; gap: 0.9rem;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    }
+    .card {
+      background: light-dark(#fff, #1c1c20); border-radius: 10px; overflow: hidden;
+      border: 1px solid light-dark(#e2e2e6, #2c2c31); display: block; color: inherit;
+    }
+    .card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block;
+      background: light-dark(#e9e9ee, #26262b); }
+    .card .noimg { width: 100%; aspect-ratio: 4/3; display: flex; align-items: center;
+      justify-content: center; opacity: 0.4; font-size: 0.8rem;
+      background: light-dark(#e9e9ee, #26262b); }
+    .card .meta { padding: 0.5rem 0.65rem; font-size: 0.8rem; line-height: 1.45; }
+    .badge {
+      display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
+      font-size: 0.72rem; font-weight: 600; text-transform: capitalize;
+      background: light-dark(#e8f0fe, #1e3a5f); color: light-dark(#0a63c9, #9cc7ff);
+    }
+    .muted { opacity: 0.55; }
+    .pager { margin-top: 1.2rem; display: flex; gap: 1rem; font-size: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31); }
+    .strip { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+    .strip img { height: 110px; border-radius: 7px;
+      border: 1px solid light-dark(#e2e2e6, #2c2c31); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><a href="/">Siteloom</a></h1>
+    <span class="site">{{ site_name }}</span>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>
