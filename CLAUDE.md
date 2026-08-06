@@ -70,6 +70,7 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 - **Ctrl-C is a feature**: the first interrupt sets a flag, the loop finishes its batch, commits, records `interrupted`, and prints the resume command; a second aborts. Every long operation must therefore be resumable — batch commits plus a skip-what's-done query, never a single transaction over the whole job. SIGTERM and SIGHUP are handled identically (`STOP_SIGNALS`) — a job that only honours SIGINT survives the operator and dies to the machine, which is backwards.
 - **The reporter swallows `Interrupted`** so it can record the run, which leaves anything assigned inside the `with` block unbound. Every caller pre-binds its result to `None` and exits `INTERRUPTED_EXIT` (130) instead of formatting a summary of work that never happened.
 - `bar=False` hides the progress bar; `enabled=False` switches the whole reporter off. Never conflate them — a user asking for a quieter terminal must not silently lose the heartbeat and the signal handler.
+- **The resume command is rebuilt from the invocation** (`_resume_command(ctx)`), never composed from a couple of interesting fields — that dropped every other flag, so resuming a `--no-auto-verify` import started auto-verifying, writing unreviewed annotations that `training/dataset.py` reads as ground truth. New long-running commands take `ctx: typer.Context` and pass `_resume_command(ctx)`.
 
 ### Manageability (`siteloom/health.py`, `siteloom doctor`, `jobs cancel|reap`)
 

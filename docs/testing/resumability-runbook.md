@@ -14,10 +14,9 @@ transaction over the whole job."* Three things have to hold:
    reporting as healthy.
 
 Findings from the first pass through this runbook are in
-[Results](#results-2026-08-06) at the bottom. F1–F4 and F6 are fixed; F5 and
-F7–F10 are open, and F5 in particular changes how you should read a resume
-command. Day-to-day operation of a running deployment — `doctor`, health
-endpoints, service units — is in [operations.md](../operations.md).
+[Results](#results-2026-08-06) at the bottom. F1–F6 are fixed; F7–F10 are open.
+Day-to-day operation of a running deployment — `doctor`, health endpoints,
+service units — is in [operations.md](../operations.md).
 
 ## 0. Setup
 
@@ -128,7 +127,7 @@ stop when the label matches:
 | `Scanning archive` | none — pure filesystem walk | restart just redoes it; cost only |
 | `Reading metadata` | item looked up by path; tags de-duplicated | rerun must not duplicate `item_tags` rows |
 | `Detecting faces` (pass 1) | item skipped if it already has any `face` annotation; gallery rebuilt from prior `unambiguous` crops | `resumed=N` counter climbs; total face count after resume == count from an uninterrupted run |
-| `Matching names` (pass 2) | annotations with `proposed_name IS NULL` | see F5 — faces that pass 2 legitimately *cannot* name stay NULL, so they are reprocessed on every resume |
+| `Matching names` (pass 2) | annotations with `proposed_name IS NULL` | see F7 — faces that pass 2 legitimately *cannot* name stay NULL, so they are reprocessed on every resume |
 
 Pass criteria: the union of (interrupted run + resume) produces the same
 `annotations` rows — same count, same `proposed_name`/`proposal_basis`
@@ -195,8 +194,8 @@ contention — neither is observable on a 900-image corpus.
 ## Results (2026-08-06)
 
 Scenario A executed end to end on a 300-image synthetic corpus (Apple M-series,
-`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1–F4 and F6 are fixed
-and re-verified against real signals; F5 and F7–F10 are open.
+`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1–F6 are fixed and
+re-verified against real signals; F7–F10 are open.
 
 **What works.** Interrupt handling is sound at the layer it claims to cover.
 SIGINT at 195/300 finished the in-flight item, committed, recorded
@@ -275,7 +274,7 @@ same signal still aborts immediately. Verified: `kill -TERM` mid-run finished
 the batch, committed at 83/228, recorded `interrupted` and printed the resume
 command. `siteloom jobs cancel <id>` sends it from another terminal.
 
-### F5 — resume commands are not faithful to the original invocation
+### F5 — resume commands are not faithful to the original invocation *(fixed)*
 
 The stored command is rebuilt from two fields, not from the actual arguments:
 
@@ -291,11 +290,20 @@ The stored command is rebuilt from two fields, not from the actual arguments:
 This is the issue's actual question ("does the printed resume command work?"):
 it works, but it can resume a *different* job than the one you stopped.
 
+**Fixed**: the command is rebuilt from the parsed parameters
+(`_resume_command(ctx)`), so it cannot drift from the real signature — the
+parameters *are* the signature. Non-default flags are all carried, values are
+`shlex`-quoted, and `--config` is always explicit so a line read out of `jobs
+list` is unambiguous about which deployment it touches. Verified: interrupting
+`library index --source-id 1 --no-identify --limit 400` now prints exactly that
+back. Covered by three tests in `tests/test_cli_interrupt.py`.
+
 ### F6 — the resume line hard-wraps and can't be copy-pasted *(fixed)*
 
 Rich wraps the command at console width; in a non-TTY (80 cols) the path broke
 across three lines. **Fixed**: printed with `soft_wrap=True` and no
-highlighting, so it survives a redirect to a log file.
+highlighting — in the job's own terminal and in `siteloom jobs list` — so it
+survives a redirect to a log file.
 
 ### F7 — pass-2 resume reprocesses every unnamed face
 

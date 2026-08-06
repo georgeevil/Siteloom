@@ -70,6 +70,53 @@ def _light_setup(config_path, level: str = "INFO"):
     return config, get_session(engine)
 
 
+def _resume_command(ctx: typer.Context) -> str:
+    """This invocation, rebuilt from the parsed parameters.
+
+    A resume line is a promise that rerunning it continues *this* job.
+    Composing it from a couple of interesting fields quietly broke that
+    promise: it dropped every other flag, so resuming a
+    `--no-auto-verify` import started auto-verifying — writing
+    unreviewed annotations that `training/dataset.py` reads as ground
+    truth. Rebuilding from `ctx` cannot drift from the real signature,
+    because the parameters are the signature.
+    """
+    import shlex
+
+    # The subcommand chain, under a fixed program name: `ctx.command_path`
+    # starts with whatever argv[0] happened to be (a venv path, "root"
+    # under a test runner), and a resume line has to be pasteable.
+    parts = ["siteloom", *ctx.command_path.split()[1:]]
+    for param in ctx.command.params:
+        if param.name not in ctx.params:
+            continue
+        value = ctx.params[param.name]
+        if value is None:
+            continue
+        # Positionals carry a bare name where options carry flags. Don't
+        # test the class — typer's TyperArgument is not a click.Argument.
+        if param.opts and not param.opts[0].startswith("-"):
+            parts.append(shlex.quote(str(value)))
+            continue
+        # --config even at its default: it decides which deployment the
+        # command touches, and a resume line read out of `jobs list` has
+        # to be unambiguous about that.
+        if value == param.default and param.name != "config":
+            continue
+        if isinstance(value, bool):
+            # A bool that differs from its default is expressed by one of
+            # the two flags typer generated for it.
+            flags = param.opts if value else (param.secondary_opts or param.opts)
+            if flags:
+                parts.append(flags[0])
+            continue
+        if not param.opts:
+            continue
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            parts.extend([param.opts[0], shlex.quote(str(item))])
+    return " ".join(parts)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -118,6 +165,7 @@ def library_scan(
 
 @library_app.command("index")
 def library_index(
+    ctx: typer.Context,
     config: Path = CONFIG_OPT,
     source_id: int = typer.Option(None, help="Only this source"),
     limit: int = typer.Option(None, help="Max items this run (default: config)"),
@@ -131,9 +179,7 @@ def library_index(
     from siteloom.progress import ProgressReporter
 
     batch = limit or (10**9 if all_pending else cfg.library.batch_size)
-    resume = f"siteloom library index --config {config}" + (
-        " --all" if all_pending else ""
-    )
+    resume = _resume_command(ctx)
     # Assigned inside the block, read after it: the reporter swallows the
     # Ctrl-C so the run can be recorded, which leaves this unset. `None`
     # is how the summary below knows the work never finished.
@@ -200,6 +246,7 @@ def library_status(config: Path = CONFIG_OPT):
 
 @takeout_app.command("import")
 def takeout_import(
+    ctx: typer.Context,
     path: Path = typer.Argument(..., help="Google Photos Takeout directory"),
     config: Path = CONFIG_OPT,
     limit: int = typer.Option(None, help="Max media files to consider"),
@@ -224,7 +271,7 @@ def takeout_import(
     from siteloom.library.takeout import TakeoutImporter
     from siteloom.progress import ProgressReporter
 
-    resume = f'siteloom takeout import "{path}" --config {config}'
+    resume = _resume_command(ctx)
     stats = timings = None
     with ProgressReporter(
         Session,
@@ -541,7 +588,10 @@ def jobs_list(
                 + " ".join(f"{k}={v:,}" for k, v in list(counters.items())[:5])
             )
         if status in ("interrupted", "stale", "abandoned") and resume:
-            console.print(f"[yellow]#{rid} resume:[/] {resume}")
+            # soft_wrap: a command broken across lines cannot be pasted.
+            console.print(
+                f"[yellow]#{rid} resume:[/] {resume}", soft_wrap=True, highlight=False
+            )
         elif status == "failed" and message:
             console.print(f"[red]#{rid} failed:[/] {message}")
 
@@ -818,7 +868,9 @@ def train_status(config: Path = CONFIG_OPT):
 
 
 @train_app.command("enroll")
-def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
+def train_enroll(
+    ctx: typer.Context, config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT
+):
     """Enroll verified faces into the recognition collection.
 
     Sweeps every verified, not-yet-enrolled face annotation and adds its
@@ -851,7 +903,7 @@ def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
         with ProgressReporter(
             Session,
             "face-enroll",
-            resume_command=f"siteloom train enroll --config {config}",
+            resume_command=_resume_command(ctx),
             bar=not quiet,
         ) as progress:
             with Session() as session:
