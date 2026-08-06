@@ -4,107 +4,270 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Siteloom{% endblock %} — {{ site_name }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
   <style>
-    :root { color-scheme: light dark; }
+    /* Design tokens — design_handoff_siteloom_console/README.md */
+    :root {
+      color-scheme: dark;
+      --canvas: oklch(0.17 0.008 250);
+      --panel: oklch(0.205 0.009 250);
+      --raised: oklch(0.215 0.009 250);
+      --header: oklch(0.19 0.008 250);
+      --toolbar: oklch(0.185 0.008 250);
+      --hairline: oklch(0.28 0.01 250);
+      --row-rule: oklch(0.24 0.009 250);
+      --control-border: oklch(0.3 0.01 250);
+      --text: oklch(0.95 0.005 250);
+      --muted: oklch(0.66 0.008 250);
+      --faint: oklch(0.58 0.008 250);
+      --accent: oklch(0.72 0.16 200);
+      --accent-hover: oklch(0.79 0.14 200);
+      --on-accent: oklch(0.16 0.03 240);
+      --amber: oklch(0.75 0.14 85);
+      --red: oklch(0.68 0.16 30);
+      --green: oklch(0.72 0.16 145);
+      --font-ui: "Archivo", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      margin: 0; background: light-dark(#f5f5f7, #111114);
-      color: light-dark(#1c1c1e, #e5e5ea);
+      margin: 0; display: flex; height: 100vh; overflow: hidden;
+      background: var(--canvas); color: var(--text);
+      font-family: var(--font-ui); font-size: 13px;
     }
-    header {
-      padding: 0.8rem 1.2rem; display: flex; align-items: baseline; gap: 0.8rem;
-      background: light-dark(#fff, #1c1c20);
-      border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31);
+    @keyframes slpulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    @keyframes slrise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb {
+      background: oklch(0.33 0.01 250); border-radius: 5px;
+      border: 3px solid var(--canvas);
     }
-    header h1 { font-size: 1.05rem; margin: 0; }
-    header .site { opacity: 0.6; font-size: 0.9rem; }
-    main { padding: 1.2rem; max-width: 1200px; margin: 0 auto; }
-    a { color: light-dark(#0a63c9, #6cb2ff); text-decoration: none; }
-    .filters { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* Sidebar */
+    .sl-side {
+      width: 236px; flex: 0 0 236px; display: flex; flex-direction: column; gap: 14px;
+      padding: 14px 12px; background: var(--panel); border-right: 1px solid var(--hairline);
+    }
+    .sl-brand { display: flex; align-items: center; gap: 9px; padding: 0 2px; }
+    .sl-logo { display: grid; grid-template-columns: repeat(3, 5px); grid-auto-rows: 5px; gap: 2px; }
+    .sl-logo span { background: oklch(0.4 0.02 250); }
+    .sl-logo span:nth-child(odd) { background: var(--accent); }
+    .sl-wordmark { font-size: 15px; font-weight: 700; }
+    .sl-ver {
+      margin-left: auto; font-family: var(--font-mono); font-size: 9px; color: var(--muted);
+      padding: 2px 5px; border: 1px solid var(--control-border); border-radius: 3px;
+    }
+    .sl-site {
+      display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
+      border-radius: 6px; border: 1px solid var(--control-border); background: transparent;
+      color: var(--text); font: inherit; text-align: left;
+    }
+    .sl-dot {
+      width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto;
+      background: var(--green); animation: slpulse 2s infinite;
+    }
+    .sl-site-name {
+      font-size: 12px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sl-nav { display: flex; flex-direction: column; gap: 2px; }
+    .sl-nav-item {
+      display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-radius: 6px;
+      color: var(--text); font-size: 13px; font-weight: 500; text-decoration: none;
+    }
+    .sl-nav-item:hover { background: oklch(0.26 0.01 250); color: var(--text); }
+    .sl-nav-item.active { background: oklch(0.29 0.05 200); }
+    .sl-code {
+      width: 22px; flex: 0 0 auto; text-align: center; padding: 3px 0; border-radius: 3px;
+      font-family: var(--font-mono); font-size: 9px;
+      background: var(--raised); color: var(--muted);
+    }
+    .sl-nav-item.active .sl-code { background: var(--accent); color: oklch(0.18 0.03 240); }
+    .sl-side-footer {
+      margin-top: auto; display: flex; align-items: center; gap: 9px;
+      padding: 12px 2px 0; border-top: 1px solid var(--hairline);
+    }
+    .sl-avatar {
+      width: 26px; height: 26px; border-radius: 50%; flex: 0 0 auto;
+      display: flex; align-items: center; justify-content: center;
+      background: oklch(0.29 0.05 200); color: var(--accent);
+      font-size: 10px; font-weight: 700;
+    }
+    .sl-op-name { font-size: 12px; font-weight: 600; }
+    .sl-op-role { font-size: 10px; color: var(--muted); }
+
+    /* Main column */
+    .sl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; }
+    .sl-topbar {
+      height: 56px; flex: 0 0 56px; display: flex; align-items: center; gap: 14px;
+      padding: 0 20px; background: var(--header); border-bottom: 1px solid var(--hairline);
+    }
+    .sl-tb-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    .sl-topbar h1 { margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; }
+    .sl-tb-sub {
+      font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sl-tb-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+    .sl-search {
+      width: 230px; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 12px;
+      border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+    }
+    .sl-search::placeholder { color: var(--faint); }
+    .sl-clock {
+      font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+      padding: 4px 8px; border: 1px solid var(--control-border); border-radius: 6px;
+    }
+    main { flex: 1; overflow: auto; padding: 20px; animation: slrise 180ms ease; }
+
+    /* Shared page styles (legacy classes used by the pre-console templates) */
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); }
+    .muted { color: var(--muted); opacity: 1; }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
     .filters select, .filters input, .filters button {
-      padding: 0.35rem 0.55rem; border-radius: 7px; font-size: 0.85rem;
-      border: 1px solid light-dark(#d0d0d5, #3a3a40);
-      background: light-dark(#fff, #232328); color: inherit;
+      padding: 6px 9px; border-radius: 6px; font-family: inherit; font-size: 12px;
+      border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
     }
+    .filters button { cursor: pointer; }
+    .filters button:hover { border-color: oklch(0.5 0.03 250); }
     .grid {
-      display: grid; gap: 0.9rem;
-      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      display: grid; gap: 14px;
+      grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
     }
     .card {
-      background: light-dark(#fff, #1c1c20); border-radius: 10px; overflow: hidden;
-      border: 1px solid light-dark(#e2e2e6, #2c2c31); display: block; color: inherit;
+      display: block; overflow: hidden; color: inherit;
+      background: var(--panel); border: 1px solid var(--hairline); border-radius: 7px;
     }
-    .card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block;
-      background: light-dark(#e9e9ee, #26262b); }
-    .card .noimg { width: 100%; aspect-ratio: 4/3; display: flex; align-items: center;
-      justify-content: center; opacity: 0.4; font-size: 0.8rem;
-      background: light-dark(#e9e9ee, #26262b); }
-    .card .meta { padding: 0.5rem 0.65rem; font-size: 0.8rem; line-height: 1.45; }
+    a.card:hover { border-color: oklch(0.5 0.06 200); color: inherit; }
+    .card img {
+      width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block;
+      background: oklch(0.26 0.01 250);
+    }
+    .card .noimg {
+      width: 100%; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center;
+      color: var(--faint); font-family: var(--font-mono); font-size: 10px;
+      background:
+        repeating-linear-gradient(135deg, rgba(255, 255, 255, .05) 0 5px, transparent 5px 11px),
+        oklch(0.26 0.01 250);
+    }
+    .card .meta { padding: 9px 11px; font-size: 12px; line-height: 1.5; }
     .badge {
-      display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
-      font-size: 0.72rem; font-weight: 600; text-transform: capitalize;
-      background: light-dark(#e8f0fe, #1e3a5f); color: light-dark(#0a63c9, #9cc7ff);
+      display: inline-block; padding: 3px 7px; border-radius: 3px;
+      font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+      text-transform: uppercase; letter-spacing: .06em;
+      background: oklch(0.3 0.06 200); color: oklch(0.85 0.1 200);
     }
-    .badge.guest {
-      background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
-      text-transform: none;
-    }
-    .badge.unknown {
-      background: light-dark(#fdeeee, #4a1f22); color: light-dark(#b3261e, #ff9d96);
-      text-transform: none;
-    }
-    .badge.plate {
-      background: light-dark(#fff4dd, #4a3a14); color: light-dark(#8a6410, #ffd47e);
-      text-transform: none; font-family: ui-monospace, monospace;
-    }
-    .badge.ok {
-      background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
-      text-transform: none;
-    }
-    .badge.bad {
-      background: light-dark(#fdeeee, #4a1f22); color: light-dark(#b3261e, #ff9d96);
-      text-transform: none;
-    }
-    .badge.missed {
-      background: light-dark(#fff4dd, #4a3a14); color: light-dark(#8a6410, #ffd47e);
-      text-transform: none;
-    }
-    .verdict { display: inline-flex; gap: 0.25rem; vertical-align: middle; }
+    .badge.guest, .badge.ok { background: oklch(0.28 0.05 145); color: oklch(0.85 0.1 145); }
+    .badge.unknown, .badge.bad { background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); }
+    .badge.plate, .badge.missed { background: oklch(0.3 0.05 85); color: oklch(0.87 0.1 85); }
+    .verdict { display: inline-flex; gap: 4px; vertical-align: middle; }
     .verdict button {
-      padding: 0 0.45rem; border-radius: 999px; font-size: 0.78rem; cursor: pointer;
-      border: 1px solid light-dark(#d0d0d5, #3a3a40);
-      background: light-dark(#fff, #232328); color: inherit; opacity: 0.65;
+      padding: 1px 7px; border-radius: 3px; font-size: 11px; cursor: pointer;
+      border: 1px solid var(--control-border); background: var(--raised); color: var(--muted);
     }
-    .verdict button:hover { opacity: 1; }
-    .verdict button.on.ok { background: light-dark(#e6f6ea, #17402a);
-      color: light-dark(#1c7c3c, #7fd89d); opacity: 1; }
-    .verdict button.on.bad { background: light-dark(#fdeeee, #4a1f22);
-      color: light-dark(#b3261e, #ff9d96); opacity: 1; }
-    .muted { opacity: 0.55; }
-    .pager { margin-top: 1.2rem; display: flex; gap: 1rem; font-size: 0.9rem; }
-    table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
-    th, td { text-align: left; padding: 0.45rem 0.6rem;
-      border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31); }
-    .strip { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
-    .strip img { height: 110px; border-radius: 7px;
-      border: 1px solid light-dark(#e2e2e6, #2c2c31); }
+    .verdict button:hover { color: var(--text); border-color: oklch(0.5 0.03 250); }
+    .verdict button.on.ok {
+      background: oklch(0.28 0.05 145); color: oklch(0.85 0.1 145); border-color: transparent;
+    }
+    .verdict button.on.bad {
+      background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); border-color: transparent;
+    }
+    .pager { margin-top: 18px; display: flex; gap: 16px; font-family: var(--font-mono); font-size: 12px; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--row-rule); }
+    th {
+      font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+      text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+    }
+    .strip { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+    .strip img { height: 110px; border-radius: 5px; border: 1px solid var(--hairline); }
+
+    /* Stopgap small-screen collapse; the designed mobile tiers land per-screen later */
+    @media (max-width: 880px) {
+      body { flex-direction: column; height: auto; overflow: auto; }
+      .sl-side {
+        width: 100%; flex: 0 0 auto; flex-direction: row; align-items: center; gap: 10px;
+        padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--hairline);
+      }
+      .sl-site, .sl-side-footer, .sl-ver, .sl-code { display: none; }
+      .sl-nav { flex-direction: row; overflow-x: auto; margin-left: auto; }
+      .sl-nav-item { padding: 7px 8px; white-space: nowrap; }
+      .sl-main { height: auto; }
+      .sl-search { display: none; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1><a href="/">Siteloom</a></h1>
-    <nav style="display:flex; gap:0.9rem; font-size:0.9rem; flex-wrap:wrap;">
-      <a href="/">Events</a>
-      <a href="/library">Library</a>
-      <a href="/identities">Identities</a>
-      <a href="/classes">Classes</a>
-      <a href="/training">Training</a>
-      <a href="/jobs">Jobs</a>
-      <a href="/noise">Noise</a>
+  {% set path = request.url.path if request else "/" %}
+  <aside class="sl-side">
+    <div class="sl-brand">
+      <div class="sl-logo" aria-hidden="true">
+        <span></span><span></span><span></span>
+        <span></span><span></span><span></span>
+        <span></span><span></span><span></span>
+      </div>
+      <div class="sl-wordmark">Siteloom</div>
+      <span class="sl-ver">poc</span>
+    </div>
+    <button class="sl-site" type="button">
+      <span class="sl-dot"></span>
+      <span class="sl-site-name">{{ site_name }}</span>
+    </button>
+    <nav class="sl-nav">
+      {% for href, label, code in [
+        ("/", "Events", "EV"),
+        ("/library", "Media library", "MD"),
+        ("/identities", "Identities", "ID"),
+        ("/classes", "Classes", "CL"),
+        ("/training", "Training data", "TR"),
+        ("/jobs", "Jobs", "JB"),
+        ("/noise", "Noise", "NO"),
+      ] %}
+      {% set active = (path == "/" or path.startswith("/events"))
+         if href == "/" else (path == href or path.startswith(href ~ "/")) %}
+      <a class="sl-nav-item{% if active %} active{% endif %}" href="{{ href }}">
+        <span class="sl-code">{{ code }}</span>
+        <span class="sl-label">{{ label }}</span>
+      </a>
+      {% endfor %}
     </nav>
-    <span class="site" style="margin-left:auto;">{{ site_name }}</span>
-  </header>
-  <main>{% block content %}{% endblock %}</main>
+    <div class="sl-side-footer">
+      <div class="sl-avatar">OP</div>
+      <div>
+        <div class="sl-op-name">Operator</div>
+        <div class="sl-op-role">On duty</div>
+      </div>
+    </div>
+  </aside>
+  <div class="sl-main">
+    <header class="sl-topbar">
+      <div class="sl-tb-title">
+        <h1>{% block header %}{{ self.title() }}{% endblock %}</h1>
+        <span class="sl-tb-sub">{% block subtitle %}{{ site_name }}{% endblock %}</span>
+      </div>
+      <div class="sl-tb-right">
+        <input class="sl-search" type="search"
+               placeholder="Search events, people, plates" aria-label="Search">
+        <span class="sl-clock" id="sl-clock">--:--:--</span>
+      </div>
+    </header>
+    <main>{% block content %}{% endblock %}</main>
+  </div>
+  <script>
+    (function () {
+      var el = document.getElementById("sl-clock");
+      function tick() {
+        el.textContent = new Date().toLocaleTimeString([], { hour12: false });
+      }
+      tick();
+      setInterval(tick, 1000);
+    })();
+  </script>
 </body>
 </html>
