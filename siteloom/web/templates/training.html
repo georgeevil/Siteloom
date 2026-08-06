@@ -1,231 +1,495 @@
 {% extends "base.html" %}
 {% block title %}Training data{% endblock %}
-{% block content %}
+{% block subtitle %}label &amp; enrol · {{ site_name }}{% endblock %}
+{% block main_class %}flush{% endblock %}
+
+{% block styles %}
 <style>
-  .stats { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
-  .stat { background: light-dark(#fff, #1c1c20); border: 1px solid light-dark(#e2e2e6, #2c2c31);
-    border-radius: 10px; padding: 0.5rem 0.85rem; min-width: 105px; }
-  .stat .n { font-size: 1.25rem; font-weight: 650; line-height: 1.2; }
-  .stat .l { font-size: 0.72rem; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.04em; }
-  .facegrid { display: grid; gap: 0.6rem;
-    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
-  .face { background: light-dark(#fff, #1c1c20); border-radius: 9px; overflow: hidden;
-    border: 2px solid light-dark(#e2e2e6, #2c2c31); }
-  .face.confirm { border-color: #2d9d5e; }
-  .face.reject  { border-color: #b3261e; opacity: 0.55; }
-  .face img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block;
-    background: light-dark(#e9e9ee, #26262b); }
-  .face .m { padding: 0.35rem 0.45rem; font-size: 0.74rem; line-height: 1.4; }
-  .face .acts { display: flex; border-top: 1px solid light-dark(#e2e2e6, #2c2c31); }
-  .face .acts button { flex: 1; border: 0; padding: 0.3rem; cursor: pointer; font-size: 0.8rem;
-    background: transparent; color: inherit; }
-  .face .acts button:hover { background: light-dark(#f0f0f4, #2a2a30); }
-  .face input.nm { width: 100%; border: 0; border-top: 1px solid light-dark(#e2e2e6, #2c2c31);
-    padding: 0.25rem 0.45rem; font-size: 0.74rem; background: transparent; color: inherit; }
-  .btn { padding: 0.35rem 0.75rem; border-radius: 7px; font-size: 0.83rem; cursor: pointer;
-    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); color: inherit; }
-  .btn.primary { background: light-dark(#0a63c9, #2d6fd0); color: #fff; border-color: transparent; }
-  .cov { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-  .cov a { font-size: 0.78rem; padding: 0.15rem 0.5rem; border-radius: 999px;
-    border: 1px solid light-dark(#e2e2e6, #2c2c31); }
-  .cov a.ready { background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
-    border-color: transparent; }
-  .cov a.extra { display: none; }
-  .cov.all a.extra { display: inline; }
-  /* Keep the review controls reachable while scrolling a long grid —
-     otherwise Apply is a scroll-to-top away after every screenful. */
-  .actions { position: sticky; top: 0; z-index: 5; padding: 0.55rem 0;
-    display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
-    background: light-dark(#f5f5f7, #111114);
-    border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31); }
-  .marked { font-variant-numeric: tabular-nums; }
+  .work { flex: 1; display: flex; min-height: 0; position: relative; }
+
+  /* Left rail — library sources */
+  .sources {
+    width: 262px; flex: 0 0 262px; overflow: auto; padding: 14px;
+    background: var(--panel); border-right: 1px solid var(--hairline);
+  }
+  .sec-head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 11px;
+  }
+  .sec-head h2 {
+    margin: 0; font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--faint);
+  }
+  .sec-head .btn-outline { margin-left: auto; }
+  .src {
+    display: block; width: 100%; text-align: left; padding: 10px; margin-bottom: 8px;
+    border: 1px solid var(--hairline); border-radius: 7px; color: inherit;
+    text-decoration: none; background: transparent;
+  }
+  .src:hover { border-color: oklch(0.5 0.06 200); color: inherit; }
+  .src.on { border-color: oklch(0.6 0.1 200); background: oklch(0.23 0.02 220); }
+  .src-name { font-size: 12.5px; font-weight: 600; }
+  .src-path {
+    font-family: var(--font-mono); font-size: 9.5px; color: var(--faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+    text-align: left; margin-bottom: 7px;
+  }
+  .prog { height: 4px; border-radius: 2px; background: oklch(0.3 0.01 250); margin-bottom: 6px; }
+  .prog i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+  .src-row {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--font-mono); font-size: 9.5px; color: var(--muted);
+  }
+  .src-row .bad { color: var(--red); }
+  .footnote {
+    margin-top: 12px; padding: 10px; border: 1px dashed var(--control-border);
+    border-radius: 7px; font-size: 11px; color: var(--muted); line-height: 1.55;
+  }
+
+  /* Centre — crop grid */
+  .crops { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .cropbar {
+    display: flex; align-items: center; gap: 8px; padding: 11px 16px;
+    background: var(--toolbar); border-bottom: 1px solid var(--hairline);
+  }
+  .chipstrip {
+    display: flex; gap: 7px; overflow-x: auto; flex: 1; min-width: 0;
+    scrollbar-width: none; padding-bottom: 1px;
+  }
+  .chipstrip::-webkit-scrollbar { display: none; }
+  .chip {
+    padding: 5px 10px; border-radius: 20px; font-size: 12px; line-height: 1;
+    border: 1px solid var(--control-border); background: transparent;
+    color: oklch(0.74 0.008 250); text-decoration: none; white-space: nowrap; flex: 0 0 auto;
+  }
+  .chip:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .chip.on {
+    background: oklch(0.29 0.06 200); border-color: oklch(0.55 0.1 200);
+    color: oklch(0.9 0.08 200);
+  }
+  .cropbar-right {
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    font-family: var(--font-mono); font-size: 10px; color: var(--muted);
+  }
+  .seg { display: flex; border: 1px solid var(--control-border); border-radius: 6px; overflow: hidden; }
+  .seg a {
+    padding: 4px 8px; font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); text-decoration: none;
+  }
+  .seg a.on { background: var(--accent); color: var(--on-accent); }
+
+  .gridwrap { flex: 1; overflow: auto; padding: 14px 16px; }
+  .grouphead {
+    display: flex; align-items: baseline; gap: 9px; margin: 4px 0 9px;
+  }
+  .grouphead h3 { margin: 0; font-size: 13px; font-weight: 700; }
+  .grouphead .n { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .cropgrid { display: grid; gap: 9px; margin-bottom: 20px; }
+  .size-s .cropgrid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); }
+  .size-m .cropgrid { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
+  .size-l .cropgrid { grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); }
+
+  .tile { cursor: pointer; }
+  .tile figure {
+    position: relative; margin: 0; aspect-ratio: 1; border-radius: 5px;
+    border: 2px solid transparent; overflow: hidden;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 5px, transparent 5px 11px),
+      oklch(0.26 0.01 250);
+  }
+  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile[data-sel="1"] figure { border-color: var(--accent); }
+  .tile .cap {
+    font-family: var(--font-mono); font-size: 9px; color: var(--faint); margin-top: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .t-state {
+    position: absolute; top: 4px; left: 4px; padding: 2px 5px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 8.5px; text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .t-proposed { background: oklch(0.3 0.05 85); color: oklch(0.87 0.1 85); }
+  .t-verified { background: oklch(0.28 0.05 145); color: oklch(0.85 0.1 145); }
+  .t-rejected { background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); }
+  .t-check {
+    position: absolute; top: 4px; right: 4px; width: 15px; height: 15px;
+    border-radius: 3px; border: 1px solid oklch(0.6 0.02 250);
+    background: oklch(0.16 0.01 250 / .7);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: transparent;
+  }
+  .tile[data-sel="1"] .t-check {
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  }
+  .t-conf {
+    position: absolute; bottom: 4px; left: 4px; font-family: var(--font-mono);
+    font-size: 9px; color: var(--text); text-shadow: 0 1px 3px oklch(0.12 0.01 250);
+  }
+  .t-enrolled {
+    position: absolute; bottom: 5px; right: 5px; width: 7px; height: 7px;
+    border-radius: 50%; background: var(--green);
+  }
+
+  /* Right rail — labelling inspector */
+  .inspector {
+    width: 326px; flex: 0 0 326px; overflow: auto; padding: 14px;
+    background: var(--panel); border-left: 1px solid var(--hairline);
+  }
+  .insp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .insp-head h2 { margin: 0; font-size: 13.5px; font-weight: 700; }
+  .insp-head .links { margin-left: auto; display: flex; gap: 8px; font-size: 11px; }
+  .insp-empty {
+    padding: 14px; border: 1px dashed var(--control-border); border-radius: 7px;
+    font-size: 11.5px; color: var(--muted); line-height: 1.6;
+  }
+  .idlist { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+  .idrow {
+    display: flex; align-items: center; gap: 9px; padding: 7px 9px; width: 100%;
+    border: 1px solid var(--hairline); border-radius: 6px; cursor: pointer;
+    background: transparent; color: var(--text); font: inherit; text-align: left;
+  }
+  .idrow:hover { border-color: oklch(0.5 0.06 200); }
+  .idrow.on { border-color: var(--accent); background: oklch(0.23 0.02 220); }
+  .idrow .nm { font-size: 12px; font-weight: 500; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .idrow .cap { font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); }
+  .idrow .cap.full { color: var(--amber); }
+  .newname {
+    width: 100%; padding: 7px 9px; border-radius: 6px; font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+    margin-bottom: 12px;
+  }
+  .ccrow { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .summary {
+    padding: 10px; border-radius: 7px; background: var(--raised);
+    border: 1px solid var(--hairline); font-size: 11.5px; color: var(--muted);
+    line-height: 1.6; margin-bottom: 12px;
+  }
+  .summary b { color: var(--text); font-weight: 600; }
+  .insp-actions { display: flex; flex-direction: column; gap: 8px; }
+  .btn-primary {
+    width: 100%; padding: 9px 12px; border-radius: 6px; border: 0; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600;
+    background: var(--accent); color: var(--on-accent);
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: .45; cursor: default; }
+  .btn-outline {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 8px 12px; border-radius: 6px; cursor: pointer; text-decoration: none;
+    font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: transparent; color: var(--text);
+  }
+  .btn-outline:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .btn-outline.sm { padding: 4px 9px; font-size: 11px; }
+  .btn-danger { border-color: oklch(0.45 0.1 30); color: oklch(0.82 0.12 30); }
+  .btn-danger:hover { border-color: var(--red); color: var(--red); }
+  .empty { padding: 40px 16px; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+  .pager { padding: 0 16px 20px; display: flex; gap: 14px; font-family: var(--font-mono); font-size: 11px; }
+  .srctabs { display: none; }
+
+  /* Handoff tiers, measured on the work area rather than the window. */
+  @media (max-width: 1343px) {
+    .sources { display: none; }
+    .srctabs {
+      display: flex; gap: 7px; align-items: center; overflow-x: auto;
+      padding: 9px 16px; background: var(--panel);
+      border-bottom: 1px solid var(--hairline);
+    }
+  }
+  @media (max-width: 1081px) {
+    .inspector {
+      position: absolute; top: 0; right: 0; bottom: 0; z-index: 6; width: 320px;
+      flex-basis: 320px; box-shadow: -18px 0 44px oklch(0.11 0.01 250 / .55);
+    }
+    /* Only present while something is selected — see the JS below. */
+    .inspector[hidden] { display: none; }
+  }
 </style>
+{% endblock %}
 
-<h2 style="font-size:1.05rem;">Training data</h2>
-<p class="muted" style="font-size:0.83rem; max-width:70ch;">
-  Face names imported from Google Photos are <em>proposals</em>, not labels.
-  Only what you verify here is used to train — a model trained on its own
-  guesses would score well and mean nothing.
-</p>
+{% block content %}
+{%- macro nav_url(show=None, kind=None, group=None, size=None, source_id='keep', page=None) -%}
+{%- set p = [] -%}
+{%- set _ = p.append('show=' ~ (show or view.show)) -%}
+{%- set _ = p.append('kind=' ~ (kind or view.kind)) -%}
+{%- set _ = p.append('group=' ~ (group or view.group)) -%}
+{%- set _ = p.append('size=' ~ (size or view.size)) -%}
+{%- set sid = selected_source if source_id == 'keep' else source_id -%}
+{%- if sid %}{% set _ = p.append('source_id=' ~ sid) %}{% endif -%}
+{%- if filters.person %}{% set _ = p.append('person=' ~ (filters.person | urlencode)) %}{% endif -%}
+{%- if page and page > 1 %}{% set _ = p.append('page=' ~ page) %}{% endif -%}
+{#- Changing a facet drops the page: page N of the old filter is meaningless. -#}
+/training?{{ p | join('&') }}
+{%- endmacro -%}
 
-<div class="stats">
-  <div class="stat"><div class="n">{{ totals.faces }}</div><div class="l">faces</div></div>
-  <div class="stat"><div class="n">{{ totals.verified }}</div><div class="l">verified</div></div>
-  <div class="stat"><div class="n">{{ totals.rejected }}</div><div class="l">rejected</div></div>
-  <div class="stat"><div class="n">{{ coverage | length }}</div><div class="l">people</div></div>
-  {% for basis, n in by_basis.items() if basis %}
-  <div class="stat"><div class="n">{{ n }}</div><div class="l">{{ basis }}</div></div>
+{%- macro crop_tile(a) -%}
+<div class="tile" data-id="{{ a.id }}" data-sel="0">
+  <figure>
+    {% if a.crop_path %}<img src="/media/{{ a.crop_path }}" alt="" loading="lazy">{% endif %}
+    <span class="t-state {% if a.rejected %}t-rejected{% elif a.verified %}t-verified{% else %}t-proposed{% endif %}">{{ 'rejected' if a.rejected else ('verified' if a.verified else 'proposed') }}</span>
+    <span class="t-check">&#10003;</span>
+    <span class="t-conf">{{ '%.2f' | format(a.confidence) }}</span>
+    {% if a.enrolled %}<span class="t-enrolled" title="enrolled"></span>{% endif %}
+  </figure>
+  <div class="cap">{{ a.item.name if a.item else a.id }}</div>
+</div>
+{%- endmacro -%}
+
+<div class="srctabs">
+  <a class="chip{% if not selected_source %} on{% endif %}" href="{{ nav_url(source_id=None) }}">All sources</a>
+  {% for s in sources %}
+    <a class="chip{% if selected_source == s.source.id %} on{% endif %}"
+       href="{{ nav_url(source_id=s.source.id) }}">{{ s.source.name or s.source.path }}</a>
   {% endfor %}
 </div>
 
-<div class="panel" style="background:light-dark(#fff,#1c1c20); border:1px solid light-dark(#e2e2e6,#2c2c31);
-     border-radius:10px; padding:0.8rem 1rem; margin-bottom:1rem;">
-  <h3 style="margin:0 0 0.4rem; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.04em; opacity:0.55;">
-    Per-person coverage
-  </h3>
-  <p class="muted" style="font-size:0.76rem; margin:0 0 0.5rem;">
-    Green = at least {{ min_samples }} verified samples, enough to include in a fine-tune.
-    Shown as verified / proposed.
-  </p>
-  {# Sorted so the people worth reviewing (most proposals awaiting a
-     decision) come first; with 80+ people an unsorted list buries them. #}
-  {% set ranked = coverage | sort(attribute='1', reverse=true) %}
-  <div class="cov" id="cov">
-    {% for name, n in ranked %}
-      {% set v = verified_coverage.get(name, 0) %}
-      <a href="/training?person={{ name | urlencode }}"
-         class="{% if v >= min_samples %}ready{% endif %}{% if loop.index > 18 %} extra{% endif %}">
-        {{ name }} <strong>{{ v }}</strong>/{{ n }}
-      </a>
-    {% endfor %}
-    {% if not coverage %}<span class="muted" style="font-size:0.8rem;">No people imported yet.</span>{% endif %}
-  </div>
-  {% if coverage | length > 18 %}
-  <button class="btn" id="cov-toggle" style="margin-top:0.5rem;">
-    Show all {{ coverage | length }} people
-  </button>
-  {% endif %}
-</div>
+<div class="work">
+  <aside class="sources">
+    <div class="sec-head">
+      <h2>Library sources</h2>
+      <a class="btn-outline sm" href="/library">Import</a>
+    </div>
 
-{% if filters.person %}
-<p><a href="/training">&larr; all people</a> — showing <strong>{{ filters.person }}</strong></p>
-{% endif %}
+    <a class="src{% if not selected_source %} on{% endif %}" href="{{ nav_url(source_id=None) }}">
+      <div class="src-name">All sources</div>
+      <div class="src-row"><span>{{ crop_total }} crops in view</span></div>
+    </a>
 
-{% if proposals %}
-<div class="actions">
-  <button class="btn" id="b-all-confirm">Confirm all shown</button>
-  <button class="btn" id="b-all-clear">Clear marks</button>
-  <button class="btn primary" id="b-apply">Apply</button>
-  <span class="muted marked" id="marked"></span>
-  <span class="muted" id="status" style="font-size:0.8rem;"></span>
-  {% if not filters.person %}
-  <span class="muted" style="font-size:0.78rem; margin-left:auto;">
-    Tip: click a person above to review one face at a time — far safer to bulk-confirm.
-  </span>
-  {% endif %}
-</div>
-
-<div class="facegrid" id="grid">
-  {% for a in proposals %}
-  <div class="face {% if a.verified %}confirm{% elif a.rejected %}reject{% endif %}"
-       data-id="{{ a.id }}"
-       data-state="{% if a.verified %}confirm{% elif a.rejected %}reject{% else %}none{% endif %}">
-    {% if a.crop_path %}
-      <img src="/media/{{ a.crop_path }}" loading="lazy" alt="">
+    {% for s in sources %}
+    <a class="src{% if selected_source == s.source.id %} on{% endif %}"
+       href="{{ nav_url(source_id=s.source.id) }}">
+      <div class="src-name">{{ s.source.name or s.source.path }}</div>
+      <div class="src-path">{{ s.source.path }}</div>
+      <div class="prog"><i style="width: {{ s.percent }}%"></i></div>
+      <div class="src-row">
+        <span>{{ s.total }} items</span><span>{{ s.pending }} pending</span>
+      </div>
+      <div class="src-row">
+        <span class="{% if s.failed %}bad{% endif %}">{{ s.failed }} failed</span>
+        <span>{{ s.source.last_indexed_at.strftime('%Y-%m-%d') if s.source.last_indexed_at else 'never' }}</span>
+      </div>
+    </a>
     {% else %}
-      <div style="aspect-ratio:1; display:flex; align-items:center; justify-content:center; opacity:0.4; font-size:0.75rem;">no crop</div>
-    {% endif %}
-    <div class="m">
-      <strong>{{ a.proposed_name or '—' }}</strong><br>
-      <span class="muted">{{ a.proposal_basis or 'unassigned' }}</span>
-    </div>
-    <input class="nm" type="text" value="{{ a.proposed_name or '' }}" placeholder="name…">
-    <div class="acts">
-      <button data-act="confirm" title="Confirm (C)">✓</button>
-      <button data-act="reject" title="Reject (X)">✗</button>
-    </div>
-  </div>
-  {% endfor %}
-</div>
+    <p class="footnote">No library sources yet. Add one with
+      <code>siteloom library add &lt;path&gt;</code>.</p>
+    {% endfor %}
 
-<div class="pager">
-  {% set qs = 'person=' ~ filters.person %}
-  {% if page > 1 %}<a href="?{{ qs }}&page={{ page - 1 }}">&larr; previous</a>{% endif %}
-  {% if has_next %}<a href="?{{ qs }}&page={{ page + 1 }}">next &rarr;</a>{% endif %}
-</div>
-{% else %}
-<p class="muted">
-  No face proposals yet. Import a Google Photos Takeout with
-  <code>siteloom takeout import &lt;path&gt;</code>.
-</p>
-{% endif %}
+    <p class="footnote">
+      Indexing is resumable and bounded: <code>scan</code> only registers files
+      as pending, <code>index</code> does the decoding a batch at a time.
+      Failed items are not pending — nothing retries them until you run
+      <code>index --retry-failed</code>.
+    </p>
+  </aside>
 
-{% if runs %}
-<h3 style="font-size:0.95rem; margin-top:1.5rem;">Training runs</h3>
-<table>
-  <tr><th>When</th><th>Kind</th><th>Status</th><th>Samples</th><th>People</th><th>Result</th></tr>
-  {% for r in runs %}
-  <tr>
-    <td class="muted">{{ r.run.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
-    <td>{{ r.run.kind }}</td>
-    <td>{{ r.run.status }}</td>
-    <td>{{ r.run.sample_count }}</td>
-    <td>{{ r.run.identity_count }}</td>
-    <td class="muted" style="font-size:0.78rem;">
-      {% if r.metrics.get('after') %}
-        AUC {{ r.metrics.before.auc }} → <strong>{{ r.metrics.after.auc }}</strong>
-        {% if r.metrics.get('improved') %}<span class="badge guest">active</span>
-        {% else %}<span class="badge unknown">not adopted</span>{% endif %}
-      {% elif r.metrics %}{{ r.metrics }}{% endif %}
-      {% if r.run.notes %}<br>{{ r.run.notes }}{% endif %}
-    </td>
-  </tr>
-  {% endfor %}
-</table>
-{% endif %}
+  <section class="crops size-{{ view.size }}">
+    <div class="cropbar">
+      <div class="chipstrip">
+        {% for key, label in crop_filters.items() %}
+          <a class="chip{% if view.show == key %} on{% endif %}" href="{{ nav_url(show=key) }}">{{ label }}</a>
+        {% endfor %}
+        <span style="width:1px;background:var(--hairline);flex:0 0 auto"></span>
+        {% for key, label in crop_kinds.items() %}
+          <a class="chip{% if view.kind == key %} on{% endif %}" href="{{ nav_url(kind=key) }}">{{ label }}</a>
+        {% endfor %}
+      </div>
+      <div class="cropbar-right">
+        <span>{{ crop_total }} crops</span>
+        <span class="seg">
+          <a class="{% if view.group == 'name' %}on{% endif %}" href="{{ nav_url(group='name') }}">By name</a>
+          <a class="{% if view.group != 'name' %}on{% endif %}" href="{{ nav_url(group='flat') }}">Flat</a>
+        </span>
+        <span class="seg">
+          {% for sz in ['s', 'm', 'l'] %}
+            <a class="{% if view.size == sz %}on{% endif %}" href="{{ nav_url(size=sz) }}">{{ sz | upper }}</a>
+          {% endfor %}
+        </span>
+      </div>
+    </div>
+
+    <div class="gridwrap" id="gridwrap">
+      {% if proposals %}
+        {% if groups %}
+          {% for name, items in groups %}
+            <div class="grouphead">
+              <h3>{{ name or 'Unnamed' }}</h3>
+              <span class="n">{{ items | length }} crops ·
+                {{ items | selectattr('verified') | list | length }} verified</span>
+            </div>
+            <div class="cropgrid">
+              {% for a in items %}{{ crop_tile(a) }}{% endfor %}
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="cropgrid">
+            {% for a in proposals %}{{ crop_tile(a) }}{% endfor %}
+          </div>
+        {% endif %}
+      {% else %}
+        <p class="empty">
+          No crops match this filter.
+          {% if view.show == 'needs_review' %}
+            Nothing is waiting on review here — try <a href="{{ nav_url(show='all') }}">All</a>.
+          {% else %}
+            Index a library source to produce crops:
+            <code>siteloom library scan</code> then <code>siteloom library index</code>.
+          {% endif %}
+        </p>
+      {% endif %}
+    </div>
+
+    <div class="pager">
+      {% if page > 1 %}<a href="{{ nav_url(page=page-1) }}">&larr; previous</a>{% endif %}
+      {% if has_next %}<a href="{{ nav_url(page=page+1) }}">next &rarr;</a>{% endif %}
+    </div>
+  </section>
+
+  <aside class="inspector" id="inspector" hidden>
+    <div class="insp-head">
+      <h2><span id="sel-count">0</span> selected</h2>
+      <span class="links">
+        <a href="#" id="sel-all">Select all</a>
+        <a href="#" id="sel-clear">Clear</a>
+      </span>
+    </div>
+
+    <div id="insp-empty" class="insp-empty">
+      Select crops to label them. Confirming writes the label
+      <em>and</em> enrols the face embedding — a name with no vector is a
+      name recognition cannot match on.
+    </div>
+
+    <div id="insp-body" hidden>
+      <div class="sec-head"><h2>Label as</h2></div>
+      <input class="newname" id="new-name" type="text"
+             placeholder="Type a name, or pick below" autocomplete="off">
+      <div class="idlist" id="idlist">
+        {% for i in identities %}
+        <button type="button" class="idrow" data-name="{{ i.label }}">
+          <span class="nm">{{ i.label }}</span>
+          <span class="cap{% if i.vector_count >= max_vectors %} full{% endif %}">
+            {{ i.vector_count }}/{{ max_vectors }}
+          </span>
+        </button>
+        {% endfor %}
+      </div>
+
+      {% if custom_classes %}
+      <div class="sec-head"><h2>Custom classes</h2></div>
+      <div class="ccrow">
+        {% for c in custom_classes %}
+          <span class="chip">{{ c.name }} · {{ c.example_count }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <div class="summary" id="summary"></div>
+
+      <div class="insp-actions">
+        <button class="btn-primary" id="do-verify" disabled>Verify &amp; enrol</button>
+        <button class="btn-outline btn-danger" id="do-reject">Reject</button>
+      </div>
+    </div>
+  </aside>
+</div>
 
 <script>
-const covToggle = document.getElementById('cov-toggle');
-if (covToggle) {
-  covToggle.onclick = () => {
-    const cov = document.getElementById('cov');
-    cov.classList.toggle('all');
-    covToggle.textContent = cov.classList.contains('all')
-      ? 'Show fewer' : covToggle.dataset.more || covToggle.textContent;
-  };
-  covToggle.dataset.more = covToggle.textContent;
-}
+(function () {
+  var MAX_VECTORS = {{ max_vectors }};
+  var wrap = document.getElementById("gridwrap");
+  var inspector = document.getElementById("inspector");
+  if (!wrap || !inspector) return;
 
-const grid = document.getElementById('grid');
-if (grid) {
-  function updateMarked() {
-    const c = grid.querySelectorAll('.face[data-state="confirm"]').length;
-    const r = grid.querySelectorAll('.face[data-state="reject"]').length;
-    document.getElementById('marked').textContent =
-      (c || r) ? `${c} to confirm · ${r} to reject` : '';
+  var selected = new Set();
+  var chosenName = "";
+  var nameInput = document.getElementById("new-name");
+  var body = document.getElementById("insp-body");
+  var empty = document.getElementById("insp-empty");
+
+  function tiles() { return wrap.querySelectorAll(".tile"); }
+
+  function render() {
+    var n = selected.size;
+    document.getElementById("sel-count").textContent = n;
+    body.hidden = n === 0;
+    empty.hidden = n !== 0;
+    // At narrow widths the inspector is an overlay, so it must only exist
+    // while there is a selection to act on.
+    inspector.hidden = n === 0 && window.matchMedia("(max-width: 1081px)").matches;
+
+    var name = (nameInput.value || chosenName || "").trim();
+    document.getElementById("do-verify").disabled = !(n && name);
+    document.getElementById("summary").innerHTML = n
+      ? "<b>" + n + "</b> crop" + (n === 1 ? "" : "s") + " → <b>" +
+        (name || "(no name yet)") + "</b><br>" +
+        "<b>" + n + "</b> face vector" + (n === 1 ? "" : "s") +
+        " will be added, up to the " + MAX_VECTORS + "-vector cap per identity."
+      : "";
   }
-  function setState(card, state) {
-    card.dataset.state = state;
-    card.classList.toggle('confirm', state === 'confirm');
-    card.classList.toggle('reject', state === 'reject');
-    updateMarked();
-  }
-  grid.addEventListener('click', e => {
-    const btn = e.target.closest('button[data-act]');
-    if (!btn) return;
-    const card = btn.closest('.face');
-    const act = btn.dataset.act;
-    setState(card, card.dataset.state === act ? 'none' : act);
+
+  wrap.addEventListener("click", function (ev) {
+    var tile = ev.target.closest(".tile");
+    if (!tile) return;
+    ev.preventDefault();
+    var id = tile.getAttribute("data-id");
+    if (selected.has(id)) { selected.delete(id); tile.setAttribute("data-sel", "0"); }
+    else { selected.add(id); tile.setAttribute("data-sel", "1"); }
+    render();
   });
-  document.getElementById('b-all-confirm').onclick = () => {
-    grid.querySelectorAll('.face').forEach(c => {
-      if (c.querySelector('.nm').value.trim()) setState(c, 'confirm');
+
+  document.getElementById("sel-all").addEventListener("click", function (ev) {
+    ev.preventDefault();
+    // "Select all" means the filtered set that is actually on screen.
+    tiles().forEach(function (t) {
+      selected.add(t.getAttribute("data-id"));
+      t.setAttribute("data-sel", "1");
     });
-  };
-  document.getElementById('b-all-clear').onclick = () => {
-    grid.querySelectorAll('.face').forEach(c => setState(c, 'none'));
-  };
-  updateMarked();
-  document.getElementById('b-apply').onclick = async () => {
-    const decisions = [];
-    grid.querySelectorAll('.face').forEach(c => {
-      const state = c.dataset.state;
-      const name = c.querySelector('.nm').value.trim();
-      if (state === 'confirm') decisions.push({ id: +c.dataset.id, action: 'confirm', name });
-      else if (state === 'reject') decisions.push({ id: +c.dataset.id, action: 'reject' });
+    render();
+  });
+
+  document.getElementById("sel-clear").addEventListener("click", function (ev) {
+    ev.preventDefault();
+    selected.clear();
+    tiles().forEach(function (t) { t.setAttribute("data-sel", "0"); });
+    render();
+  });
+
+  document.getElementById("idlist").addEventListener("click", function (ev) {
+    var row = ev.target.closest(".idrow");
+    if (!row) return;
+    document.querySelectorAll(".idrow.on").forEach(function (r) { r.classList.remove("on"); });
+    row.classList.add("on");
+    chosenName = row.getAttribute("data-name");
+    nameInput.value = chosenName;
+    render();
+  });
+
+  nameInput.addEventListener("input", function () { chosenName = ""; render(); });
+
+  function apply(action) {
+    var name = (nameInput.value || chosenName || "").trim();
+    var decisions = [];
+    selected.forEach(function (id) {
+      decisions.push(action === "confirm"
+        ? { id: Number(id), action: "confirm", name: name }
+        : { id: Number(id), action: "reject" });
     });
-    const status = document.getElementById('status');
-    if (!decisions.length) { status.textContent = 'nothing marked'; return; }
-    status.textContent = 'applying…';
-    const res = await fetch('/api/training/review', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decisions }),
-    });
-    if (!res.ok) { status.textContent = 'failed'; return; }
-    const data = await res.json();
-    status.textContent = `confirmed ${data.confirmed}, rejected ${data.rejected} — reloading`;
-    setTimeout(() => window.location.reload(), 600);
-  };
-}
+    if (!decisions.length) return;
+    fetch("/api/training/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decisions: decisions })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function () { window.location.reload(); })
+      .catch(function () { window.location.reload(); });
+  }
+
+  document.getElementById("do-verify").addEventListener("click", function () { apply("confirm"); });
+  document.getElementById("do-reject").addEventListener("click", function () { apply("reject"); });
+
+  window.addEventListener("resize", render);
+  render();
+})();
 </script>
 {% endblock %}

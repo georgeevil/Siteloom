@@ -31,6 +31,89 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+#: Crop-grid state filters, in the handoff's chip order.
+CROP_FILTERS = {
+    "needs_review": "Needs review",
+    "verified": "Verified",
+    "rejected": "Rejected",
+    "unenrolled": "Unenrolled",
+    "all": "All",
+}
+#: Which detection class the crops came from.
+CROP_KINDS = {"faces": "Faces", "vehicles": "Vehicles", "any": "All classes"}
+
+VEHICLE_CLASSES = ("car", "truck", "bus", "motorcycle", "bicycle")
+
+
+def _crop_kind_filter(q, kind: str):
+    if kind == "faces":
+        return q.filter(Annotation.class_name == "face")
+    if kind == "vehicles":
+        return q.filter(Annotation.class_name.in_(VEHICLE_CLASSES))
+    return q
+
+
+def _crop_show_filter(q, show: str):
+    if show == "needs_review":
+        return q.filter(
+            Annotation.verified.is_(False), Annotation.rejected.is_(False)
+        )
+    if show == "verified":
+        return q.filter(Annotation.verified.is_(True), Annotation.rejected.is_(False))
+    if show == "rejected":
+        return q.filter(Annotation.rejected.is_(True))
+    if show == "unenrolled":
+        # Verified but with no vector: a label the system cannot actually
+        # see (identity/enroll.py). These are the ones worth sweeping.
+        return q.filter(
+            Annotation.verified.is_(True),
+            Annotation.rejected.is_(False),
+            Annotation.enrolled.is_(False),
+        )
+    return q
+
+
+def _face_max_vectors(config) -> int:
+    face = config.identity.identifiers.get("face")
+    return getattr(face, "max_vectors_per_identity", 20) if face else 20
+
+
+def _source_progress(session) -> list[dict]:
+    """Per-source indexing progress for the sources rail.
+
+    `failed` is reported separately from `pending` on purpose: nothing
+    picks a failed item up again without `process(retry_failed=True)`, so
+    folding the two together would show a source as nearly done when part
+    of it will never be processed without an explicit opt-in.
+    """
+    counts: dict[int, dict[str, int]] = {}
+    rows = session.execute(
+        select(LibraryItem.source_id, LibraryItem.status, func.count()).group_by(
+            LibraryItem.source_id, LibraryItem.status
+        )
+    ).all()
+    for source_id, status, n in rows:
+        counts.setdefault(source_id, {})[status] = n
+
+    out = []
+    for source in session.scalars(select(LibrarySource).order_by(LibrarySource.name)):
+        by_status = counts.get(source.id, {})
+        total = sum(by_status.values())
+        done = by_status.get("indexed", 0) + by_status.get("skipped", 0)
+        out.append(
+            {
+                "source": source,
+                "total": total,
+                "indexed": by_status.get("indexed", 0),
+                "pending": by_status.get("pending", 0),
+                "failed": by_status.get("failed", 0),
+                "skipped": by_status.get("skipped", 0),
+                "percent": round(done * 100 / total) if total else 0,
+            }
+        )
+    return out
+
+
 def register(app, templates, Session, config):  # noqa: C901 — route table
     def ctx(**kw) -> dict:
         return {"site_name": config.site_name or config.site_id, **kw}
@@ -528,17 +611,40 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
     # -- training review ---------------------------------------------------
 
     @app.get("/training")
-    def training_page(request: Request, person: str | None = None, page: int = 1):
+    def training_page(  # noqa: C901 — one screen, several independent facets
+        request: Request,
+        person: str | None = None,
+        source_id: int | None = None,
+        show: str = "needs_review",
+        kind: str = "faces",
+        group: str = "name",
+        size: str = "m",
+        page: int = 1,
+    ):
         page_size = 48
+        show = show if show in CROP_FILTERS else "needs_review"
+        kind = kind if kind in CROP_KINDS else "faces"
         with Session() as session:
             q = (
                 select(Annotation)
                 .options(selectinload(Annotation.item))
-                .filter(Annotation.class_name == "face")
                 .order_by(Annotation.verified, Annotation.id)
             )
+            q = _crop_kind_filter(q, kind)
+            q = _crop_show_filter(q, show)
+            if source_id:
+                q = q.filter(
+                    Annotation.item_id.in_(
+                        select(LibraryItem.id).filter(
+                            LibraryItem.source_id == source_id
+                        )
+                    )
+                )
             if person:
                 q = q.filter(Annotation.proposed_name == person)
+            crop_total = session.scalar(
+                select(func.count()).select_from(q.subquery())
+            )
             proposals = (
                 session.scalars(q.offset((page - 1) * page_size).limit(page_size + 1))
                 .unique()
@@ -605,6 +711,31 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             runs = session.scalars(
                 select(TrainingRun).order_by(TrainingRun.id.desc()).limit(10)
             ).all()
+            sources = _source_progress(session)
+            # Grouped here, not in the template: Jinja's groupby sorts by
+            # the key, and proposed_name is nullable — comparing None with
+            # str raises. Unnamed crops sort last under their own heading.
+            groups = None
+            if group == "name":
+                buckets: dict[str, list] = {}
+                for a in proposals:
+                    buckets.setdefault(a.proposed_name or "", []).append(a)
+                groups = sorted(
+                    buckets.items(), key=lambda kv: (kv[0] == "", kv[0].lower())
+                )
+            # The inspector labels a selection onto an identity, so it
+            # offers the ones that already exist; a new name is still just
+            # typed in, which is what keeps label-and-learn pre-enrolment
+            # free (PRD 6.3).
+            identities = session.scalars(
+                select(Identity)
+                .filter(Identity.identifier_key == "face", Identity.label.is_not(None))
+                .order_by(Identity.last_seen.desc())
+                .limit(60)
+            ).all()
+            custom_classes = session.scalars(
+                select(CustomClass).order_by(CustomClass.name)
+            ).all()
         return templates.TemplateResponse(
             request,
             "training.html",
@@ -621,6 +752,21 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 page=page,
                 has_next=has_next,
                 min_samples=config.training.min_samples_per_person,
+                sources=sources,
+                groups=groups,
+                selected_source=source_id,
+                crop_filters=CROP_FILTERS,
+                crop_kinds=CROP_KINDS,
+                crop_total=crop_total,
+                view={
+                    "show": show,
+                    "kind": kind,
+                    "group": group,
+                    "size": size if size in ("s", "m", "l") else "m",
+                },
+                identities=identities,
+                custom_classes=custom_classes,
+                max_vectors=_face_max_vectors(config),
             ),
         )
 
