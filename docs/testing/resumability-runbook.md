@@ -346,8 +346,57 @@ probably its own issue.
 `tests/test_progress.py` sets `interrupt_requested` by hand; nothing delivers a
 real signal, exercises a CLI command, or asserts that a resumed run reaches the
 same end state as an uninterrupted one. The manual scenarios above are worth
-keeping, but A and C are cheap to automate with a subprocess + `os.kill` over a
-stub-module corpus, and that is what stops these from regressing.
+keeping, but they only run when someone remembers to run them.
+
+**Plan.** Three layers, cheapest first. The constraint throughout is
+CLAUDE.md's: no model weights, no live cameras — stub modules and synthetic
+media only (`tests/conftest.py`).
+
+*Layer 1 — the CLI contract (in-process, milliseconds).* Partly exists in
+`tests/test_cli_interrupt.py`: `_setup` is monkeypatched, a stub raises
+`Interrupted`, and the test asserts exit 130, an `interrupted` row, and a
+faithful resume command. Extend it to deliver a **real** signal —
+`os.kill(os.getpid(), SIGINT)` from inside the stub's work loop — and assert the
+loop finishes its item, commits, and only then raises. Parametrise over
+SIGINT/SIGTERM/SIGHUP so F4 cannot silently regress, and cover the double-signal
+abort. Add the same shape for `takeout import` and `train enroll`, whose
+post-interrupt paths were the other two F1 sites.
+
+*Layer 2 — the invariant that matters (in-process, ~a second).* **An
+interrupted run plus its resume must land exactly where an uninterrupted run
+lands.** Nothing tests this today, and it is the whole claim of the feature.
+Build it as an equivalence harness over the real `LibraryIndexer` with stub
+detection:
+
+1. index a synthetic corpus of N items uninterrupted; snapshot
+   `(item.path, status, attempts)` and `(annotation.item_id, bbox, class_name,
+   source, verified)` sorted;
+2. rebuild the DB, run again with a stub module that sets
+   `progress.interrupt_requested = True` after k items, then run the recorded
+   resume command;
+3. assert the two snapshots are equal, and that no item was processed twice
+   (`attempts == 1` everywhere).
+
+No signals, no sleeps, fully deterministic. Parametrise k over a batch boundary,
+one item either side of it, and the last item. Then do the same for
+`TakeoutImporter.import_tree`, interrupting in each of its three phases — that
+is where resume is three different skip-what's-done rules rather than a status
+column, and where scenario B's manual work would be replaced.
+
+*Layer 3 — one honest end-to-end (subprocess, seconds; `@pytest.mark.slow`).*
+Everything above runs in one process, so it cannot catch a signal that never
+reaches a real child, a DB left locked by a killed writer, or a resume command
+that is not actually runnable. One test: spawn the real CLI over a synthetic
+corpus in a subprocess (stub modules injected via a helper importable from
+`tests/`, never an env var baked into production code), **poll the
+`OperationRun` row until `current > 0`** rather than sleeping, send SIGTERM,
+wait, then assert the row is `interrupted`, run the stored `resume_command`
+verbatim through `subprocess.run`, and assert `0 still pending`. A second case
+sends SIGKILL and asserts `jobs reap` closes it out. Polling instead of sleeping
+is what keeps this from being the flaky test everyone eventually deletes.
+
+Scenarios C (real reboot), D (SQLite contention under real load) and E (the 26k
+archive) stay manual — they are about the machine, not the code.
 
 ### Test-setup gaps still open
 
