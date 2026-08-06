@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Classes{% endblock %}
+{% block content %}
+<style>
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .panel { background: light-dark(#fff, #1c1c20); border: 1px solid light-dark(#e2e2e6, #2c2c31);
+    border-radius: 10px; padding: 0.9rem 1rem; }
+  .panel h3 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+  .panel p.sub { margin: 0 0 0.7rem; font-size: 0.78rem; opacity: 0.55; line-height: 1.5; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .chip { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.55rem;
+    border-radius: 999px; font-size: 0.8rem; cursor: pointer; user-select: none;
+    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); }
+  .chip.on { background: light-dark(#e8f0fe, #1e3a5f); color: light-dark(#0a63c9, #9cc7ff);
+    border-color: transparent; font-weight: 600; }
+  .chip .n { opacity: 0.5; font-size: 0.72rem; }
+  input[type=text], input[type=number], select, textarea {
+    padding: 0.35rem 0.5rem; border-radius: 7px; font-size: 0.85rem; color: inherit;
+    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); }
+  .btn { padding: 0.35rem 0.75rem; border-radius: 7px; font-size: 0.83rem; cursor: pointer;
+    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); color: inherit; }
+  .btn.primary { background: light-dark(#0a63c9, #2d6fd0); color: #fff; border-color: transparent; }
+  .row { display: flex; gap: 0.5rem; align-items: center; margin: 0.4rem 0; flex-wrap: wrap; }
+  label.f { font-size: 0.78rem; opacity: 0.7; }
+</style>
+
+<h2 style="font-size:1.05rem;">Classes &amp; identification</h2>
+
+<div class="cols">
+  <div class="panel">
+    <h3>Tracked detection classes</h3>
+    <p class="sub">
+      Which COCO classes the detector reports. Turning one on is all that is
+      needed to start identifying it — an unconfigured class automatically
+      gets a generic appearance identifier and its own vector collection.
+    </p>
+    <div class="chips" id="chips">
+      {% set catalog = ['person','bicycle','car','motorcycle','bus','truck','boat','bird','cat','dog','horse','sheep','cow','backpack','umbrella','handbag','suitcase','bottle','cell phone','laptop'] %}
+      {% for c in catalog %}
+        <span class="chip {% if c in detection_classes %}on{% endif %}" data-class="{{ c }}">
+          {{ c }}{% if seen.get(c) %}<span class="n">{{ seen[c] }}</span>{% endif %}
+        </span>
+      {% endfor %}
+      {% for c in detection_classes if c not in catalog %}
+        <span class="chip on" data-class="{{ c }}">{{ c }}</span>
+      {% endfor %}
+    </div>
+    <div class="row" style="margin-top:0.7rem;">
+      <input type="text" id="newclass" placeholder="add another class name">
+      <button class="btn" id="b-add">Add</button>
+    </div>
+    <div class="row">
+      <label class="f">confidence</label>
+      <input type="number" id="conf" step="0.05" min="0.05" max="0.95" value="{{ confidence }}" style="width:80px;">
+      <label class="f" style="display:flex; gap:0.3rem; align-items:center;">
+        <input type="checkbox" id="autoadd" {% if auto_add %}checked{% endif %}> auto-identify new classes
+      </label>
+    </div>
+
+    <h3 style="margin-top:1.1rem;">Identifier thresholds</h3>
+    <p class="sub">
+      Cosine similarity required to call two crops the same thing. Face
+      embeddings and generic appearance embeddings have very different
+      similarity distributions, which is why each identifier carries its own.
+    </p>
+    {% for key, ident in identifiers.items() %}
+    <div class="row">
+      <span class="badge">{{ key }}</span>
+      <span class="muted" style="font-size:0.75rem;">{{ ident.algo }}</span>
+      <input type="number" class="thr" data-key="{{ key }}" step="0.01" min="0" max="1"
+             value="{{ ident.threshold }}" style="width:80px;">
+      <span class="muted" style="font-size:0.75rem;">{{ ident.applies_to | join(', ') }}</span>
+      {% if ident.plate_ocr %}<span class="badge plate">plate OCR</span>{% endif %}
+    </div>
+    {% endfor %}
+
+    <div class="row" style="margin-top:0.8rem;">
+      <button class="btn primary" id="b-save">Save to config</button>
+      <span class="muted" id="status" style="font-size:0.8rem;"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Custom sub-classes</h3>
+    <p class="sub">
+      Refinements of a detection class ("car" → "delivery-van"), recognized by
+      k-nearest-neighbour vote over labeled example crops. No training run:
+      label examples in the library and the class works immediately.
+    </p>
+    {% if custom_classes %}
+    <table>
+      <tr><th>Name</th><th>Refines</th><th>Examples</th><th>Threshold</th><th></th></tr>
+      {% for c in custom_classes %}
+      <tr>
+        <td><strong>{{ c.name }}</strong>
+          {% if c.description %}<br><span class="muted" style="font-size:0.75rem;">{{ c.description }}</span>{% endif %}</td>
+        <td>{{ c.parent_class or 'any' }}</td>
+        <td>{{ c.example_count }}</td>
+        <td>{{ '%.2f'|format(c.threshold) }}</td>
+        <td>
+          <form method="post" action="/classes/custom/{{ c.id }}/delete" style="margin:0;">
+            <button class="btn" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <p class="muted" style="font-size:0.85rem;">None defined yet.</p>
+    {% endif %}
+
+    <h3 style="margin-top:1rem;">Define a sub-class</h3>
+    <form method="post" action="/classes/custom">
+      <div class="row"><label class="f" style="width:90px;">Name</label>
+        <input type="text" name="name" required placeholder="delivery-van" style="flex:1;"></div>
+      <div class="row"><label class="f" style="width:90px;">Refines</label>
+        <select name="parent_class" style="flex:1;">
+          <option value="">any class</option>
+          {% for c in detection_classes %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select></div>
+      <div class="row"><label class="f" style="width:90px;">Threshold</label>
+        <input type="number" name="threshold" step="0.01" min="0" max="1" value="0.85" style="width:90px;"></div>
+      <div class="row"><label class="f" style="width:90px;">Notes</label>
+        <input type="text" name="description" placeholder="optional" style="flex:1;"></div>
+      <div class="row"><button class="btn primary" type="submit">Create</button></div>
+    </form>
+    <p class="sub" style="margin-top:0.7rem;">
+      After creating, tag example crops with it in the library, then run
+      <code>siteloom classes rebuild</code> to index the examples.
+    </p>
+  </div>
+</div>
+
+<script>
+document.getElementById('chips').addEventListener('click', e => {
+  const chip = e.target.closest('.chip');
+  if (chip) chip.classList.toggle('on');
+});
+document.getElementById('b-add').onclick = () => {
+  const input = document.getElementById('newclass');
+  const name = input.value.trim().toLowerCase();
+  if (!name) return;
+  const chip = document.createElement('span');
+  chip.className = 'chip on';
+  chip.dataset.class = name;
+  chip.textContent = name;
+  document.getElementById('chips').appendChild(chip);
+  input.value = '';
+};
+document.getElementById('b-save').onclick = async () => {
+  const classes = [...document.querySelectorAll('.chip.on')].map(c => c.dataset.class);
+  const identifiers = {};
+  document.querySelectorAll('.thr').forEach(el => {
+    identifiers[el.dataset.key] = { threshold: parseFloat(el.value) };
+  });
+  const res = await fetch('/classes/detection', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      classes,
+      identifiers,
+      confidence: parseFloat(document.getElementById('conf').value),
+      auto_add_classes: document.getElementById('autoadd').checked,
+    }),
+  });
+  const data = await res.json();
+  document.getElementById('status').textContent = res.ok
+    ? (data.written_to ? 'saved to ' + data.written_to : 'applied (in-memory config)')
+    : 'save failed';
+};
+</script>
+{% endblock %}

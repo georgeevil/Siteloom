@@ -97,8 +97,8 @@ ipython_config.py
 # UV
 #   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-# uv.lock
+#   commonly ignored for libraries. Siteloom uses venv + pip, so uv.lock is not kept.
+uv.lock
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
@@ -223,3 +223,10 @@ media/
 samples/
 *.pt
 identity_db/
+training/
+*.npy
+.DS_Store
+
+# Local deployment configs (absolute paths, per-machine)
+site.yaml
+archive.yaml

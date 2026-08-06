@@ -38,6 +38,9 @@ class Event(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id"), index=True)
     track_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Id of the originating event in an external system (Frigate event id)
+    # — the dedupe key when consuming other NVRs' event streams.
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     class_name: Mapped[str] = mapped_column(String, index=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime, index=True)
     last_seen: Mapped[datetime] = mapped_column(DateTime, index=True)
@@ -145,3 +148,238 @@ class Booking(Base):
     summary: Mapped[str] = mapped_column(String, default="")
     start: Mapped[datetime] = mapped_column(DateTime, index=True)
     end: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+# --------------------------------------------------------------------------
+# Media library: local directories of photos/short videos, indexed and
+# labeled independently of live camera events. This is the training-data
+# and archive side of the system; it shares the Identity store with live
+# ingestion so a face enrolled from a photo archive is recognized on a
+# camera immediately.
+# --------------------------------------------------------------------------
+
+
+class LibrarySource(Base):
+    """A local directory registered for indexing."""
+
+    __tablename__ = "library_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, default="")
+    path: Mapped[str] = mapped_column(String, unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String, default="directory")  # | "takeout"
+    added_at: Mapped[datetime] = mapped_column(DateTime)
+    last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    items: Mapped[list["LibraryItem"]] = relationship(back_populates="source")
+
+
+class LibraryItem(Base):
+    """One media file. Indexing is resumable and partial by design: rows
+    are created on scan (status="pending") and only processed when a
+    detection pass reaches them, so a huge archive can be indexed in
+    chunks across many runs without losing place.
+    """
+
+    __tablename__ = "library_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("library_sources.id"), index=True)
+    path: Mapped[str] = mapped_column(String, unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String)  # "image" | "video"
+    # pending -> indexed | failed | skipped
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mtime: Mapped[datetime] = mapped_column(DateTime)
+    # Capture time from sidecar metadata (Takeout photoTakenTime) when
+    # available — more trustworthy than mtime for archives.
+    taken_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    width: Mapped[int] = mapped_column(Integer, default=0)
+    height: Mapped[int] = mapped_column(Integer, default=0)
+    duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    thumb_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Human review state for the item as a whole, independent of whether
+    # its individual annotations are verified.
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    source: Mapped[LibrarySource] = relationship(back_populates="items")
+    annotations: Mapped[list["Annotation"]] = relationship(
+        back_populates="item", cascade="all, delete-orphan"
+    )
+    tags: Mapped[list["ItemTag"]] = relationship(
+        back_populates="item", cascade="all, delete-orphan"
+    )
+
+    @property
+    def name(self) -> str:
+        from pathlib import Path
+
+        return Path(self.path).name
+
+
+class ItemTag(Base):
+    """A whole-image tag. Namespaced by kind so imported metadata and
+    operator tags coexist: kind="person" holds Google Photos people tags
+    (the training signal), kind="user" holds free-form operator tags.
+    """
+
+    __tablename__ = "item_tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("library_items.id"), index=True)
+    kind: Mapped[str] = mapped_column(String, default="user", index=True)
+    value: Mapped[str] = mapped_column(String, index=True)
+
+    item: Mapped[LibraryItem] = relationship(back_populates="tags")
+
+
+class Annotation(Base):
+    """A box on a library item — machine-detected or human-drawn.
+
+    One table serves detection review, identity labeling, custom-class
+    labeling, and face-training data. `source` records provenance and
+    `verified` records human sign-off; training exports only ever read
+    verified rows, which is what keeps auto-assignments from silently
+    becoming ground truth.
+    """
+
+    __tablename__ = "annotations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("library_items.id"), index=True)
+    # Video items: which sampled frame this box came from.
+    frame_index: Mapped[int] = mapped_column(Integer, default=0)
+    # Normalized 0..1 [x1, y1, x2, y2] — resolution-independent, so boxes
+    # survive thumbnailing and re-encoding.
+    bbox: Mapped[str] = mapped_column(Text)
+    class_name: Mapped[str] = mapped_column(String, index=True)
+    # Optional refinement of class_name into an operator-defined class
+    # (e.g. class_name="car", custom_class="delivery-van").
+    custom_class: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    identity_id: Mapped[int | None] = mapped_column(
+        ForeignKey("identities.id"), nullable=True, index=True
+    )
+    # Name proposed by an importer before a human confirms it (Takeout
+    # people tags). Kept separate from identity_id so unverified guesses
+    # never leak into the identity store.
+    proposed_name: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # How the proposal was made: "unambiguous" (one face, one tag),
+    # "clustered", "single-candidate", or None for plain detections.
+    proposal_basis: Mapped[str | None] = mapped_column(String, nullable=True)
+    # "auto" (detector), "human" (drawn/corrected), "import" (sidecar)
+    source: Mapped[str] = mapped_column(String, default="auto", index=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Explicitly rejected by a reviewer — kept as a negative example
+    # rather than deleted, so the same bad proposal isn't re-suggested.
+    rejected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # This annotation's embedding has been added to the identity's vector
+    # collection — the idempotency marker for enrollment sweeps.
+    enrolled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+
+    item: Mapped[LibraryItem] = relationship(back_populates="annotations")
+    identity: Mapped[Identity | None] = relationship()
+
+
+class CustomClass(Base):
+    """An operator-defined refinement of a detection class.
+
+    Classification is k-NN over the same appearance embeddings the
+    identity layer already computes — a custom class is just a labeled
+    set of example crops, so defining one requires no training run.
+    """
+
+    __tablename__ = "custom_classes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    # Detection class this refines ("car"); empty means it applies to any.
+    parent_class: Mapped[str] = mapped_column(String, default="", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # Minimum k-NN vote similarity to assign this class.
+    threshold: Mapped[float] = mapped_column(Float, default=0.85)
+    example_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class OperationRun(Base):
+    """A long-running operator task: archive import, library indexing.
+
+    Heartbeated to the database every batch, which is what makes these
+    jobs observable rather than opaque: progress can be read from the web
+    UI or a second terminal while the work happens in a third, and a run
+    that died leaves its last known position behind instead of vanishing.
+    """
+
+    __tablename__ = "operation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, index=True)
+    target: Mapped[str] = mapped_column(String, default="")
+    phase: Mapped[str] = mapped_column(String, default="")
+    # running | complete | interrupted | failed
+    status: Mapped[str] = mapped_column(String, default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    current: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    # Domain counters (faces detected, certain, matched…) as JSON.
+    counters: Mapped[str] = mapped_column(Text, default="{}")
+    # Per-phase elapsed seconds, so slow stages are identifiable after
+    # the fact rather than guessed at.
+    phase_timings: Mapped[str] = mapped_column(Text, default="{}")
+    message: Mapped[str] = mapped_column(Text, default="")
+    # Exact command to continue an interrupted run.
+    resume_command: Mapped[str] = mapped_column(Text, default="")
+    pid: Mapped[int] = mapped_column(Integer, default=0)
+
+    @property
+    def percent(self) -> float:
+        return (self.current / self.total * 100.0) if self.total else 0.0
+
+    @property
+    def elapsed_s(self) -> float:
+        end = self.finished_at or self.updated_at
+        return max(0.0, (end - self.started_at).total_seconds())
+
+    @property
+    def rate(self) -> float:
+        """Items per second over the run so far."""
+        return self.current / self.elapsed_s if self.elapsed_s > 0 else 0.0
+
+    @property
+    def eta_s(self) -> float | None:
+        if self.status != "running" or not self.total or self.rate <= 0:
+            return None
+        return max(0.0, (self.total - self.current) / self.rate)
+
+    @property
+    def is_stale(self) -> bool:
+        """A 'running' row whose heartbeat stopped — the process died."""
+        if self.status != "running":
+            return False
+        from datetime import timezone as _tz
+
+        now = datetime.now(_tz.utc).replace(tzinfo=None)
+        return (now - self.updated_at).total_seconds() > 120
+
+
+class TrainingRun(Base):
+    """A completed training/evaluation run, for provenance in the UI."""
+
+    __tablename__ = "training_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, index=True)  # "face-embed"|"face-detect"
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="running")
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    identity_count: Mapped[int] = mapped_column(Integer, default=0)
+    metrics: Mapped[str] = mapped_column(Text, default="{}")  # JSON
+    artifact_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")

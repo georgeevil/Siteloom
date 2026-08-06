@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block title %}Training data{% endblock %}
+{% block content %}
+<style>
+  .stats { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+  .stat { background: light-dark(#fff, #1c1c20); border: 1px solid light-dark(#e2e2e6, #2c2c31);
+    border-radius: 10px; padding: 0.5rem 0.85rem; min-width: 105px; }
+  .stat .n { font-size: 1.25rem; font-weight: 650; line-height: 1.2; }
+  .stat .l { font-size: 0.72rem; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.04em; }
+  .facegrid { display: grid; gap: 0.6rem;
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+  .face { background: light-dark(#fff, #1c1c20); border-radius: 9px; overflow: hidden;
+    border: 2px solid light-dark(#e2e2e6, #2c2c31); }
+  .face.confirm { border-color: #2d9d5e; }
+  .face.reject  { border-color: #b3261e; opacity: 0.55; }
+  .face img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block;
+    background: light-dark(#e9e9ee, #26262b); }
+  .face .m { padding: 0.35rem 0.45rem; font-size: 0.74rem; line-height: 1.4; }
+  .face .acts { display: flex; border-top: 1px solid light-dark(#e2e2e6, #2c2c31); }
+  .face .acts button { flex: 1; border: 0; padding: 0.3rem; cursor: pointer; font-size: 0.8rem;
+    background: transparent; color: inherit; }
+  .face .acts button:hover { background: light-dark(#f0f0f4, #2a2a30); }
+  .face input.nm { width: 100%; border: 0; border-top: 1px solid light-dark(#e2e2e6, #2c2c31);
+    padding: 0.25rem 0.45rem; font-size: 0.74rem; background: transparent; color: inherit; }
+  .btn { padding: 0.35rem 0.75rem; border-radius: 7px; font-size: 0.83rem; cursor: pointer;
+    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); color: inherit; }
+  .btn.primary { background: light-dark(#0a63c9, #2d6fd0); color: #fff; border-color: transparent; }
+  .cov { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .cov a { font-size: 0.78rem; padding: 0.15rem 0.5rem; border-radius: 999px;
+    border: 1px solid light-dark(#e2e2e6, #2c2c31); }
+  .cov a.ready { background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
+    border-color: transparent; }
+  .cov a.extra { display: none; }
+  .cov.all a.extra { display: inline; }
+  /* Keep the review controls reachable while scrolling a long grid —
+     otherwise Apply is a scroll-to-top away after every screenful. */
+  .actions { position: sticky; top: 0; z-index: 5; padding: 0.55rem 0;
+    display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+    background: light-dark(#f5f5f7, #111114);
+    border-bottom: 1px solid light-dark(#e2e2e6, #2c2c31); }
+  .marked { font-variant-numeric: tabular-nums; }
+</style>
+
+<h2 style="font-size:1.05rem;">Training data</h2>
+<p class="muted" style="font-size:0.83rem; max-width:70ch;">
+  Face names imported from Google Photos are <em>proposals</em>, not labels.
+  Only what you verify here is used to train — a model trained on its own
+  guesses would score well and mean nothing.
+</p>
+
+<div class="stats">
+  <div class="stat"><div class="n">{{ totals.faces }}</div><div class="l">faces</div></div>
+  <div class="stat"><div class="n">{{ totals.verified }}</div><div class="l">verified</div></div>
+  <div class="stat"><div class="n">{{ totals.rejected }}</div><div class="l">rejected</div></div>
+  <div class="stat"><div class="n">{{ coverage | length }}</div><div class="l">people</div></div>
+  {% for basis, n in by_basis.items() if basis %}
+  <div class="stat"><div class="n">{{ n }}</div><div class="l">{{ basis }}</div></div>
+  {% endfor %}
+</div>
+
+<div class="panel" style="background:light-dark(#fff,#1c1c20); border:1px solid light-dark(#e2e2e6,#2c2c31);
+     border-radius:10px; padding:0.8rem 1rem; margin-bottom:1rem;">
+  <h3 style="margin:0 0 0.4rem; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.04em; opacity:0.55;">
+    Per-person coverage
+  </h3>
+  <p class="muted" style="font-size:0.76rem; margin:0 0 0.5rem;">
+    Green = at least {{ min_samples }} verified samples, enough to include in a fine-tune.
+    Shown as verified / proposed.
+  </p>
+  {# Sorted so the people worth reviewing (most proposals awaiting a
+     decision) come first; with 80+ people an unsorted list buries them. #}
+  {% set ranked = coverage | sort(attribute='1', reverse=true) %}
+  <div class="cov" id="cov">
+    {% for name, n in ranked %}
+      {% set v = verified_coverage.get(name, 0) %}
+      <a href="/training?person={{ name | urlencode }}"
+         class="{% if v >= min_samples %}ready{% endif %}{% if loop.index > 18 %} extra{% endif %}">
+        {{ name }} <strong>{{ v }}</strong>/{{ n }}
+      </a>
+    {% endfor %}
+    {% if not coverage %}<span class="muted" style="font-size:0.8rem;">No people imported yet.</span>{% endif %}
+  </div>
+  {% if coverage | length > 18 %}
+  <button class="btn" id="cov-toggle" style="margin-top:0.5rem;">
+    Show all {{ coverage | length }} people
+  </button>
+  {% endif %}
+</div>
+
+{% if filters.person %}
+<p><a href="/training">&larr; all people</a> — showing <strong>{{ filters.person }}</strong></p>
+{% endif %}
+
+{% if proposals %}
+<div class="actions">
+  <button class="btn" id="b-all-confirm">Confirm all shown</button>
+  <button class="btn" id="b-all-clear">Clear marks</button>
+  <button class="btn primary" id="b-apply">Apply</button>
+  <span class="muted marked" id="marked"></span>
+  <span class="muted" id="status" style="font-size:0.8rem;"></span>
+  {% if not filters.person %}
+  <span class="muted" style="font-size:0.78rem; margin-left:auto;">
+    Tip: click a person above to review one face at a time — far safer to bulk-confirm.
+  </span>
+  {% endif %}
+</div>
+
+<div class="facegrid" id="grid">
+  {% for a in proposals %}
+  <div class="face {% if a.verified %}confirm{% elif a.rejected %}reject{% endif %}"
+       data-id="{{ a.id }}"
+       data-state="{% if a.verified %}confirm{% elif a.rejected %}reject{% else %}none{% endif %}">
+    {% if a.crop_path %}
+      <img src="/media/{{ a.crop_path }}" loading="lazy" alt="">
+    {% else %}
+      <div style="aspect-ratio:1; display:flex; align-items:center; justify-content:center; opacity:0.4; font-size:0.75rem;">no crop</div>
+    {% endif %}
+    <div class="m">
+      <strong>{{ a.proposed_name or '—' }}</strong><br>
+      <span class="muted">{{ a.proposal_basis or 'unassigned' }}</span>
+    </div>
+    <input class="nm" type="text" value="{{ a.proposed_name or '' }}" placeholder="name…">
+    <div class="acts">
+      <button data-act="confirm" title="Confirm (C)">✓</button>
+      <button data-act="reject" title="Reject (X)">✗</button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="pager">
+  {% set qs = 'person=' ~ filters.person %}
+  {% if page > 1 %}<a href="?{{ qs }}&page={{ page - 1 }}">&larr; previous</a>{% endif %}
+  {% if has_next %}<a href="?{{ qs }}&page={{ page + 1 }}">next &rarr;</a>{% endif %}
+</div>
+{% else %}
+<p class="muted">
+  No face proposals yet. Import a Google Photos Takeout with
+  <code>siteloom takeout import &lt;path&gt;</code>.
+</p>
+{% endif %}
+
+{% if runs %}
+<h3 style="font-size:0.95rem; margin-top:1.5rem;">Training runs</h3>
+<table>
+  <tr><th>When</th><th>Kind</th><th>Status</th><th>Samples</th><th>People</th><th>Result</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td class="muted">{{ r.run.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+    <td>{{ r.run.kind }}</td>
+    <td>{{ r.run.status }}</td>
+    <td>{{ r.run.sample_count }}</td>
+    <td>{{ r.run.identity_count }}</td>
+    <td class="muted" style="font-size:0.78rem;">
+      {% if r.metrics.get('after') %}
+        AUC {{ r.metrics.before.auc }} → <strong>{{ r.metrics.after.auc }}</strong>
+        {% if r.metrics.get('improved') %}<span class="badge guest">active</span>
+        {% else %}<span class="badge unknown">not adopted</span>{% endif %}
+      {% elif r.metrics %}{{ r.metrics }}{% endif %}
+      {% if r.run.notes %}<br>{{ r.run.notes }}{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<script>
+const covToggle = document.getElementById('cov-toggle');
+if (covToggle) {
+  covToggle.onclick = () => {
+    const cov = document.getElementById('cov');
+    cov.classList.toggle('all');
+    covToggle.textContent = cov.classList.contains('all')
+      ? 'Show fewer' : covToggle.dataset.more || covToggle.textContent;
+  };
+  covToggle.dataset.more = covToggle.textContent;
+}
+
+const grid = document.getElementById('grid');
+if (grid) {
+  function updateMarked() {
+    const c = grid.querySelectorAll('.face[data-state="confirm"]').length;
+    const r = grid.querySelectorAll('.face[data-state="reject"]').length;
+    document.getElementById('marked').textContent =
+      (c || r) ? `${c} to confirm · ${r} to reject` : '';
+  }
+  function setState(card, state) {
+    card.dataset.state = state;
+    card.classList.toggle('confirm', state === 'confirm');
+    card.classList.toggle('reject', state === 'reject');
+    updateMarked();
+  }
+  grid.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const card = btn.closest('.face');
+    const act = btn.dataset.act;
+    setState(card, card.dataset.state === act ? 'none' : act);
+  });
+  document.getElementById('b-all-confirm').onclick = () => {
+    grid.querySelectorAll('.face').forEach(c => {
+      if (c.querySelector('.nm').value.trim()) setState(c, 'confirm');
+    });
+  };
+  document.getElementById('b-all-clear').onclick = () => {
+    grid.querySelectorAll('.face').forEach(c => setState(c, 'none'));
+  };
+  updateMarked();
+  document.getElementById('b-apply').onclick = async () => {
+    const decisions = [];
+    grid.querySelectorAll('.face').forEach(c => {
+      const state = c.dataset.state;
+      const name = c.querySelector('.nm').value.trim();
+      if (state === 'confirm') decisions.push({ id: +c.dataset.id, action: 'confirm', name });
+      else if (state === 'reject') decisions.push({ id: +c.dataset.id, action: 'reject' });
+    });
+    const status = document.getElementById('status');
+    if (!decisions.length) { status.textContent = 'nothing marked'; return; }
+    status.textContent = 'applying…';
+    const res = await fetch('/api/training/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions }),
+    });
+    if (!res.ok) { status.textContent = 'failed'; return; }
+    const data = await res.json();
+    status.textContent = `confirmed ${data.confirmed}, rejected ${data.rejected} — reloading`;
+    setTimeout(() => window.location.reload(), 600);
+  };
+}
+</script>
+{% endblock %}

@@ -7,7 +7,20 @@ from pathlib import Path
 
 import typer
 
+from siteloom.cli_library import (
+    classes_app,
+    jobs_app,
+    library_app,
+    takeout_app,
+    train_app,
+)
+
 app = typer.Typer(help="Siteloom — video & audio intelligence platform.")
+app.add_typer(library_app, name="library")
+app.add_typer(takeout_app, name="takeout")
+app.add_typer(classes_app, name="classes")
+app.add_typer(train_app, name="train")
+app.add_typer(jobs_app, name="jobs")
 
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
 
@@ -98,6 +111,60 @@ def sync_bookings(config: Path = CONFIG_OPT):
     with get_session(engine)() as session:
         count = _sync(session, cfg.guests)
     typer.echo(f"synced {count} booking(s)")
+
+
+@app.command()
+def frigate(config: Path = CONFIG_OPT):
+    """Consume Frigate events over MQTT and run recognition on them.
+
+    Frigate keeps doing RTSP ingest + object detection; Siteloom plays
+    the Double Take + CompreFace role: snapshot -> face/vehicle identity
+    against the shared collection, results to siteloom/identity on MQTT
+    and to configured webhooks.
+    """
+    from siteloom.config import load_config
+    from siteloom.identity import IdentityResolver, VectorStore
+    from siteloom.ingest import build_dispatcher
+    from siteloom.integrations import MqttPublisher, WebhookNotifier
+    from siteloom.integrations.frigate import FrigateConsumer
+    from siteloom.progress import setup_logging
+    from siteloom.store import get_session, init_db, make_engine
+
+    setup_logging()
+    cfg = load_config(config)
+    if not cfg.integrations.frigate.enabled:
+        typer.echo(
+            "frigate integration is disabled — set integrations.frigate.enabled: "
+            "true (and integrations.mqtt) in your config",
+            err=True,
+        )
+        raise typer.Exit(1)
+    engine = make_engine(cfg.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    dispatcher = build_dispatcher(cfg)
+    resolver = None
+    if cfg.identity.enabled:
+        resolver = IdentityResolver(
+            cfg.identity, VectorStore(cfg.identity.vector_db_path)
+        )
+    consumer = FrigateConsumer(
+        cfg,
+        Session,
+        dispatcher,
+        resolver,
+        publisher=MqttPublisher(cfg.integrations.mqtt),
+        notifier=WebhookNotifier(cfg.integrations.webhooks),
+    )
+    try:
+        consumer.run()
+    except KeyboardInterrupt:
+        stats = consumer.stats
+        typer.echo(
+            f"\nstopped: {stats.received} received, {stats.processed} processed, "
+            f"{stats.identities} identities, {stats.skipped} skipped "
+            f"({stats.by_reason}), {stats.errors} errors"
+        )
 
 
 @app.command()

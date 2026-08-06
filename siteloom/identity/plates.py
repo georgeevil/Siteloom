@@ -1,7 +1,7 @@
 """Plate detection + OCR (PRD §6.4, plate path).
 
 Optional dependency group `plates` (onnx-based, no GPU needed):
-    uv sync --extra plates
+    pip install -r requirements-plates.txt
 If the packages are missing the vehicle path silently degrades to
 visual re-ID only — plates are an enhancement, never a requirement.
 """
@@ -59,7 +59,7 @@ def try_build_plate_reader() -> PlateReader | None:
     except ImportError:
         log.warning(
             "plate OCR requested but dependencies missing — "
-            "install with `uv sync --extra plates`; continuing with visual re-ID only"
+            "install with `pip install -r requirements-plates.txt`; continuing with visual re-ID only"
         )
         return None
     except Exception as exc:  # model download failures etc.

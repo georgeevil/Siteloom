@@ -44,6 +44,26 @@ guests:
   arrival_pre_hours: 2
   arrival_post_hours: 4
 
+integrations:
+  mqtt:
+    enabled: false      # publish siteloom/events + siteloom/identity
+    host: localhost
+    port: 1883
+  frigate:              # consume an existing Frigate NVR's events
+    enabled: false      # run with: siteloom frigate
+    api_url: http://localhost:5000
+    mqtt_topic: frigate/events
+    labels: [person, car, truck, motorcycle, bus]
+    min_score: 0.6
+  recognition_api:      # CompreFace-compatible /api/v1/recognition/...
+    enabled: true
+    api_key: ""         # set to require x-api-key (Double Take's "key")
+  webhooks: []
+  # webhooks:
+  #   - url: https://example.com/hook
+  #     events: [identity.match, identity.unknown, identity.new_plate]
+  #     token: optional-bearer
+
 cameras:
   # A local video file — useful for development/testing without live
   # cameras, and the seed of the backfill path (PRD §6.6).

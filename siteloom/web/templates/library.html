@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Library{% endblock %}
+{% block content %}
+<div style="display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;">
+  <h2 style="font-size:1.05rem; margin:0.2rem 0;">Media library</h2>
+  <span class="muted" style="font-size:0.85rem;">
+    {% for status, n in counts.items() %}{{ n }} {{ status }}{% if not loop.last %} · {% endif %}{% endfor %}
+  </span>
+</div>
+
+<form class="filters" method="get" action="/library">
+  <select name="source_id">
+    <option value="">All sources</option>
+    {% for s in sources %}
+      <option value="{{ s.id }}" {% if filters.source_id == s.id %}selected{% endif %}>{{ s.name }} ({{ s.kind }})</option>
+    {% endfor %}
+  </select>
+  <select name="status">
+    <option value="">Any status</option>
+    {% for s in ['pending', 'indexed', 'failed', 'skipped'] %}
+      <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <select name="person">
+    <option value="">Any person tag</option>
+    {% for p in people %}
+      <option value="{{ p }}" {% if filters.person == p %}selected{% endif %}>{{ p }}</option>
+    {% endfor %}
+  </select>
+  <label style="align-self:center; font-size:0.85rem;">
+    <input type="checkbox" name="needs_review" value="true" {% if filters.needs_review %}checked{% endif %}>
+    needs review
+  </label>
+  <button type="submit">Filter</button>
+  <a href="/library" style="align-self:center; font-size:0.85rem;">clear</a>
+</form>
+
+{% if items %}
+<div class="grid">
+  {% for i in items %}
+  <a class="card" href="/library/{{ i.id }}">
+    {% if i.thumb_path %}
+      <img src="/media/{{ i.thumb_path }}" alt="{{ i.name }}" loading="lazy">
+    {% else %}
+      <div class="noimg">{{ i.status }}</div>
+    {% endif %}
+    <div class="meta">
+      <span class="badge">{{ i.kind }}</span>
+      {% if i.status == 'failed' %}<span class="badge unknown">failed</span>
+      {% elif i.status == 'pending' %}<span class="badge">pending</span>{% endif %}
+      {% if i.reviewed %}<span class="badge guest">reviewed</span>{% endif %}<br>
+      <span style="word-break:break-all;">{{ i.name }}</span><br>
+      <span class="muted">
+        {{ box_counts.get(i.id, 0) }} box{{ '' if box_counts.get(i.id, 0) == 1 else 'es' }}
+        {%- if i.taken_at %} · {{ i.taken_at.strftime('%Y-%m-%d') }}{% endif %}
+      </span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+  <p class="muted">
+    Nothing indexed yet. Add a directory with
+    <code>siteloom library add &lt;path&gt;</code> then
+    <code>siteloom library index</code>.
+  </p>
+{% endif %}
+
+<div class="pager">
+  {% set qs = 'source_id=' ~ filters.source_id ~ '&status=' ~ filters.status ~ '&person=' ~ filters.person ~ ('&needs_review=true' if filters.needs_review else '') %}
+  {% if page > 1 %}<a href="?{{ qs }}&page={{ page - 1 }}">&larr; previous</a>{% endif %}
+  {% if has_next %}<a href="?{{ qs }}&page={{ page + 1 }}">next &rarr;</a>{% endif %}
+</div>
+{% endblock %}

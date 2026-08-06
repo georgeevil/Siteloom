@@ -135,6 +135,9 @@ class IdentityConfig(BaseModel):
     auto_add_threshold: float = 0.80
     # Classes never auto-identified (too generic to re-identify usefully).
     auto_add_exclude: list[str] = ["bird"]
+    # Fine-tuned face projection matrix (.npy) produced by
+    # `siteloom train-face`. Empty = use raw SFace embeddings.
+    face_projection_path: str = "training/face_projection.npy"
 
 
 class AudioConfig(BaseModel):
@@ -158,6 +161,104 @@ class GuestConfig(BaseModel):
     arrival_post_hours: float = 4.0
 
 
+class LibraryConfig(BaseModel):
+    """Local media library indexing (photos / short videos)."""
+
+    # Frames sampled per video during indexing — enough to catch everyone
+    # present without processing an archive frame by frame.
+    video_frames: int = 5
+    # Default batch size for the resumable process phase.
+    batch_size: int = 100
+    # Run identification during indexing (can be deferred to save time
+    # on a first pass, then run later).
+    identify_on_index: bool = True
+
+
+class TrainingConfig(BaseModel):
+    """Face model training from verified library annotations."""
+
+    output_dir: str = "training"
+    # Face embedder fine-tuning: a projection head over SFace features.
+    min_samples_per_person: int = 5
+    embed_epochs: int = 60
+    embed_lr: float = 1e-3
+    embed_output_dim: int = 128
+    # Fraction of people's samples held out for evaluation.
+    val_fraction: float = 0.25
+    # YOLO face detector training.
+    detector_model: str = "yolo11n.pt"
+    detector_epochs: int = 50
+    detector_imgsz: int = 640
+
+
+class MqttConfig(BaseModel):
+    """MQTT connection, used both to publish Siteloom events and to
+    consume other systems' (Frigate's) event streams."""
+
+    enabled: bool = False
+    host: str = "localhost"
+    port: int = 1883
+    username: str = ""
+    password: str = ""
+    client_id: str = "siteloom"
+    # Root for published topics: <base_topic>/events, <base_topic>/identity.
+    base_topic: str = "siteloom"
+
+
+class FrigateConfig(BaseModel):
+    """Consume an existing Frigate install's events.
+
+    Frigate keeps doing what it is good at (RTSP ingest, motion gating,
+    first-pass object detection); Siteloom takes over the recognition
+    layer — the role Double Take + CompreFace play in that stack.
+    """
+
+    enabled: bool = False
+    # Frigate's HTTP API, used to fetch event snapshots.
+    api_url: str = "http://localhost:5000"
+    mqtt_topic: str = "frigate/events"
+    # Only these Frigate labels are processed (empty = all).
+    labels: list[str] = ["person", "car", "truck", "motorcycle", "bus"]
+    # Only these cameras (empty = all).
+    cameras: list[str] = []
+    min_score: float = 0.6
+    # Frigate fires "update" events as a tracked object improves; process
+    # at most one snapshot per event this many seconds apart.
+    update_interval_s: float = 10.0
+
+
+class WebhookConfig(BaseModel):
+    url: str
+    # Which occurrences fire this hook: identity.match, identity.unknown,
+    # identity.new_plate, noise.episode.
+    events: list[str] = ["identity.match", "identity.unknown"]
+    # Optional bearer token sent as Authorization: Bearer <token>.
+    token: str = ""
+
+
+class RecognitionApiConfig(BaseModel):
+    """CompreFace-compatible face recognition REST API.
+
+    Lets tools that already speak CompreFace (Double Take most notably)
+    use Siteloom as their recognizer — same face collection the cameras
+    and the photo backfill share.
+    """
+
+    enabled: bool = True
+    # If set, requests must carry it in the x-api-key header (the header
+    # CompreFace clients already send).
+    api_key: str = ""
+    # Minimum face-detector confidence for a box to be reported.
+    det_prob_threshold: float = 0.7
+
+
+class IntegrationsConfig(BaseModel):
+    mqtt: MqttConfig = MqttConfig()
+    frigate: FrigateConfig = FrigateConfig()
+    recognition_api: RecognitionApiConfig = RecognitionApiConfig()
+    webhooks: list[WebhookConfig] = []
+
+
 class StorageConfig(BaseModel):
     db_url: str = "sqlite:///siteloom.db"
     # Directory where detection crops / annotated frames are written.
@@ -167,17 +268,35 @@ class StorageConfig(BaseModel):
 class SiteConfig(BaseModel):
     site_id: str
     site_name: str = ""
-    cameras: list[CameraConfig]
+    # Empty is valid: a library-only deployment (archive indexing and
+    # labeling) needs no cameras.
+    cameras: list[CameraConfig] = []
     unifi: UniFiConfig = UniFiConfig()
     backend: BackendConfig = BackendConfig()
     detection: DetectionConfig = DetectionConfig()
     identity: IdentityConfig = IdentityConfig()
     audio: AudioConfig = AudioConfig()
     guests: GuestConfig = GuestConfig()
+    library: LibraryConfig = LibraryConfig()
+    training: TrainingConfig = TrainingConfig()
+    integrations: IntegrationsConfig = IntegrationsConfig()
     storage: StorageConfig = StorageConfig()
 
 
 def load_config(path: str | Path) -> SiteConfig:
     with open(path) as f:
         data = yaml.safe_load(f)
-    return SiteConfig.model_validate(data)
+    config = SiteConfig.model_validate(data)
+    # Remembered so operator edits made in the web UI (class list,
+    # thresholds) can be written back to the file they came from.
+    object.__setattr__(config, "_source_path", str(Path(path).resolve()))
+    return config
+
+
+def save_config(config: SiteConfig, path: str | Path | None = None) -> str:
+    target = path or getattr(config, "_source_path", None)
+    if not target:
+        raise ValueError("no config path known; pass one explicitly")
+    data = config.model_dump(mode="json")
+    Path(target).write_text(yaml.safe_dump(data, sort_keys=False))
+    return str(target)

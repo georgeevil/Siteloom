@@ -1,0 +1,12 @@
+# Optional plate detection + OCR (PRD §6.4). Without these the vehicle
+# identifier degrades to visual re-ID only, with a logged warning.
+#   .venv/bin/pip install -r requirements-plates.txt
+
+-r requirements.txt
+
+fast-plate-ocr==1.1.0
+flatbuffers==25.12.19
+onnxruntime==1.28.0
+open-image-models==0.6.0
+opencv-python-headless==5.0.0.93
+tqdm==4.70.0

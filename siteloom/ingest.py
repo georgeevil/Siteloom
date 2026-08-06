@@ -78,6 +78,13 @@ class IngestService:
         with self.Session() as session:
             self._guest_windows = GuestWindows(session, config.guests)
 
+        # Optional outbound integrations: MQTT bus + webhooks. Both are
+        # no-ops unless configured, and neither may break ingestion.
+        from siteloom.integrations import MqttPublisher, WebhookNotifier
+
+        self.publisher = MqttPublisher(config.integrations.mqtt)
+        self.notifier = WebhookNotifier(config.integrations.webhooks)
+
     def _sync_cameras(self) -> None:
         with self.Session() as session:
             for cam in self.config.cameras:
@@ -260,6 +267,7 @@ class IngestService:
                 .filter_by(event_id=event.id, identity_id=resolution.identity.id)
                 .first()
             )
+            first_link = link is None
             if link is None:
                 session.add(
                     EventIdentity(
@@ -271,6 +279,28 @@ class IngestService:
             else:
                 link.hit_count += 1
                 link.similarity = max(link.similarity, resolution.similarity)
+
+            # Publish once per event+identity pairing, not per frame — a
+            # 30-second visit is one match, not sixty notifications.
+            if first_link:
+                from siteloom.integrations.mqtt import identity_payload
+                from siteloom.integrations.webhooks import classify_resolution
+
+                payload = identity_payload(
+                    event,
+                    resolution.identity,
+                    resolution.similarity,
+                    resolution.is_new,
+                )
+                self.publisher.publish("identity", payload)
+                self.notifier.fire(
+                    classify_resolution(
+                        resolution.identity,
+                        resolution.is_new,
+                        resolution.learned_plate,
+                    ),
+                    payload,
+                )
 
     def _find_or_create_event(
         self, session, camera_id: str, det: dict, ts: datetime

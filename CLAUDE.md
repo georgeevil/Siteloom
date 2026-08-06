@@ -8,14 +8,20 @@ Siteloom: a multi-site video & audio intelligence platform (PoC for Kai Apartmen
 
 ## Commands
 
-- `uv sync --extra dev` — install (uv-managed venv; Python ≥3.12)
-- `uv run pytest` — full test suite; single test: `uv run pytest tests/test_ingest.py::test_ingest_end_to_end`
-- `uv run siteloom run --config config/site.example.yaml` — ingest configured cameras (add `--max-frames N` for a quick debug run)
-- `uv run siteloom serve --config ...` — event-browser web UI on :8000
-- `uv run siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
-- `uv run siteloom init-db --config ...` — create tables (run/serve also do this implicitly)
+The project uses a plain `venv` + `pip` at `./.venv` (Python ≥3.12). Commands below use `.venv/bin/...` explicitly so they work without activating; interactively, `source .venv/bin/activate` first and drop the prefix.
 
-Backfill a media archive: `uv run siteloom backfill <path> --config ...`; sync guest bookings: `uv run siteloom sync-bookings`. Plate OCR is optional: `uv sync --extra plates` (without it the vehicle path degrades to visual re-ID with a logged warning).
+- `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt` — install (runtime + test deps, project editable)
+- `.venv/bin/pytest` — full test suite; single test: `.venv/bin/pytest tests/test_ingest.py::test_ingest_end_to_end`
+- `.venv/bin/siteloom run --config config/site.example.yaml` — ingest configured cameras (add `--max-frames N` for a quick debug run)
+- `.venv/bin/siteloom serve --config ...` — event-browser web UI on :8000
+- `.venv/bin/siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
+- `.venv/bin/siteloom init-db --config ...` — create tables (run/serve also do this implicitly)
+
+Dependencies are pinned in `requirements.txt` (runtime, plus `-e .`), `requirements-dev.txt`, and `requirements-plates.txt`; `pyproject.toml` remains the source of truth for ranges — after changing it, re-pin the requirements files.
+
+Backfill a media archive: `siteloom backfill <path> --config ...`; sync guest bookings: `siteloom sync-bookings`. Plate OCR is optional: `pip install -r requirements-plates.txt` (without it the vehicle path degrades to visual re-ID with a logged warning).
+
+Library/training sub-apps: `siteloom library add|scan|index|status`, `siteloom takeout inspect|import`, `siteloom classes list|add|rebuild`, `siteloom train status|face|export-detector|detector`. Face models (YuNet/SFace ONNX) auto-download to `~/.cache/siteloom/models`.
 
 ## Architecture
 
@@ -36,6 +42,32 @@ The compute/state split is deliberate and must be preserved: `modules/identity.p
 - **Per-class algorithms** (`identity/embedders.py`): face ID uses a dedicated pipeline (YuNet detect → align → SFace 128-d, OpenCV built-ins, models auto-downloaded to `~/.cache/siteloom/models`); everything else uses a shared ResNet-18 appearance embedding (512-d). Each identifier carries its own cosine threshold in config because the similarity distributions differ wildly (face ≈0.36, generic ≈0.8+). The registry (`identity/registry.py`) maps detection class → identifiers and **auto-adds a generic identifier for any unseen class** when `identity.auto_add_classes` is on — adding a class to `detection.classes` is the only step needed to re-identify it.
 - **Plates** (`identity/plates.py`): plate OCR and visual re-ID write to the *same* vehicle Identity row (PRD §6.4); a plate match beats visual similarity, and a visual match can learn its plate later.
 - **Label-and-learn** (PRD §6.3): identities start unlabeled ("unknown-…" bucket in `/identities`); labeling via the web UI renames all past and future matches — never require pre-enrollment.
+
+### Library, labeling, training (`siteloom/library/`, `siteloom/training/`)
+
+- **Two-phase indexing is the whole point of `library/indexer.py`**: `scan()` is cheap and registers rows as `pending`; `process(limit=N)` is expensive and bounded. Never collapse them — partial/resumable indexing over huge archives depends on the split. Re-indexing deletes only unverified `source="auto"` annotations; human work must always survive.
+- **`Annotation` is one table for four jobs** (detection review, identity labeling, custom-class labeling, face training data). `source` records provenance (`auto`/`human`/`import`), `verified` records human sign-off, `rejected` keeps negatives rather than deleting them. Boxes are stored **normalized 0..1** so they survive thumbnailing.
+- **Only verified, non-rejected annotations are training data** (`training/dataset.py`). The Takeout importer's proposals live in `proposed_name`/`proposal_basis`, deliberately separate from `identity_id`, so guesses never leak into the identity store or a training export.
+- **Takeout two-pass assignment** (`library/takeout.py`): Google's `people` tags are per-photo, not per-face. Pass 1 handles 1-face-1-name (certain, auto-verified, seeds a gallery); pass 2 matches remaining faces against that gallery *restricted to names tagged on the same photo*. Sidecar matching is by the JSON `title` field first, filename heuristics second — Takeout's naming is genuinely inconsistent (truncation, `(1)` counters that migrate into the JSON name, legacy `.json` suffixes).
+- **Never adopt a model without a valid evaluation** (`training/face.py`). `EvalMetrics.valid` is False when a split can't produce both same- and different-person pairs; an invalid score is not a zero score. `split_by_person` enforces a 2-sample validation floor per person so same-person pairs exist. Fine-tuning is only adopted on a genuine held-out improvement — evaluating on train can never justify it.
+- **Custom sub-classes are k-NN, not a model** (`identity/classes.py`): examples are labeled crops embedded with the existing generic embedder, stored in the `class-examples` collection. Adding an example improves the class immediately; there is no training run. Rebuild after the embedder changes, or stale vectors from an old embedding space silently degrade voting.
+- YOLO face-detector training improves **detection only**; identification stays with the embedding pipeline. Say so plainly rather than implying otherwise.
+
+### Integrations (`siteloom/integrations/`, `siteloom/web/recognition_api.py`)
+
+- The Frigate consumer (`integrations/frigate.py`) implements the Double Take pattern: MQTT `frigate/events` → snapshot from **Frigate's API, never the camera** → identity pipeline → store + republish + webhooks. Dedupe is `Event.external_id` = the Frigate event id; `update` messages are rate-limited per event. Keep `handle_message` free of network/broker coupling — it takes raw bytes and an injectable snapshot fetcher, which is what makes it testable.
+- The recognition API is **shape-compatible with CompreFace v1** (recognize/subjects/faces, `x-api-key`) so Double Take can point at it. A "subject" = a labeled face Identity; unknown-bucket identities must never appear as subjects.
+- **A label without vectors is a name the system cannot see**: confirming a face proposal must enroll its embedding (`identity/enroll.py`) — the review endpoint does this inline, `siteloom train enroll` sweeps backlogs. If recognition returns empty subjects for a known person, unenrolled identities are the first suspect.
+- Embedded Qdrant is **one client per path per machine**: reuse an already-open VectorStore (see `train enroll`), never open a second in-process; across processes, stop the server first. VectorStore methods are lock-serialized because FastAPI serves from a threadpool.
+- MQTT/webhook publishing must degrade to a log line when the broker/endpoint is down — never let telemetry break ingestion (NFR1). Publish identity results once per event+identity pairing, not per frame.
+
+### Long-running operations (`siteloom/progress.py`)
+
+Any operation that can run for minutes must go through `ProgressReporter` — it is the single place that provides all three things such a job needs. Wrap the work in `with ProgressReporter(...) as p:` and each stage in `with p.phase(name, total=n):`, calling `p.advance(**counters)` per item and `p.check_interrupt()` right after each commit.
+
+- **Heartbeat, not just a bar**: every tick writes an `OperationRun` row, which is what makes a run visible to `siteloom jobs`, `/jobs`, and other terminals. A row still marked `running` whose `updated_at` went cold reports `is_stale` — a dead process must never look healthy.
+- **Non-TTY must not go silent**: the reporter renders a Rich bar on a terminal and periodic log lines when redirected. Don't add bare `print`/bar code that only works interactively.
+- **Ctrl-C is a feature**: the first interrupt sets a flag, the loop finishes its batch, commits, records `interrupted`, and prints the resume command; a second aborts. Every long operation must therefore be resumable — batch commits plus a skip-what's-done query, never a single transaction over the whole job.
 
 ### Audio, backfill, guests
 

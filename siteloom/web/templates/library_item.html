@@ -1,0 +1,358 @@
+{% extends "base.html" %}
+{% block title %}{{ item.name }}{% endblock %}
+{% block content %}
+<style>
+  .editor { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 1rem; align-items: start; }
+  @media (max-width: 900px) { .editor { grid-template-columns: 1fr; } }
+  .canvas-wrap { position: relative; background: light-dark(#e9e9ee, #26262b);
+    border-radius: 10px; overflow: hidden; }
+  .canvas-wrap canvas { display: block; width: 100%; height: auto; cursor: crosshair; touch-action: none; }
+  .side { display: flex; flex-direction: column; gap: 0.7rem; }
+  .panel { background: light-dark(#fff, #1c1c20); border: 1px solid light-dark(#e2e2e6, #2c2c31);
+    border-radius: 10px; padding: 0.7rem 0.8rem; }
+  .panel h3 { margin: 0 0 0.5rem; font-size: 0.85rem; text-transform: uppercase;
+    letter-spacing: 0.04em; opacity: 0.55; }
+  .panel label { display: block; font-size: 0.78rem; opacity: 0.7; margin: 0.45rem 0 0.15rem; }
+  .panel select, .panel input[type=text], .panel input[type=number] {
+    width: 100%; padding: 0.35rem 0.5rem; border-radius: 7px; font-size: 0.85rem;
+    border: 1px solid light-dark(#d0d0d5, #3a3a40);
+    background: light-dark(#fff, #232328); color: inherit; }
+  .boxlist { max-height: 240px; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+  .boxlist li { padding: 0.3rem 0.45rem; border-radius: 6px; font-size: 0.8rem;
+    cursor: pointer; display: flex; gap: 0.4rem; align-items: center; }
+  .boxlist li.sel { background: light-dark(#e8f0fe, #1e3a5f); }
+  .btnrow { display: flex; gap: 0.45rem; flex-wrap: wrap; margin-top: 0.6rem; }
+  .btn { padding: 0.35rem 0.7rem; border-radius: 7px; font-size: 0.82rem; cursor: pointer;
+    border: 1px solid light-dark(#d0d0d5, #3a3a40);
+    background: light-dark(#fff, #232328); color: inherit; }
+  .btn.primary { background: light-dark(#0a63c9, #2d6fd0); color: #fff; border-color: transparent; }
+  .btn.danger { color: light-dark(#b3261e, #ff9d96); }
+  .hint { font-size: 0.75rem; opacity: 0.55; line-height: 1.5; }
+  .status { font-size: 0.8rem; min-height: 1.2em; }
+</style>
+
+<div style="display:flex; align-items:center; gap:0.8rem; flex-wrap:wrap; margin-bottom:0.6rem;">
+  <a href="/library">&larr; library</a>
+  {% if prev_id %}<a href="/library/{{ prev_id }}">&larr; prev</a>{% endif %}
+  {% if next_id %}<a href="/library/{{ next_id }}">next &rarr;</a>{% endif %}
+  <strong style="font-size:0.9rem; word-break:break-all;">{{ item.name }}</strong>
+  <span class="badge">{{ item.kind }}</span>
+  {% if item.status == 'failed' %}<span class="badge unknown" title="{{ item.error }}">failed</span>{% endif %}
+  {% if item.reviewed %}<span class="badge guest">reviewed</span>{% endif %}
+</div>
+
+<div class="editor">
+  <div class="canvas-wrap">
+    <canvas id="cv"></canvas>
+  </div>
+
+  <div class="side">
+    <div class="panel">
+      <h3>Selected box</h3>
+      <div id="nosel" class="hint">Drag on the image to draw a box. Click one to select it.</div>
+      <div id="sel" style="display:none;">
+        <label>Class</label>
+        <select id="f-class">
+          {% for c in detection_classes %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+        <label>Custom sub-class</label>
+        <select id="f-custom">
+          <option value="">— none —</option>
+          {% for c in custom_classes %}<option value="{{ c.name }}">{{ c.name }}</option>{% endfor %}
+        </select>
+        <label>Identity</label>
+        <select id="f-identity">
+          <option value="">— unassigned —</option>
+          {% for i in identities %}<option value="{{ i.id }}">{{ i.display_name }}</option>{% endfor %}
+        </select>
+        <label>Proposed name (unconfirmed)</label>
+        <input type="text" id="f-proposed" placeholder="e.g. from Takeout import">
+        <label style="display:flex; gap:0.4rem; align-items:center; margin-top:0.6rem;">
+          <input type="checkbox" id="f-verified"> <span>verified (training data)</span>
+        </label>
+        <label style="display:flex; gap:0.4rem; align-items:center;">
+          <input type="checkbox" id="f-rejected"> <span>rejected (bad box/label)</span>
+        </label>
+        <div class="btnrow">
+          <button class="btn danger" id="b-delete">Delete box</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Boxes (<span id="count">0</span>)</h3>
+      <ul class="boxlist" id="list"></ul>
+      <div class="btnrow">
+        <button class="btn primary" id="b-save">Save</button>
+        <button class="btn" id="b-verify-all">Verify all</button>
+      </div>
+      <div class="status muted" id="status"></div>
+      <div class="hint" style="margin-top:0.5rem;">
+        Keys: <b>V</b> verify · <b>X</b> reject · <b>Delete</b> remove · <b>Esc</b> deselect ·
+        <b>Cmd/Ctrl+S</b> save · <b>N</b>/<b>P</b> next/prev item
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Tags</h3>
+      {% set person_tags = tags | selectattr('kind', 'equalto', 'person') | list %}
+      {% if person_tags %}
+        <div style="margin-bottom:0.5rem;">
+          {% for t in person_tags %}<span class="badge">{{ t.value }}</span> {% endfor %}
+          <div class="hint">people tags imported from Google Photos</div>
+        </div>
+      {% endif %}
+      <input type="text" id="f-tags" placeholder="comma-separated tags"
+             value="{{ tags | selectattr('kind', 'equalto', 'user') | map(attribute='value') | join(', ') }}">
+      <div class="btnrow"><button class="btn" id="b-tags">Save tags</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const ITEM_ID = {{ item.id }};
+const IMG_SRC = "/media/{{ item.thumb_path or item.path }}";
+const PREV_ID = {{ prev_id or 'null' }};
+const NEXT_ID = {{ next_id or 'null' }};
+let boxes = {{ annotations_json | safe }};
+let sel = -1;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const img = new Image();
+const statusEl = document.getElementById('status');
+
+const PALETTE = {
+  human:  '#2d9d5e',   // human-drawn / corrected
+  auto:   '#3b82f6',   // machine detection
+  import: '#a855f7',   // from sidecar metadata
+};
+
+img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; draw(); };
+img.onerror = () => { statusEl.textContent = 'could not load image'; };
+img.src = IMG_SRC;
+
+function draw() {
+  ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  const lw = Math.max(2, cv.width / 400);
+  ctx.lineWidth = lw;
+  ctx.font = `${Math.max(12, cv.width / 55)}px -apple-system, sans-serif`;
+  ctx.textBaseline = 'top';
+  boxes.forEach((b, i) => {
+    const [x1, y1, x2, y2] = b.bbox.map((v, k) => v * (k % 2 ? cv.height : cv.width));
+    const color = b.rejected ? '#b3261e' : (PALETTE[b.source] || '#888');
+    ctx.strokeStyle = color;
+    ctx.setLineDash(b.verified ? [] : [lw * 3, lw * 2]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    if (i === sel) {
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = lw / 2;
+      ctx.strokeRect(x1 - lw, y1 - lw, x2 - x1 + lw * 2, y2 - y1 + lw * 2);
+      ctx.lineWidth = lw;
+    }
+    const label = labelFor(b);
+    ctx.setLineDash([]);
+    const tw = ctx.measureText(label).width;
+    const th = parseInt(ctx.font) * 1.35;
+    ctx.fillStyle = color;
+    ctx.fillRect(x1, Math.max(0, y1 - th), tw + 8, th);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, x1 + 4, Math.max(0, y1 - th) + 2);
+  });
+  if (drawing) {
+    ctx.setLineDash([lw * 2, lw * 2]);
+    ctx.strokeStyle = '#2d9d5e';
+    ctx.strokeRect(drawing.x, drawing.y, drawing.w, drawing.h);
+    ctx.setLineDash([]);
+  }
+  renderList();
+}
+
+function labelFor(b) {
+  let s = b.custom_class || b.class_name;
+  const who = b.identity_name || b.proposed_name;
+  if (who) s += ` · ${who}`;
+  if (b.verified) s += ' ✓';
+  if (b.rejected) s += ' ✗';
+  return s;
+}
+
+function renderList() {
+  const ul = document.getElementById('list');
+  document.getElementById('count').textContent = boxes.length;
+  ul.innerHTML = '';
+  boxes.forEach((b, i) => {
+    const li = document.createElement('li');
+    if (i === sel) li.className = 'sel';
+    const dot = document.createElement('span');
+    dot.style.cssText = `width:9px;height:9px;border-radius:50%;flex:none;background:${b.rejected ? '#b3261e' : (PALETTE[b.source] || '#888')}`;
+    li.appendChild(dot);
+    const txt = document.createElement('span');
+    txt.textContent = labelFor(b) + (b.proposal_basis ? ` (${b.proposal_basis})` : '');
+    li.appendChild(txt);
+    li.onclick = () => { select(i); };
+    ul.appendChild(li);
+  });
+}
+
+function select(i) {
+  sel = i;
+  const panel = document.getElementById('sel');
+  const none = document.getElementById('nosel');
+  if (i < 0 || i >= boxes.length) {
+    panel.style.display = 'none'; none.style.display = ''; draw(); return;
+  }
+  panel.style.display = ''; none.style.display = 'none';
+  const b = boxes[i];
+  document.getElementById('f-class').value = b.class_name;
+  document.getElementById('f-custom').value = b.custom_class || '';
+  document.getElementById('f-identity').value = b.identity_id || '';
+  document.getElementById('f-proposed').value = b.proposed_name || '';
+  document.getElementById('f-verified').checked = !!b.verified;
+  document.getElementById('f-rejected').checked = !!b.rejected;
+  draw();
+}
+
+function bindField(id, apply) {
+  const el = document.getElementById(id);
+  el.addEventListener('change', () => {
+    if (sel < 0) return;
+    apply(boxes[sel], el);
+    dirty(); draw();
+  });
+}
+bindField('f-class', (b, el) => b.class_name = el.value);
+bindField('f-custom', (b, el) => b.custom_class = el.value || null);
+bindField('f-identity', (b, el) => {
+  b.identity_id = el.value ? parseInt(el.value) : null;
+  b.identity_name = el.value ? el.options[el.selectedIndex].text : null;
+});
+bindField('f-proposed', (b, el) => b.proposed_name = el.value || null);
+bindField('f-verified', (b, el) => { b.verified = el.checked; if (el.checked) b.rejected = false; });
+bindField('f-rejected', (b, el) => { b.rejected = el.checked; if (el.checked) b.verified = false; });
+
+document.getElementById('b-delete').onclick = () => {
+  if (sel < 0) return;
+  boxes.splice(sel, 1); select(-1); dirty();
+};
+document.getElementById('b-verify-all').onclick = () => {
+  boxes.forEach(b => { if (!b.rejected) b.verified = true; });
+  dirty(); draw();
+};
+
+// -- drawing / hit testing --------------------------------------------------
+let drawing = null, start = null;
+
+function toCanvas(e) {
+  const r = cv.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) / r.width * cv.width,
+    y: (e.clientY - r.top) / r.height * cv.height,
+  };
+}
+
+function hit(p) {
+  // Smallest box containing the point wins, so a face inside a person
+  // box stays selectable.
+  let best = -1, bestArea = Infinity;
+  boxes.forEach((b, i) => {
+    const [x1, y1, x2, y2] = b.bbox.map((v, k) => v * (k % 2 ? cv.height : cv.width));
+    if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
+      const area = (x2 - x1) * (y2 - y1);
+      if (area < bestArea) { bestArea = area; best = i; }
+    }
+  });
+  return best;
+}
+
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  start = toCanvas(e);
+  drawing = { x: start.x, y: start.y, w: 0, h: 0 };
+});
+cv.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const p = toCanvas(e);
+  drawing.w = p.x - start.x; drawing.h = p.y - start.y;
+  draw();
+});
+cv.addEventListener('pointerup', e => {
+  if (!drawing) return;
+  const p = toCanvas(e);
+  const w = Math.abs(p.x - start.x), h = Math.abs(p.y - start.y);
+  const wasDrawing = drawing; drawing = null;
+  if (w < 8 || h < 8) {            // a click, not a drag: select
+    select(hit(p));
+    return;
+  }
+  const x1 = Math.min(start.x, p.x) / cv.width;
+  const y1 = Math.min(start.y, p.y) / cv.height;
+  const x2 = Math.max(start.x, p.x) / cv.width;
+  const y2 = Math.max(start.y, p.y) / cv.height;
+  boxes.push({
+    id: null, bbox: [x1, y1, x2, y2],
+    class_name: document.getElementById('f-class').value || 'face',
+    custom_class: null, identity_id: null, identity_name: null,
+    proposed_name: null, proposal_basis: null, confidence: 1.0,
+    source: 'human', verified: true, rejected: false, frame_index: {{ frame }},
+  });
+  select(boxes.length - 1);
+  dirty();
+});
+
+// -- persistence ------------------------------------------------------------
+let isDirty = false;
+function dirty() { isDirty = true; statusEl.textContent = 'unsaved changes'; }
+
+async function save() {
+  statusEl.textContent = 'saving…';
+  const res = await fetch(`/api/items/${ITEM_ID}/annotations`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ annotations: boxes }),
+  });
+  if (!res.ok) { statusEl.textContent = 'save failed'; return false; }
+  const data = await res.json();
+  isDirty = false;
+  statusEl.textContent = `saved ${data.saved} box${data.saved === 1 ? '' : 'es'}`;
+  const fresh = await fetch(`/api/items/${ITEM_ID}/annotations`);
+  if (fresh.ok) {
+    const rows = await fresh.json();
+    // Re-sync ids so subsequent saves update instead of duplicating.
+    rows.forEach((r, i) => { if (boxes[i]) boxes[i].id = r.id; });
+  }
+  return true;
+}
+document.getElementById('b-save').onclick = save;
+
+document.getElementById('b-tags').onclick = async () => {
+  const tags = document.getElementById('f-tags').value.split(',').map(s => s.trim()).filter(Boolean);
+  const res = await fetch(`/api/items/${ITEM_ID}/tags`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags }),
+  });
+  statusEl.textContent = res.ok ? 'tags saved' : 'tag save failed';
+};
+
+async function go(id) {
+  if (id === null) return;
+  if (isDirty) await save();
+  window.location = `/library/${id}`;
+}
+
+document.addEventListener('keydown', e => {
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  const b = sel >= 0 ? boxes[sel] : null;
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); save(); return; }
+  if (e.key === 'Escape') { select(-1); }
+  else if (e.key === 'v' && b) { b.verified = !b.verified; if (b.verified) b.rejected = false; select(sel); dirty(); }
+  else if (e.key === 'x' && b) { b.rejected = !b.rejected; if (b.rejected) b.verified = false; select(sel); dirty(); }
+  else if ((e.key === 'Delete' || e.key === 'Backspace') && b) { boxes.splice(sel, 1); select(-1); dirty(); }
+  else if (e.key === 'n') { go(NEXT_ID); }
+  else if (e.key === 'p') { go(PREV_ID); }
+});
+
+window.addEventListener('beforeunload', e => { if (isDirty) e.preventDefault(); });
+renderList();
+</script>
+{% endblock %}
