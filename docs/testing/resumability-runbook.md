@@ -14,8 +14,10 @@ transaction over the whole job."* Three things have to hold:
    reporting as healthy.
 
 Findings from the first pass through this runbook are in
-[Results](#results-2026-08-06) at the bottom. F1 and F2 are fixed; F3–F10 are
-open, and F5 in particular changes how you should read a resume command.
+[Results](#results-2026-08-06) at the bottom. F1–F4 and F6 are fixed; F5 and
+F7–F10 are open, and F5 in particular changes how you should read a resume
+command. Day-to-day operation of a running deployment — `doctor`, health
+endpoints, service units — is in [operations.md](../operations.md).
 
 ## 0. Setup
 
@@ -63,8 +65,8 @@ For the synthetic corpus, take `config/site.example.yaml` and repoint
 
 - **Stop any `siteloom serve`** on the same `vector_db_path`. Embedded Qdrant
   is one client per path per machine; a serve process holds the lock and the
-  CLI will fail to open the resolver. (`pgrep -fl siteloom` — there is a serve
-  on :8324 holding `Siteloom-data/vectors` right now.)
+  CLI will fail to open the resolver. `siteloom doctor --config <cfg>` reports
+  this as a failed check naming the remedy, so run it first.
 - `-q` is safe again (F2): it hides the bar and keeps the heartbeat, the log
   lines and the Ctrl-C handler.
 - Keep a second terminal on `siteloom jobs watch --config <cfg>`; observing
@@ -93,6 +95,10 @@ Ctrl-C terminal 1 at roughly a third of the way in. Then:
 siteloom jobs list --config $CFG                # expect: interrupted + resume line
 sqlite3 <db> 'select status, count(*) from library_items group by status'
 ```
+
+`jobs list` and `jobs watch` read the database only, so they work while the job
+holds the vector store. Cancelling from terminal 2 (`siteloom jobs cancel <id>`)
+is equivalent to Ctrl-C in terminal 1 and worth testing both ways.
 
 Pass criteria:
 
@@ -145,13 +151,15 @@ sleep 20; kill -9 %1                    # or: kill -TERM, or close the terminal
 siteloom jobs list --config $CFG
 ```
 
-Pass criteria (and see F3/F4 — this is where it currently falls short):
+Pass criteria:
 
 - Committed items survive; the DB is not corrupt or half-written.
 - Rerunning the same command completes the remainder.
-- `siteloom jobs` must not present a dead run as healthy.
+- `siteloom jobs` must not present a dead run as healthy; `siteloom jobs reap`
+  closes it out as `abandoned` with its resume command intact.
 - Repeat with `kill -TERM` (what `systemctl stop`, a logout, or a reboot sends)
-  and with closing the terminal window (SIGHUP).
+  and with closing the terminal window (SIGHUP): both now stop as gracefully as
+  Ctrl-C, so only `kill -9` should leave a row to reap.
 
 ## 4. Scenario D — the observation surfaces
 
@@ -187,8 +195,8 @@ contention — neither is observable on a 900-image corpus.
 ## Results (2026-08-06)
 
 Scenario A executed end to end on a 300-image synthetic corpus (Apple M-series,
-`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1 and F2 are fixed and
-re-verified against a real interrupt; the rest are open.
+`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1–F4 and F6 are fixed
+and re-verified against real signals; F5 and F7–F10 are open.
 
 **What works.** Interrupt handling is sound at the layer it claims to cover.
 SIGINT at 195/300 finished the in-flight item, committed, recorded
@@ -238,7 +246,7 @@ heartbeat, the log lines and the signal handler. Verified: a `-q` run now
 records its `OperationRun` row. Covered by
 `test_hiding_the_bar_keeps_the_run_tracked`.
 
-### F3 — a killed job looks healthy for 120 s, and the PID is never used
+### F3 — a killed job looks healthy for 120 s, and the PID is never used *(fixed)*
 
 After `kill -9`, `siteloom jobs list` showed the run as `running` with
 `127/295 43%` and **`eta 16s`** — advertising an ETA for a process that no
@@ -249,13 +257,23 @@ matches) would flip it instantly. Smaller bug alongside it: the stale row
 still prints `eta 16s`, because `eta_s` gates on the raw `status` column
 (still `running`) rather than on `is_stale`.
 
-### F4 — only SIGINT is handled
+**Fixed**: `is_stale` now checks the recorded pid on the recording host first
+(a new `host` column disambiguates), falling back to the cold heartbeat
+elsewhere and after pid reuse; `eta_s` returns None once stale. `siteloom jobs
+reap` closes dead rows out as `abandoned`, preserving position and resume
+command, and `doctor` warns while any remain.
+
+### F4 — only SIGINT is handled *(fixed)*
 
 `kill -TERM` (a `systemctl stop`, a logout, a shutdown) and SIGHUP (closing the
 terminal) kill the process mid-batch: the current batch is lost, the row is
 stranded `running`, and no resume line is printed. For a job whose whole point
 is surviving a restart, SIGTERM is the signal a restart actually sends.
-Fix: register the same handler for SIGTERM/SIGHUP.
+
+**Fixed**: `STOP_SIGNALS` covers SIGINT, SIGTERM and SIGHUP; a repeat of the
+same signal still aborts immediately. Verified: `kill -TERM` mid-run finished
+the batch, committed at 83/228, recorded `interrupted` and printed the resume
+command. `siteloom jobs cancel <id>` sends it from another terminal.
 
 ### F5 — resume commands are not faithful to the original invocation
 
@@ -273,10 +291,11 @@ The stored command is rebuilt from two fields, not from the actual arguments:
 This is the issue's actual question ("does the printed resume command work?"):
 it works, but it can resume a *different* job than the one you stopped.
 
-### F6 — the resume line hard-wraps and can't be copy-pasted
+### F6 — the resume line hard-wraps and can't be copy-pasted *(fixed)*
 
 Rich wraps the command at console width; in a non-TTY (80 cols) the path broke
-across three lines. Print it unhighlighted/unwrapped (`soft_wrap=True`).
+across three lines. **Fixed**: printed with `soft_wrap=True` and no
+highlighting, so it survives a redirect to a log file.
 
 ### F7 — pass-2 resume reprocesses every unnamed face
 
@@ -313,8 +332,8 @@ stub-module corpus, and that is what stops these from regressing.
 
 ### Test-setup gaps still open
 
-- **B, C, D, E not yet run** — the results above cover scenario A plus the kill
-  probe from C.
+- **B, C, D, E not yet run** — the results above cover scenario A plus the
+  kill/SIGTERM probes from C and the `jobs cancel`/`reap` path from D.
 - **Real-data pass needs a DB copy and the serve process stopped**; the current
   `archive.yaml` points at live paths and :8324 holds the vector store.
 - **Cross-machine restart** (actual reboot, not `kill -9`) is untested; a

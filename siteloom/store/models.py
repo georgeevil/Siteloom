@@ -335,7 +335,10 @@ class OperationRun(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     # Exact command to continue an interrupted run.
     resume_command: Mapped[str] = mapped_column(Text, default="")
+    # Who was doing the work: enough to check liveness (same host) and,
+    # later, to tell one site's runs from another's.
     pid: Mapped[int] = mapped_column(Integer, default=0)
+    host: Mapped[str] = mapped_column(String, default="")
 
     @property
     def percent(self) -> float:
@@ -355,14 +358,29 @@ class OperationRun(Base):
     def eta_s(self) -> float | None:
         if self.status != "running" or not self.total or self.rate <= 0:
             return None
+        if self.is_stale:
+            return None  # nobody is working on it; an ETA would be a lie
         return max(0.0, (self.total - self.current) / self.rate)
 
     @property
     def is_stale(self) -> bool:
-        """A 'running' row whose heartbeat stopped — the process died."""
+        """A 'running' row that nothing is working on any more.
+
+        Two signals. On the host that recorded the run, the pid answers
+        immediately — waiting out a heartbeat timeout to notice a process
+        that is provably gone helps nobody. Everywhere else (and when a
+        recycled pid makes a dead run look alive) the cold heartbeat is
+        the backstop.
+        """
         if self.status != "running":
             return False
         from datetime import timezone as _tz
+
+        from siteloom.health import hostname, process_alive
+
+        if self.pid and self.host and self.host == hostname():
+            if not process_alive(self.pid):
+                return True
 
         now = datetime.now(_tz.utc).replace(tzinfo=None)
         return (now - self.updated_at).total_seconds() > 120

@@ -125,13 +125,19 @@ and interruptible rather than opaque:
   started in one terminal is visible from another and from the browser. A run
   whose process died shows as `stale` with its last position, rather than
   looking healthy forever.
+- **Steer from anywhere** — stop a job from a terminal that did not start it,
+  and clear up after one that died.
 
 ```bash
-siteloom jobs list     # recent runs, progress, outcome, resume commands
-siteloom jobs watch    # live view of whatever is running
+siteloom jobs list       # recent runs, progress, outcome, resume commands
+siteloom jobs watch      # live view of whatever is running
+siteloom jobs cancel 12  # graceful stop: finishes the batch, leaves a resume command
+siteloom jobs reap       # close out runs whose process is gone
 ```
 
-The `/jobs` page shows the same thing with live progress bars.
+The `/jobs` page shows the same thing with live progress bars. SIGTERM and
+SIGHUP stop a job as gracefully as Ctrl-C, so a service manager or a closing
+terminal costs at most the batch in flight.
 
 ### Training
 
@@ -180,6 +186,21 @@ pip install -r requirements-plates.txt     # optional plate detection + OCR
 
 For UniFi Protect, put the console host/credentials under `unifi:` in your
 site YAML and use each camera's Protect id as its `source`.
+
+## Running it as a service
+
+```bash
+siteloom doctor --config site.yaml   # is this deployment fit to run? exit 1 if not
+```
+
+`doctor` checks the database and schema, media dir and free space, the vector
+store (including *who is holding it*), model weights, optional plate-OCR deps,
+abandoned jobs, and integration coherence — each with a remedy. The server
+exposes `/healthz` (liveness) and `/readyz` (readiness, 503 when it cannot
+work).
+
+launchd and systemd unit templates, stop-signal semantics, and the
+one-process-per-vector-store rule are in [docs/operations.md](docs/operations.md).
 
 ## Web UI
 
@@ -242,10 +263,12 @@ siteloom/
   store/       # SQLAlchemy: events, identities, library items, annotations,
                # custom classes, noise, bookings, training runs
   ingest.py    # adapter -> sampler -> dispatcher -> stores
+  progress.py  # heartbeated, interruptible, resumable long operations
+  health.py    # preflight checks behind `doctor` and /readyz
   web/         # FastAPI + Jinja2 operator UI (events, library, labeling,
                # classes, training review)
-  cli.py       # init-db | run | serve | cameras | backfill | sync-bookings
-               # library | takeout | classes | train
+  cli.py       # init-db | run | serve | doctor | cameras | backfill
+               # sync-bookings | library | takeout | classes | train | jobs
 ```
 
 ## Roadmap

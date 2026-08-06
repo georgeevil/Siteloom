@@ -67,7 +67,15 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 
 - **Heartbeat, not just a bar**: every tick writes an `OperationRun` row, which is what makes a run visible to `siteloom jobs`, `/jobs`, and other terminals. A row still marked `running` whose `updated_at` went cold reports `is_stale` — a dead process must never look healthy.
 - **Non-TTY must not go silent**: the reporter renders a Rich bar on a terminal and periodic log lines when redirected. Don't add bare `print`/bar code that only works interactively.
-- **Ctrl-C is a feature**: the first interrupt sets a flag, the loop finishes its batch, commits, records `interrupted`, and prints the resume command; a second aborts. Every long operation must therefore be resumable — batch commits plus a skip-what's-done query, never a single transaction over the whole job.
+- **Ctrl-C is a feature**: the first interrupt sets a flag, the loop finishes its batch, commits, records `interrupted`, and prints the resume command; a second aborts. Every long operation must therefore be resumable — batch commits plus a skip-what's-done query, never a single transaction over the whole job. SIGTERM and SIGHUP are handled identically (`STOP_SIGNALS`) — a job that only honours SIGINT survives the operator and dies to the machine, which is backwards.
+- **The reporter swallows `Interrupted`** so it can record the run, which leaves anything assigned inside the `with` block unbound. Every caller pre-binds its result to `None` and exits `INTERRUPTED_EXIT` (130) instead of formatting a summary of work that never happened.
+- `bar=False` hides the progress bar; `enabled=False` switches the whole reporter off. Never conflate them — a user asking for a quieter terminal must not silently lose the heartbeat and the signal handler.
+
+### Manageability (`siteloom/health.py`, `siteloom doctor`, `jobs cancel|reap`)
+
+- **Read-only CLI commands must use `_light_setup`, not `_setup`** (`cli_library.py`). The full bootstrap opens the vector store, and embedded Qdrant is one client per path per machine — so `jobs list`/`watch` built on `_setup` crash exactly when a job is running, which is the only time anyone runs them.
+- `health.py` holds every environmental check as a function returning a `Check`, never raising: a diagnostic that dies on the first problem hides the other four. `CHECKS` backs `siteloom doctor`; the cheap `LIVE_CHECKS` subset backs `/readyz` and must never open the vector store the serving process already holds.
+- **A dead run must not look healthy**: `OperationRun.is_stale` checks the recorded pid on the recording host first (immediate) and falls back to a cold heartbeat (120 s) elsewhere or after pid reuse; `eta_s` returns None once stale. `jobs reap` closes dead rows out as `abandoned` while preserving position and resume command.
 
 ### Audio, backfill, guests
 

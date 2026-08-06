@@ -1,8 +1,10 @@
-"""Siteloom CLI: init-db, run, serve, cameras."""
+"""Siteloom CLI: init-db, run, serve, doctor, cameras."""
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
 
 import typer
@@ -55,14 +57,82 @@ def serve(
     config: Path = CONFIG_OPT,
     host: str = "127.0.0.1",
     port: int = 8000,
+    log_file: str = typer.Option(None, "--log-file", help="Also write logs here"),
+    log_level: str = typer.Option("INFO", "--log-level", help="DEBUG|INFO|WARNING"),
 ):
-    """Serve the event-browser web UI."""
+    """Serve the event-browser web UI.
+
+    Long-lived, so run it under a service manager (docs/operations.md).
+    It stops on SIGINT/SIGTERM, and exposes /healthz and /readyz for
+    whatever is watching it.
+    """
     import uvicorn
 
     from siteloom.config import load_config
+    from siteloom.progress import setup_logging
     from siteloom.web.app import create_app
 
-    uvicorn.run(create_app(load_config(config)), host=host, port=port)
+    # The project's own logging, so a service-managed run writes the same
+    # lines to the same file as everything else rather than uvicorn's.
+    setup_logging(level=log_level, log_file=log_file)
+    cfg = load_config(config)
+    logging.getLogger(__name__).info(
+        "serving %s on http://%s:%d (pid %d)", cfg.site_id, host, port, os.getpid()
+    )
+    uvicorn.run(
+        create_app(cfg), host=host, port=port, log_level=log_level.lower()
+    )
+
+
+@app.command()
+def doctor(
+    config: Path = CONFIG_OPT,
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output"),
+):
+    """Check that this deployment is fit to run, and say what to fix.
+
+    Exits non-zero if anything failed, so it works as a service
+    ExecStartPre or a monitoring probe.
+    """
+    from siteloom.config import load_config
+    from siteloom.health import FAIL, OK, WARN, run_checks
+
+    try:
+        cfg = load_config(config)
+    except Exception as exc:
+        typer.echo(f"config {config}: {type(exc).__name__}: {exc}", err=True)
+        raise typer.Exit(2)
+
+    report = run_checks(cfg)
+    if json_out:
+        typer.echo(json.dumps(report.as_dict(), indent=2))
+        raise typer.Exit(0 if report.ok else 1)
+
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    marks = {OK: "[green]ok[/]", WARN: "[yellow]warn[/]", FAIL: "[red]FAIL[/]"}
+    console.print(f"[bold]{cfg.site_name or cfg.site_id}[/] — {config}\n")
+    # A table rather than f-string padding: paths are long, and a wrapped
+    # detail has to stay in its column to remain readable.
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(justify="right", no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(overflow="fold")
+    for check in report.checks:
+        table.add_row(marks[check.status], check.name, check.detail)
+        if check.remedy and check.status != OK:
+            table.add_row("", "", f"[dim]-> {check.remedy}[/]")
+    console.print(table)
+    failed, warned = len(report.failed), len(report.warned)
+    console.print(
+        f"\n{len(report.checks)} checks: "
+        f"[red]{failed} failed[/], [yellow]{warned} warnings[/]"
+        if failed or warned
+        else f"\n{len(report.checks)} checks, all clear"
+    )
+    raise typer.Exit(1 if failed else 0)
 
 
 @app.command()

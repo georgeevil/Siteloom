@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +49,25 @@ def _setup(config_path, log_file: str | None = None, level: str = "INFO"):
         )
     indexer = LibraryIndexer(config, Session, dispatcher, resolver)
     return config, Session, indexer
+
+
+def _light_setup(config_path, level: str = "INFO"):
+    """Config + DB only — no dispatcher, no resolver, no vector store.
+
+    Embedded Qdrant allows one client per path per machine, so the full
+    `_setup` cannot run while a job holds the store. Every command that
+    only reads rows (the jobs dashboard above all — the thing you reach
+    for *because* a job is running) must take this path instead.
+    """
+    from siteloom.config import load_config
+    from siteloom.progress import setup_logging
+    from siteloom.store import get_session, init_db, make_engine
+
+    setup_logging(level=level)
+    config = load_config(config_path)
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    return config, get_session(engine)
 
 
 def _now() -> datetime:
@@ -145,7 +165,7 @@ def library_index(
 @library_app.command("status")
 def library_status(config: Path = CONFIG_OPT):
     """Show per-source indexing progress."""
-    _cfg, Session, _indexer = _setup(config)
+    _cfg, Session = _light_setup(config)
     from sqlalchemy import func, select
 
     from siteloom.store import Annotation, LibraryItem, LibrarySource
@@ -443,7 +463,7 @@ def jobs_list(
     from siteloom.progress import humanize
     from siteloom.store import OperationRun
 
-    _cfg, Session, _indexer = _setup(config, level="WARNING")
+    _cfg, Session = _light_setup(config, level="WARNING")
     with Session() as session:
         runs = session.scalars(
             select(OperationRun).order_by(OperationRun.id.desc()).limit(limit)
@@ -489,6 +509,7 @@ def jobs_list(
         "complete": "green",
         "running": "cyan",
         "interrupted": "yellow",
+        "abandoned": "yellow",
         "failed": "red",
         "stale": "red",
     }
@@ -519,10 +540,107 @@ def jobs_list(
                 f"[dim]#{rid}[/] "
                 + " ".join(f"{k}={v:,}" for k, v in list(counters.items())[:5])
             )
-        if status in ("interrupted", "stale") and resume:
+        if status in ("interrupted", "stale", "abandoned") and resume:
             console.print(f"[yellow]#{rid} resume:[/] {resume}")
         elif status == "failed" and message:
             console.print(f"[red]#{rid} failed:[/] {message}")
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(
+    run_id: int = typer.Argument(..., help="Run id from `siteloom jobs list`"),
+    config: Path = CONFIG_OPT,
+    force: bool = typer.Option(
+        False, "--force", help="SIGKILL instead — loses the batch in flight"
+    ),
+):
+    """Stop a running job from another terminal, gracefully.
+
+    Sends the same signal Ctrl-C does, so the job finishes its batch,
+    commits, records itself interrupted and leaves a resume command —
+    the operator does not have to be at the terminal that started it.
+    """
+    import signal
+
+    from siteloom.health import hostname, process_alive
+    from siteloom.store import OperationRun
+
+    _cfg, Session = _light_setup(config, level="WARNING")
+    with Session() as session:
+        run = session.get(OperationRun, run_id)
+        if run is None:
+            typer.echo(f"no run #{run_id}", err=True)
+            raise typer.Exit(1)
+        if run.status != "running":
+            typer.echo(f"run #{run_id} is already {run.status}")
+            return
+        pid, host, kind = run.pid, run.host, run.kind
+
+    if host and host != hostname():
+        typer.echo(
+            f"run #{run_id} belongs to {host}; cancel it there "
+            f"(this is {hostname()})",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not pid or not process_alive(pid):
+        typer.echo(
+            f"run #{run_id} ({kind}) has no live process — it died without "
+            f"recording an outcome; clear it with `siteloom jobs reap`",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    os.kill(pid, signal.SIGKILL if force else signal.SIGINT)
+    if force:
+        typer.echo(f"killed #{run_id} ({kind}, pid {pid}) — work since the last commit is lost")
+        return
+    typer.echo(
+        f"asked #{run_id} ({kind}, pid {pid}) to stop; it will finish the "
+        f"current batch and print a resume command in its own terminal"
+    )
+
+
+@jobs_app.command("reap")
+def jobs_reap(
+    config: Path = CONFIG_OPT,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask"),
+):
+    """Close out runs whose process is gone.
+
+    A killed process leaves its row saying `running` forever, which makes
+    every later `jobs list` ambiguous. This marks those rows `abandoned`,
+    keeping their position and resume command intact.
+    """
+    from sqlalchemy import select
+
+    from siteloom.store import OperationRun
+
+    _cfg, Session = _light_setup(config, level="WARNING")
+    with Session() as session:
+        stale = [
+            r
+            for r in session.scalars(
+                select(OperationRun).filter(OperationRun.status == "running")
+            ).all()
+            if r.is_stale
+        ]
+        if not stale:
+            typer.echo("nothing to reap — no abandoned runs")
+            return
+        for run in stale:
+            typer.echo(
+                f"#{run.id} {run.kind} {run.current:,}/{run.total:,} "
+                f"(pid {run.pid} on {run.host or '?'}, last beat {run.updated_at:%Y-%m-%d %H:%M})"
+            )
+        if not yes and not typer.confirm(f"mark {len(stale)} run(s) abandoned?"):
+            raise typer.Abort()
+        for run in stale:
+            run.status = "abandoned"
+            run.message = "process gone; closed out by `jobs reap`"
+            run.finished_at = _now()
+        session.commit()
+    typer.echo(f"reaped {len(stale)} run(s); resume commands are preserved")
 
 
 @jobs_app.command("watch")
@@ -541,7 +659,7 @@ def jobs_watch(
     from siteloom.progress import humanize
     from siteloom.store import OperationRun
 
-    _cfg, Session, _indexer = _setup(config, level="WARNING")
+    _cfg, Session = _light_setup(config, level="WARNING")
     console = Console()
 
     def render() -> Table:
@@ -590,7 +708,7 @@ def jobs_watch(
 @classes_app.command("list")
 def classes_list(config: Path = CONFIG_OPT):
     """Show detection classes, identifiers, and custom sub-classes."""
-    cfg, Session, _indexer = _setup(config)
+    cfg, Session = _light_setup(config)
     from sqlalchemy import select
 
     from siteloom.store import CustomClass
