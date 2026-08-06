@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import Form, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
@@ -693,6 +693,43 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 select(OperationRun).order_by(OperationRun.id.desc()).limit(25)
             ).all()
             return JSONResponse([_run_payload(r) for r in runs])
+
+    @app.get("/api/jobs/stream")
+    def jobs_stream(updates: int = 0, interval: float = 2.0):
+        """Server-sent events over the same run payloads (CLD-26/27).
+
+        This is the decided observation channel for long-running jobs:
+        the import wizard's index step and /jobs both subscribe here
+        instead of each polling. The stream re-reads OperationRun every
+        tick, so it observes work owned by *other processes* — a CLI
+        import keeps its own ProgressReporter heartbeat and the browser
+        merely watches, which is what lets a closed tab never kill a run.
+
+        `updates` bounds the number of ticks (0 = until the client
+        disconnects); tests use updates=1 for a single snapshot.
+        `interval` is clamped so a client cannot ask the server to spin.
+        """
+        import time
+
+        interval = max(0.5, min(interval, 30.0))
+
+        def gen():
+            sent = 0
+            while True:
+                with Session() as session:
+                    runs = session.scalars(
+                        select(OperationRun)
+                        .order_by(OperationRun.id.desc())
+                        .limit(25)
+                    ).all()
+                    payload = [_run_payload(r) for r in runs]
+                yield f"data: {json.dumps(payload)}\n\n"
+                sent += 1
+                if updates and sent >= updates:
+                    return
+                time.sleep(interval)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     # -- training review ---------------------------------------------------
 
