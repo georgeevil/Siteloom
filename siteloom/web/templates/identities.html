@@ -1,40 +1,249 @@
 {% extends "base.html" %}
 {% block title %}Identities{% endblock %}
-{% block content %}
-<form class="filters" method="get" action="/identities">
-  <select name="identifier">
-    <option value="">All identifiers</option>
-    {% for key in identifier_keys %}
-      <option value="{{ key }}" {% if filters.identifier == key %}selected{% endif %}>{{ key }}</option>
-    {% endfor %}
-  </select>
-  <label style="align-self:center; font-size:0.85rem;">
-    <input type="checkbox" name="unlabeled" value="true" {% if filters.unlabeled %}checked{% endif %}>
-    unknown only
-  </label>
-  <button type="submit">Filter</button>
-</form>
+{% block subtitle %}label &amp; enrol · {{ site_name }}{% endblock %}
+{% block main_class %}flush{% endblock %}
 
-{% if identities %}
-<div class="grid">
-  {% for i in identities %}
-  <a class="card" href="/identities/{{ i.id }}">
-    {% if i.best_crop_path %}
-      <img src="/media/{{ i.best_crop_path }}" alt="{{ i.display_name }}" loading="lazy">
-    {% else %}
-      <div class="noimg">no crop</div>
-    {% endif %}
-    <div class="meta">
-      <span class="badge">{{ i.identifier_key }}</span>
-      {% if not i.label %}<span class="badge unknown">unknown</span>{% endif %}
-      {% if i.plate %}<span class="badge plate">{{ i.plate }}</span>{% endif %}<br>
-      <strong>{{ i.display_name }}</strong><br>
-      <span class="muted">seen {{ i.appearance_count }}× · last {{ i.last_seen.strftime('%Y-%m-%d %H:%M') }}</span>
-    </div>
-  </a>
+{% block styles %}
+<style>
+  .filterbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 12px 20px; background: var(--toolbar);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .chip {
+    padding: 5px 10px; border-radius: 20px; font-size: 12px; line-height: 1;
+    border: 1px solid var(--control-border); background: transparent;
+    color: oklch(0.74 0.008 250); text-decoration: none; white-space: nowrap;
+  }
+  .chip:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .chip.on {
+    background: oklch(0.29 0.06 200); border-color: oklch(0.55 0.1 200);
+    color: oklch(0.9 0.08 200);
+  }
+  .chip-sep { width: 1px; height: 18px; background: var(--hairline); margin: 0 2px; }
+  .count { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+
+  .work { flex: 1; display: flex; min-height: 0; position: relative; }
+  .cards { flex: 1; min-width: 0; overflow: auto; padding: 16px; }
+  .cardgrid {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  }
+  .idcard {
+    display: flex; align-items: center; gap: 11px; padding: 11px;
+    border: 1px solid var(--hairline); border-radius: 8px;
+    background: var(--panel); color: inherit; text-decoration: none;
+  }
+  .idcard:hover { border-color: oklch(0.5 0.06 200); color: inherit; }
+  .idcard.on { border-color: var(--accent); background: oklch(0.23 0.02 220); }
+  .idcard .thumb {
+    width: 52px; height: 52px; flex: 0 0 auto; border-radius: 6px; object-fit: cover;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 5px, transparent 5px 11px),
+      oklch(0.26 0.01 250);
+  }
+  .idcard .body { min-width: 0; flex: 1; }
+  .idcard .nm {
+    font-size: 13.5px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .idcard .nm.unknown { color: oklch(0.82 0.12 30); }
+  .tags { display: flex; gap: 5px; flex-wrap: wrap; margin: 4px 0; }
+  .tag {
+    padding: 2px 6px; border-radius: 3px; font-family: var(--font-mono);
+    font-size: 9px; text-transform: uppercase; letter-spacing: .06em;
+  }
+  .tag.kind { background: oklch(0.3 0.06 200); color: oklch(0.85 0.1 200); }
+  .tag.unknown { background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); }
+  .tag.plate { background: oklch(0.3 0.05 85); color: oklch(0.87 0.1 85); text-transform: none; }
+  .tag.novec { background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); }
+  .idcard .foot { font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); }
+
+  .rail {
+    width: 340px; flex: 0 0 340px; overflow: auto; padding: 16px;
+    background: var(--panel); border-left: 1px solid var(--hairline);
+    animation: slrise 180ms ease;
+  }
+  .rail-id { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; }
+  .rail-id .thumb {
+    width: 64px; height: 64px; flex: 0 0 auto; border-radius: 7px; object-fit: cover;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.06) 0 6px, transparent 6px 13px),
+      oklch(0.26 0.01 250);
+  }
+  .rail-id h2 { margin: 0 0 3px; font-size: 15px; font-weight: 700; }
+  .rail-id .sub { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .sec {
+    margin: 0 0 8px; font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--faint);
+  }
+  .samples {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 14px;
+  }
+  .samples span, .samples img {
+    aspect-ratio: 1; border-radius: 5px; width: 100%; object-fit: cover; display: block;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 5px, transparent 5px 11px),
+      oklch(0.26 0.01 250);
+  }
+  .warnbox {
+    padding: 10px; border-radius: 7px; margin-bottom: 14px; font-size: 11.5px;
+    line-height: 1.55; border: 1px solid oklch(0.45 0.1 30); color: oklch(0.86 0.12 30);
+  }
+  .evrow {
+    display: flex; align-items: center; gap: 8px; padding: 8px 0;
+    border-bottom: 1px solid var(--row-rule); font-size: 11.5px;
+    color: inherit; text-decoration: none;
+  }
+  .evrow:hover { color: var(--accent); }
+  .evrow .t { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .evrow .cam { margin-left: auto; font-size: 10.5px; color: var(--muted); }
+  .labelform { display: flex; gap: 6px; margin-bottom: 14px; }
+  .labelform input {
+    flex: 1; min-width: 0; padding: 7px 9px; border-radius: 6px; font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .btn-primary {
+    padding: 7px 12px; border-radius: 6px; border: 0; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600;
+    background: var(--accent); color: var(--on-accent);
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-dashed {
+    display: block; text-align: center; padding: 9px; border-radius: 6px;
+    border: 1px dashed var(--control-border); color: var(--muted);
+    font-size: 12px; text-decoration: none; margin-top: 14px;
+  }
+  .btn-dashed:hover { border-color: var(--accent); color: var(--accent); }
+  .empty { padding: 40px 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+  @media (max-width: 1000px) {
+    .rail {
+      position: absolute; top: 0; right: 0; bottom: 0; z-index: 5; width: 320px;
+      flex-basis: 320px; box-shadow: -18px 0 44px oklch(0.11 0.01 250 / .55);
+    }
+    .work:has(.rail) .cards { padding-right: 336px; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="filterbar">
+  <a class="chip{% if not chips.unlabeled and not chips.unenrolled and not chips.identifier %} on{% endif %}"
+     href="{{ chip_urls.all }}">All</a>
+  <a class="chip{% if chips.unlabeled %} on{% endif %}" href="{{ chip_urls.unlabeled }}">Unlabelled</a>
+  <a class="chip{% if chips.unenrolled %} on{% endif %}" href="{{ chip_urls.unenrolled }}">No vectors</a>
+  {% if identifier_keys %}<span class="chip-sep"></span>{% endif %}
+  {% for key in identifier_keys %}
+    <a class="chip{% if chips.identifier == key %} on{% endif %}"
+       href="{{ chip_urls.identifier[key] }}">{{ key }}</a>
   {% endfor %}
+  <span class="count">{{ matched }} of {{ total }} identities</span>
 </div>
-{% else %}
-  <p class="muted">No identities yet — they appear as detections are identified.</p>
-{% endif %}
+
+<div class="work">
+  <div class="cards">
+    {% if identities %}
+    <div class="cardgrid">
+      {% for i in identities %}
+      <a class="idcard{% if selected == i.id %} on{% endif %}" href="{{ card_urls[i.id] }}">
+        {% if i.best_crop_path %}
+          <img class="thumb" src="/media/{{ i.best_crop_path }}" alt="" loading="lazy">
+        {% else %}
+          <span class="thumb"></span>
+        {% endif %}
+        <div class="body">
+          <div class="nm{% if not i.label %} unknown{% endif %}">{{ i.display_name }}</div>
+          <div class="tags">
+            <span class="tag kind">{{ i.identifier_key }}</span>
+            {% if not i.label %}<span class="tag unknown">unlabelled</span>{% endif %}
+            {% if i.label and i.vector_count == 0 %}<span class="tag novec">no vectors</span>{% endif %}
+            {% if i.plate %}<span class="tag plate">{{ i.plate }}</span>{% endif %}
+          </div>
+          <div class="foot">
+            {{ i.vector_count }} vectors · seen {{ i.appearance_count }}× ·
+            {{ i.last_seen.strftime('%Y-%m-%d %H:%M') }}
+          </div>
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+      <p class="empty">
+        No identities match this filter.
+        {% if chips.unlabeled or chips.unenrolled or chips.identifier %}
+          <a href="{{ chip_urls.all }}">Clear filters</a>
+        {% else %}
+          Identities appear as detections are identified — they start unlabelled
+          and you name them here. Pre-enrolment is never required.
+        {% endif %}
+      </p>
+    {% endif %}
+  </div>
+
+  {% if rail %}
+  {% set i = rail.identity %}
+  <aside class="rail">
+    <div class="rail-id">
+      {% if i.best_crop_path %}
+        <img class="thumb" src="/media/{{ i.best_crop_path }}" alt="">
+      {% else %}
+        <span class="thumb"></span>
+      {% endif %}
+      <div style="min-width:0">
+        <h2>{{ i.display_name }}</h2>
+        <div class="sub">
+          {{ i.identifier_key }} · {{ i.class_name }}{% if i.plate %} · {{ i.plate }}{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <form class="labelform" method="post" action="/identities/{{ i.id }}/label">
+      <input type="text" name="label" value="{{ i.label or '' }}"
+             placeholder="Name this identity" autocomplete="off">
+      <button type="submit" class="btn-primary">Save</button>
+    </form>
+
+    {% if rail.unenrolled %}
+    <div class="warnbox">
+      Named, but with no embeddings in the vector store — recognition cannot
+      match anyone to this identity yet. Enrol samples from
+      <a href="/training?show=unenrolled">training data</a>, or run
+      <code>siteloom train enroll</code>.
+    </div>
+    {% endif %}
+
+    <h3 class="sec">Enrolled samples · {{ i.vector_count }}</h3>
+    {% if rail.samples %}
+    <div class="samples">
+      {% for a in rail.samples %}
+        {% if a.crop_path %}
+          <img src="/media/{{ a.crop_path }}" alt="" loading="lazy">
+        {% else %}
+          <span></span>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% else %}
+      <p class="foot" style="color:var(--muted); font-size:11.5px; margin:0 0 14px">
+        No library crops attributed to this identity yet.
+      </p>
+    {% endif %}
+
+    <h3 class="sec">Recent events</h3>
+    {% for link in rail.links %}
+      <a class="evrow" href="/?selected={{ link.event_id }}">
+        <span class="t">{{ link.event.first_seen.strftime('%m-%d %H:%M') }}</span>
+        <span>{{ link.event.class_name }}</span>
+        <span class="cam">{{ link.event.camera.name if link.event.camera else link.event.camera_id }}</span>
+      </a>
+    {% else %}
+      <p style="color:var(--muted); font-size:11.5px; margin:0">No events yet.</p>
+    {% endfor %}
+
+    <a class="btn-dashed" href="/training?show=needs_review">Add training samples &rarr;</a>
+    <a class="btn-dashed" href="/identities/{{ i.id }}">Full detail, merge &amp; split</a>
+  </aside>
+  {% endif %}
+</div>
 {% endblock %}

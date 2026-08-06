@@ -78,6 +78,65 @@ def _face_max_vectors(config) -> int:
     return getattr(face, "max_vectors_per_identity", 20) if face else 20
 
 
+#: Offered alongside whatever is already configured, so the common COCO
+#: classes are one click away without pretending this is the whole list.
+CLASS_CATALOG = (
+    "person", "bicycle", "car", "motorcycle", "bus", "truck", "boat",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "backpack", "umbrella",
+    "handbag", "suitcase", "bottle", "cell phone", "laptop",
+)
+
+#: Hue per class family for the swatch, per the handoff's token list.
+CLASS_HUES = {"person": 200, "package": 145}
+VEHICLE_HUE = 260
+
+
+def _class_hue(name: str) -> int:
+    if name in CLASS_HUES:
+        return CLASS_HUES[name]
+    if name in VEHICLE_CLASSES:
+        return VEHICLE_HUE
+    # Stable per name rather than positional, so a class keeps its colour
+    # when another is added or removed.
+    return (sum(ord(c) for c in name) * 37) % 360
+
+
+def _class_rows(config, seen: dict) -> list[dict]:
+    """One row per class the operator can track.
+
+    "Active" is not a new flag: it is membership of `detection.classes`,
+    which is what actually decides whether the detector reports the class.
+    Precision has no source in the schema yet, so no column claims one.
+    """
+    active = list(config.detection.classes)
+    names = active + [c for c in CLASS_CATALOG if c not in active]
+    rows = []
+    for name in names:
+        identifier = next(
+            (
+                (key, ident)
+                for key, ident in config.identity.identifiers.items()
+                if name in (ident.applies_to or [])
+            ),
+            None,
+        )
+        rows.append(
+            {
+                "name": name,
+                "active": name in active,
+                "samples": seen.get(name, 0),
+                "hue": _class_hue(name),
+                "identifier": identifier[0] if identifier else None,
+                "threshold": identifier[1].threshold if identifier else None,
+                # Registry auto-adds a generic identifier for an unseen
+                # class when this is on, so "none configured" is not the
+                # same as "will never be identified".
+                "auto": identifier is None and config.identity.auto_add_classes,
+            }
+        )
+    return rows
+
+
 def _source_progress(session) -> list[dict]:
     """Per-source indexing progress for the sources rail.
 
@@ -402,6 +461,11 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 seen=seen,
                 auto_add=config.identity.auto_add_classes,
                 confidence=config.detection.confidence,
+                class_rows=_class_rows(config, seen),
+                model_line=(
+                    f"{config.detection.model} · {config.detection.device} · "
+                    f"conf {config.detection.confidence:.2f}"
+                ),
             ),
         )
 

@@ -82,6 +82,58 @@ def _triage_url(base: dict, **overrides) -> str:
     return "/?" + urlencode(params) if params else "/"
 
 
+def _identities_url(base: dict, **overrides) -> str:
+    """A link to the identities list with some filters changed."""
+    params: list[tuple[str, str]] = []
+    merged = {**base, **overrides}
+    if merged.get("identifier"):
+        params.append(("identifier", str(merged["identifier"])))
+    for flag in ("unlabeled", "unenrolled"):
+        if merged.get(flag):
+            params.append((flag, "1"))
+    if merged.get("selected"):
+        params.append(("selected", str(merged["selected"])))
+    return "/identities?" + urlencode(params) if params else "/identities"
+
+
+def _identity_rail(session, identity_id: int) -> dict | None:
+    """Everything the identity detail rail shows."""
+    from siteloom.store import Annotation
+
+    identity = session.get(Identity, identity_id)
+    if identity is None:
+        return None
+    links = (
+        session.scalars(
+            select(EventIdentity)
+            .options(selectinload(EventIdentity.event).selectinload(Event.camera))
+            .filter_by(identity_id=identity_id)
+            .order_by(EventIdentity.id.desc())
+            .limit(12)
+        )
+        .unique()
+        .all()
+    )
+    samples = (
+        session.scalars(
+            select(Annotation)
+            .filter_by(identity_id=identity_id)
+            .order_by(Annotation.id)
+            .limit(12)
+        )
+        .unique()
+        .all()
+    )
+    return {
+        "identity": identity,
+        "links": links,
+        "samples": samples,
+        # A named identity with no vectors cannot be recognised at all, so
+        # the rail says so rather than showing a reassuring zero.
+        "unenrolled": bool(identity.label) and identity.vector_count == 0,
+    }
+
+
 def _safe_next(next_url: str, event_id: int) -> str:
     """Confine a form-supplied redirect target to this site.
 
@@ -336,6 +388,8 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         request: Request,
         identifier: str | None = None,
         unlabeled: bool = False,
+        unenrolled: bool = False,
+        selected: int | None = None,
     ):
         with Session() as session:
             q = select(Identity).order_by(Identity.last_seen.desc())
@@ -343,10 +397,22 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 q = q.filter(Identity.identifier_key == identifier)
             if unlabeled:
                 q = q.filter(Identity.label.is_(None))
+            if unenrolled:
+                # Named, but with nothing in the vector store — recognition
+                # cannot match on this person at all (identity/enroll.py).
+                q = q.filter(Identity.label.is_not(None), Identity.vector_count == 0)
             rows = session.scalars(q.limit(200)).unique().all()
             identifier_keys = sorted(
                 {k for (k,) in session.execute(select(Identity.identifier_key).distinct())}
             )
+            total = session.scalar(select(func.count()).select_from(Identity)) or 0
+            rail = _identity_rail(session, selected) if selected else None
+
+        state = {
+            "identifier": identifier,
+            "unlabeled": unlabeled,
+            "unenrolled": unenrolled,
+        }
         return templates.TemplateResponse(
             request,
             "identities.html",
@@ -355,6 +421,23 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "identities": rows,
                 "identifier_keys": identifier_keys,
                 "filters": {"identifier": identifier or "", "unlabeled": unlabeled},
+                "chips": state,
+                "chip_urls": {
+                    "all": _identities_url({}),
+                    "unlabeled": _identities_url(state, unlabeled=not unlabeled),
+                    "unenrolled": _identities_url(state, unenrolled=not unenrolled),
+                    "identifier": {
+                        k: _identities_url(
+                            state, identifier=None if identifier == k else k
+                        )
+                        for k in identifier_keys
+                    },
+                },
+                "card_urls": {i.id: _identities_url(state, selected=i.id) for i in rows},
+                "matched": len(rows),
+                "total": total,
+                "selected": selected,
+                "rail": rail,
             },
         )
 
