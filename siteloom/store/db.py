@@ -27,8 +27,11 @@ def make_engine(db_url: str) -> Engine:
 
 
 def init_db(engine: Engine) -> None:
-    Base.metadata.create_all(engine)
+    # The rebuild/heal must run BEFORE create_all: an interrupted rebuild
+    # leaves only event_identities_old, whose stale-named indexes would
+    # collide with the indexes create_all makes for the new table.
     _relax_event_identity_nullability(engine)
+    Base.metadata.create_all(engine)
     _ensure_columns(engine)
 
 
@@ -42,12 +45,35 @@ def _relax_event_identity_nullability(engine: Engine) -> None:
     `_ensure_columns`: a guarded, single-purpose rename-copy-swap. Runs
     before `_ensure_columns` so the rebuilt table already carries every
     current column and the additive pass has nothing left to do.
+
+    Two hard-won subtleties:
+    * `ALTER TABLE .. RENAME` keeps the old table's *index names*, which
+      would collide with the new table's — the old indexes are dropped
+      first (an index is derived data; nothing is lost).
+    * pysqlite autocommits around DDL, so this sequence is NOT atomic. It
+      is therefore written to be resumable instead: a leftover
+      `event_identities_old` from an interrupted run is detected and the
+      copy-and-drop is completed before anything else.
     """
     inspector = inspect(engine)
-    if "event_identities" not in inspector.get_table_names():
+    tables = inspector.get_table_names()
+    if "event_identities_old" in tables:
+        # A previous rebuild was interrupted between rename and drop —
+        # the data lives in the old table. Finish the job first.
+        log.warning("resuming interrupted event_identities rebuild")
+        _finish_event_identity_rebuild(engine, inspector)
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+    if "event_identities" not in tables:
         return
-    old_cols = {c["name"]: c for c in inspector.get_columns("event_identities")}
-    col = old_cols.get("identity_id")
+    col = next(
+        (
+            c
+            for c in inspector.get_columns("event_identities")
+            if c["name"] == "identity_id"
+        ),
+        None,
+    )
     if col is None or col["nullable"]:
         return
     if engine.dialect.name != "sqlite":
@@ -57,31 +83,57 @@ def _relax_event_identity_nullability(engine: Engine) -> None:
             )
         return
 
+    log.info("migrating: rebuilding event_identities for nullable identity_id")
+    with engine.begin() as conn:
+        # Renaming a table does not rename its indexes, so the new
+        # table's CREATE INDEX statements would collide. Drop them —
+        # derived data, recreated with the new table.
+        for index in inspector.get_indexes("event_identities"):
+            if index["name"]:
+                conn.execute(text(f'DROP INDEX IF EXISTS "{index["name"]}"'))
+        conn.execute(text("ALTER TABLE event_identities RENAME TO event_identities_old"))
+    _finish_event_identity_rebuild(engine, inspect(engine))
+
+
+def _finish_event_identity_rebuild(engine: Engine, inspector) -> None:
+    """Create the new event_identities, copy from _old, drop _old.
+
+    Split out so an interrupted rebuild (pysqlite DDL autocommit means
+    the steps are not atomic) can be completed on the next init_db.
+    """
     table = Base.metadata.tables["event_identities"]
-    new_names = [c.name for c in table.columns]
+    old_cols = {c["name"] for c in inspector.get_columns("event_identities_old")}
     # Copy every column both schemas share; columns new to this release
     # get an explicit value because NOT NULL + no server default would
     # otherwise reject the insert.
     select_parts = []
     insert_names = []
-    for name in new_names:
-        if name in old_cols:
-            insert_names.append(name)
-            select_parts.append(name)
-        elif not table.columns[name].nullable:
-            insert_names.append(name)
+    for column in table.columns:
+        if column.name in old_cols:
+            insert_names.append(column.name)
+            select_parts.append(column.name)
+        elif not column.nullable:
+            insert_names.append(column.name)
             select_parts.append("0")
-    log.info("migrating: rebuilding event_identities for nullable identity_id")
     with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE event_identities RENAME TO event_identities_old"))
-        table.create(conn)
+        # Indexes that followed the rename onto _old still own the names
+        # the new table wants — drop them by name before creating it.
+        for index in table.indexes:
+            conn.execute(text(f'DROP INDEX IF EXISTS "{index.name}"'))
+        table.create(conn, checkfirst=True)
+        # INSERT OR IGNORE keys on the primary key, so re-running after a
+        # partial copy never duplicates a row.
         conn.execute(
             text(
-                f"INSERT INTO event_identities ({', '.join(insert_names)}) "
+                f"INSERT OR IGNORE INTO event_identities ({', '.join(insert_names)}) "
                 f"SELECT {', '.join(select_parts)} FROM event_identities_old"
             )
         )
         conn.execute(text("DROP TABLE event_identities_old"))
+        # Dropping _old also dropped the indexes that had followed the
+        # rename; (re)create the ones the model declares.
+        for index in table.indexes:
+            index.create(conn, checkfirst=True)
 
 
 def _ensure_columns(engine: Engine) -> None:
