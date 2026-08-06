@@ -161,8 +161,61 @@ def test_missed_identity_toggle(webenv):
 
 
 def test_events_list_shows_review_state(webenv):
+    """The triage row's status chip tracks the verdicts recorded on it."""
+    assert "st-chip st-new" in webenv.client.get("/").text
+
     webenv.client.post("/events/1/identity/1/verdict", data={"verdict": "confirmed"})
+    assert "st-chip st-reviewing" in webenv.client.get("/").text
+
+    # A recorded miss outranks a confirmed claim — the event still needs someone.
     webenv.client.post("/events/1/missed", data={"missed": "1"})
-    page = webenv.client.get("/").text
-    assert "&#10003;1" in page  # confirmed count badge
-    assert "badge missed" in page
+    assert "st-chip st-flagged" in webenv.client.get("/").text
+
+
+def test_clearing_an_event_takes_it_out_of_needs_review(webenv):
+    """Sign-off is the only thing that empties the queue, and it reverses."""
+    assert "st-chip st-new" in webenv.client.get("/", params={"needs_review": 1}).text
+
+    webenv.client.post("/events/1/review", data={"reviewed": "1"})
+    assert "No events match" in webenv.client.get("/", params={"needs_review": 1}).text
+    assert "st-chip st-cleared" in webenv.client.get("/").text
+
+    webenv.client.post("/events/1/review", data={"reviewed": "0"})
+    assert "st-chip st-new" in webenv.client.get("/", params={"needs_review": 1}).text
+
+
+def test_clearing_leaves_identity_verdicts_alone(webenv):
+    """Clearing says "needs nothing further", not "every claim was right"."""
+    webenv.client.post("/events/1/identity/1/verdict", data={"verdict": "wrong"})
+    webenv.client.post("/events/1/review", data={"reviewed": "1"})
+    with webenv.Session() as session:
+        assert session.get(EventIdentity, 1).verdict == "wrong"
+
+
+def test_review_redirect_cannot_leave_the_site(webenv):
+    """next_url comes from the page, so it is attacker-supplied."""
+    r = webenv.client.post(
+        "/events/1/review",
+        data={"reviewed": "1", "next_url": "//evil.example/x"},
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == "/events/1"
+
+
+def test_unmatched_chip_selects_events_with_no_identity(webenv):
+    # The seeded event has an identity link, so Unmatched must exclude it.
+    assert "No events match" in webenv.client.get("/", params={"unmatched": 1}).text
+
+
+def test_kind_chips_widen_rather_than_narrow(webenv):
+    """People and Vehicles are alternatives — ticking both shows both."""
+    assert "No events match" in webenv.client.get("/", params={"kind": "people"}).text
+    both = webenv.client.get("/", params=[("kind", "people"), ("kind", "vehicles")])
+    assert "car" in both.text
+
+
+def test_rail_renders_for_a_selected_event(webenv):
+    page = webenv.client.get("/", params={"selected": 1}).text
+    assert "triage-rail" in page
+    assert "Clear event" in page
+    assert webenv.client.get("/events/999/rail").status_code == 404

@@ -124,6 +124,8 @@
       padding: 4px 8px; border: 1px solid var(--control-border); border-radius: 6px;
     }
     main { flex: 1; overflow: auto; padding: 20px; animation: slrise 180ms ease; }
+    /* Screens that own their own scrolling panes (triage, training data). */
+    main.flush { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 
     /* Shared page styles (legacy classes used by the pre-console templates) */
     a { color: var(--accent); text-decoration: none; }
@@ -202,6 +204,7 @@
       .sl-search { display: none; }
     }
   </style>
+  {% block styles %}{% endblock %}
 </head>
 <body>
   {% set path = request.url.path if request else "/" %}
@@ -257,7 +260,7 @@
         <span class="sl-clock" id="sl-clock">--:--:--</span>
       </div>
     </header>
-    <main>{% block content %}{% endblock %}</main>
+    <main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
   </div>
   <script>
     (function () {

@@ -13,7 +13,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    and_,
+    not_,
+    or_,
+    select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -56,10 +68,43 @@ class Event(Base):
     # event so accuracy queries stay one-table simple.
     missed_identity: Mapped[bool] = mapped_column(Boolean, default=False)
     missed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Operator sign-off (CLD-20): "I have looked at this, it needs nothing
+    # further". Explicit rather than inferred from identity verdicts,
+    # because an event with no identity links at all — an unmatched car —
+    # has no verdicts to infer from and would otherwise sit in the queue
+    # forever. Clearing is reversible; reopening nulls it.
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     camera: Mapped[Camera] = relationship(back_populates="events")
     detections: Mapped[list["Detection"]] = relationship(back_populates="event")
     identities: Mapped[list["EventIdentity"]] = relationship(back_populates="event")
+
+    @property
+    def review_status(self) -> str:
+        """Where this event sits in the operator's review queue.
+
+        Sign-off wins over everything: once an operator clears an event it
+        leaves the queue even if it carries a wrong verdict, because the
+        queue answers "what still needs me", not "what went wrong". The
+        verdicts themselves are never overwritten, so accuracy reporting
+        still sees them.
+
+        Confirming every identity claim deliberately does *not* auto-clear
+        — an operator can agree the system named someone correctly and
+        still want the event escalated.
+
+        `status_clause` below expresses the same rules in SQL for
+        filtering and paging. The two must agree — tests compare them
+        over the same rows.
+        """
+        if self.reviewed_at is not None:
+            return "cleared"
+        verdicts = [link.verdict for link in self.identities]
+        if self.missed_identity or "wrong" in verdicts:
+            return "flagged"
+        if any(v is not None for v in verdicts):
+            return "reviewing"
+        return "new"
 
 
 class Detection(Base):
@@ -131,6 +176,42 @@ class EventIdentity(Base):
 
     event: Mapped[Event] = relationship(back_populates="identities")
     identity: Mapped[Identity] = relationship(back_populates="events")
+
+
+#: Review states an Event can be in, in triage order (worst first).
+REVIEW_STATUSES = ("flagged", "reviewing", "new", "cleared")
+
+
+def status_clause(status: str):
+    """SQL form of `Event.review_status`, for filtering with correct paging.
+
+    Filtering in Python after the query would page wrongly — the offset
+    would count rows the operator never sees — so the triage filters have
+    to be expressible in SQL. Keep in step with the property above.
+    """
+    links = select(EventIdentity.id).where(EventIdentity.event_id == Event.id)
+    has_wrong = links.where(EventIdentity.verdict == "wrong").exists()
+    has_judged = links.where(EventIdentity.verdict.is_not(None)).exists()
+    signed_off = Event.reviewed_at.is_not(None)
+    open_ = Event.reviewed_at.is_(None)
+    flagged = or_(Event.missed_identity.is_(True), has_wrong)
+
+    if status == "cleared":
+        return signed_off
+    if status == "flagged":
+        return and_(open_, flagged)
+    if status == "reviewing":
+        return and_(open_, not_(flagged), has_judged)
+    if status == "new":
+        return and_(open_, not_(flagged), not_(has_judged))
+    raise ValueError(f"unknown review status: {status!r}")
+
+
+def unmatched_clause():
+    """Events the identity layer never linked to anyone."""
+    return not_(
+        select(EventIdentity.id).where(EventIdentity.event_id == Event.id).exists()
+    )
 
 
 class NoiseEvent(Base):

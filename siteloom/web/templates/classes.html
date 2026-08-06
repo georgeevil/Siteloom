@@ -1,172 +1,281 @@
 {% extends "base.html" %}
-{% block title %}Classes{% endblock %}
-{% block content %}
+{% block title %}Detection classes{% endblock %}
+{% block subtitle %}{{ model_line }}{% endblock %}
+
+{% block styles %}
 <style>
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
-  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
-  .panel { background: light-dark(#fff, #1c1c20); border: 1px solid light-dark(#e2e2e6, #2c2c31);
-    border-radius: 10px; padding: 0.9rem 1rem; }
-  .panel h3 { margin: 0 0 0.2rem; font-size: 0.95rem; }
-  .panel p.sub { margin: 0 0 0.7rem; font-size: 0.78rem; opacity: 0.55; line-height: 1.5; }
-  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-  .chip { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.55rem;
-    border-radius: 999px; font-size: 0.8rem; cursor: pointer; user-select: none;
-    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); }
-  .chip.on { background: light-dark(#e8f0fe, #1e3a5f); color: light-dark(#0a63c9, #9cc7ff);
-    border-color: transparent; font-weight: 600; }
-  .chip .n { opacity: 0.5; font-size: 0.72rem; }
-  input[type=text], input[type=number], select, textarea {
-    padding: 0.35rem 0.5rem; border-radius: 7px; font-size: 0.85rem; color: inherit;
-    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); }
-  .btn { padding: 0.35rem 0.75rem; border-radius: 7px; font-size: 0.83rem; cursor: pointer;
-    border: 1px solid light-dark(#d0d0d5, #3a3a40); background: light-dark(#fff, #232328); color: inherit; }
-  .btn.primary { background: light-dark(#0a63c9, #2d6fd0); color: #fff; border-color: transparent; }
-  .row { display: flex; gap: 0.5rem; align-items: center; margin: 0.4rem 0; flex-wrap: wrap; }
-  label.f { font-size: 0.78rem; opacity: 0.7; }
+  .page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .page-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .page-head .sub { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .page-head .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel); margin-bottom: 16px;
+  }
+  .crow {
+    display: grid; grid-template-columns: 1fr 116px 128px 64px;
+    align-items: center; gap: 12px; padding: 0 14px; height: 56px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .crow:last-child { border-bottom: 0; }
+  .crow.head {
+    height: 32px; background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .cname { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .sw { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+  .cname .t { font-size: 12.5px; font-weight: 600; }
+  .cname .d { font-size: 11px; color: var(--muted); }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .thr { display: flex; align-items: center; gap: 7px; }
+  .bar { flex: 1; height: 4px; border-radius: 2px; background: oklch(0.3 0.01 250); }
+  .bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+
+  .toggle {
+    width: 34px; height: 19px; border-radius: 20px; border: 0; cursor: pointer;
+    background: oklch(0.32 0.01 250); position: relative; padding: 0;
+  }
+  .toggle i {
+    position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+    border-radius: 50%; background: oklch(0.75 0.01 250);
+    transition: left 120ms ease, background 120ms ease;
+  }
+  .toggle[aria-pressed="true"] { background: oklch(0.29 0.06 200); }
+  .toggle[aria-pressed="true"] i { left: 17px; background: var(--accent); }
+
+  .banner {
+    display: flex; align-items: center; gap: 10px; padding: 11px 14px;
+    border: 1px solid var(--hairline); border-radius: 8px; margin-bottom: 16px;
+    font-size: 12px; color: var(--muted); line-height: 1.55;
+  }
+  .banner.amber { border-color: oklch(0.42 0.08 85); color: oklch(0.87 0.1 85); }
+  .banner .btn-outline { margin-left: auto; flex: 0 0 auto; }
+
+  .btn-primary {
+    padding: 8px 12px; border-radius: 6px; border: 0; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600;
+    background: var(--accent); color: var(--on-accent);
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-outline {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 7px 12px; border-radius: 6px; cursor: pointer; text-decoration: none;
+    font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: transparent; color: var(--text);
+  }
+  .btn-outline:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .btn-outline.sm { padding: 3px 9px; font-size: 11px; }
+
+  .sec {
+    margin: 22px 0 9px; font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--faint);
+  }
+  .ccrow { display: grid; grid-template-columns: 1fr 116px 128px 96px; }
+
+  /* New-class drawer */
+  .drawer {
+    position: fixed; top: 56px; right: 0; bottom: 0; width: 352px; z-index: 20;
+    background: var(--panel); border-left: 1px solid var(--hairline);
+    box-shadow: -18px 0 44px oklch(0.11 0.01 250 / .55);
+    padding: 16px; overflow: auto; animation: slrise 180ms ease;
+  }
+  .drawer[hidden] { display: none; }
+  .drawer h3 { margin: 0 0 14px; font-size: 14px; font-weight: 700; }
+  .drawer label {
+    display: block; font-family: var(--font-mono); font-size: 9px;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--faint); margin-bottom: 4px;
+  }
+  .drawer .field { margin-bottom: 12px; }
+  .drawer input[type=text], .drawer textarea, .drawer select {
+    width: 100%; padding: 7px 9px; border-radius: 6px; font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .drawer textarea { min-height: 64px; resize: vertical; }
+  .drawer input[type=range] { width: 100%; accent-color: var(--accent); }
+  .advisory {
+    padding: 10px; border-radius: 7px; font-size: 11.5px; line-height: 1.55;
+    border: 1px solid oklch(0.42 0.08 85); color: oklch(0.87 0.1 85); margin-bottom: 12px;
+  }
+  .scrim {
+    position: fixed; inset: 56px 0 0 0; z-index: 19;
+    background: oklch(0.12 0.01 250 / .45);
+  }
+  .scrim[hidden] { display: none; }
+  .status { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 </style>
+{% endblock %}
 
-<h2 style="font-size:1.05rem;">Classes &amp; identification</h2>
-
-<div class="cols">
-  <div class="panel">
-    <h3>Tracked detection classes</h3>
-    <p class="sub">
-      Which COCO classes the detector reports. Turning one on is all that is
-      needed to start identifying it — an unconfigured class automatically
-      gets a generic appearance identifier and its own vector collection.
-    </p>
-    <div class="chips" id="chips">
-      {% set catalog = ['person','bicycle','car','motorcycle','bus','truck','boat','bird','cat','dog','horse','sheep','cow','backpack','umbrella','handbag','suitcase','bottle','cell phone','laptop'] %}
-      {% for c in catalog %}
-        <span class="chip {% if c in detection_classes %}on{% endif %}" data-class="{{ c }}">
-          {{ c }}{% if seen.get(c) %}<span class="n">{{ seen[c] }}</span>{% endif %}
-        </span>
-      {% endfor %}
-      {% for c in detection_classes if c not in catalog %}
-        <span class="chip on" data-class="{{ c }}">{{ c }}</span>
-      {% endfor %}
-    </div>
-    <div class="row" style="margin-top:0.7rem;">
-      <input type="text" id="newclass" placeholder="add another class name">
-      <button class="btn" id="b-add">Add</button>
-    </div>
-    <div class="row">
-      <label class="f">confidence</label>
-      <input type="number" id="conf" step="0.05" min="0.05" max="0.95" value="{{ confidence }}" style="width:80px;">
-      <label class="f" style="display:flex; gap:0.3rem; align-items:center;">
-        <input type="checkbox" id="autoadd" {% if auto_add %}checked{% endif %}> auto-identify new classes
-      </label>
-    </div>
-
-    <h3 style="margin-top:1.1rem;">Identifier thresholds</h3>
-    <p class="sub">
-      Cosine similarity required to call two crops the same thing. Face
-      embeddings and generic appearance embeddings have very different
-      similarity distributions, which is why each identifier carries its own.
-    </p>
-    {% for key, ident in identifiers.items() %}
-    <div class="row">
-      <span class="badge">{{ key }}</span>
-      <span class="muted" style="font-size:0.75rem;">{{ ident.algo }}</span>
-      <input type="number" class="thr" data-key="{{ key }}" step="0.01" min="0" max="1"
-             value="{{ ident.threshold }}" style="width:80px;">
-      <span class="muted" style="font-size:0.75rem;">{{ ident.applies_to | join(', ') }}</span>
-      {% if ident.plate_ocr %}<span class="badge plate">plate OCR</span>{% endif %}
-    </div>
-    {% endfor %}
-
-    <div class="row" style="margin-top:0.8rem;">
-      <button class="btn primary" id="b-save">Save to config</button>
-      <span class="muted" id="status" style="font-size:0.8rem;"></span>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h3>Custom sub-classes</h3>
-    <p class="sub">
-      Refinements of a detection class ("car" → "delivery-van"), recognized by
-      k-nearest-neighbour vote over labeled example crops. No training run:
-      label examples in the library and the class works immediately.
-    </p>
-    {% if custom_classes %}
-    <table>
-      <tr><th>Name</th><th>Refines</th><th>Examples</th><th>Threshold</th><th></th></tr>
-      {% for c in custom_classes %}
-      <tr>
-        <td><strong>{{ c.name }}</strong>
-          {% if c.description %}<br><span class="muted" style="font-size:0.75rem;">{{ c.description }}</span>{% endif %}</td>
-        <td>{{ c.parent_class or 'any' }}</td>
-        <td>{{ c.example_count }}</td>
-        <td>{{ '%.2f'|format(c.threshold) }}</td>
-        <td>
-          <form method="post" action="/classes/custom/{{ c.id }}/delete" style="margin:0;">
-            <button class="btn" type="submit">Delete</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </table>
-    {% else %}
-      <p class="muted" style="font-size:0.85rem;">None defined yet.</p>
-    {% endif %}
-
-    <h3 style="margin-top:1rem;">Define a sub-class</h3>
-    <form method="post" action="/classes/custom">
-      <div class="row"><label class="f" style="width:90px;">Name</label>
-        <input type="text" name="name" required placeholder="delivery-van" style="flex:1;"></div>
-      <div class="row"><label class="f" style="width:90px;">Refines</label>
-        <select name="parent_class" style="flex:1;">
-          <option value="">any class</option>
-          {% for c in detection_classes %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
-        </select></div>
-      <div class="row"><label class="f" style="width:90px;">Threshold</label>
-        <input type="number" name="threshold" step="0.01" min="0" max="1" value="0.85" style="width:90px;"></div>
-      <div class="row"><label class="f" style="width:90px;">Notes</label>
-        <input type="text" name="description" placeholder="optional" style="flex:1;"></div>
-      <div class="row"><button class="btn primary" type="submit">Create</button></div>
-    </form>
-    <p class="sub" style="margin-top:0.7rem;">
-      After creating, tag example crops with it in the library, then run
-      <code>siteloom classes rebuild</code> to index the examples.
-    </p>
-  </div>
+{% block content %}
+<div class="page-head">
+  <h2>Detection classes</h2>
+  <span class="sub">{{ model_line }}</span>
+  <span class="right">
+    <span class="status" id="status"></span>
+    <button class="btn-outline" id="b-save">Save to config</button>
+    <button class="btn-primary" id="b-new">New class</button>
+  </span>
 </div>
 
+<div class="tablecard">
+  <div class="crow head">
+    <div>Class</div><div>Samples</div><div>Threshold</div><div>Active</div>
+  </div>
+  {% for r in class_rows %}
+  <div class="crow">
+    <div class="cname">
+      <span class="sw" style="background: oklch(0.72 0.16 {{ r.hue }})"></span>
+      <span style="min-width:0">
+        <span class="t">{{ r.name }}</span><br>
+        <span class="d">
+          {%- if r.identifier %}identified by {{ r.identifier }}
+          {%- elif r.auto %}generic identifier added on first sighting
+          {%- else %}detection only — no identifier configured{% endif -%}
+        </span>
+      </span>
+    </div>
+    <div class="mono">{{ r.samples }}</div>
+    <div class="thr">
+      {% if r.threshold is not none %}
+        <span class="bar"><i style="width: {{ (r.threshold * 100) | round | int }}%"></i></span>
+        <span class="mono">{{ '%.2f' | format(r.threshold) }}</span>
+      {% else %}
+        <span class="mono">—</span>
+      {% endif %}
+    </div>
+    <div>
+      <button type="button" class="toggle" data-class="{{ r.name }}"
+              aria-pressed="{{ 'true' if r.active else 'false' }}"
+              aria-label="Track {{ r.name }}"><i></i></button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="banner">
+  Adding a class is the only step needed to start identifying it — an
+  unconfigured class gets a generic appearance identifier and its own vector
+  collection on first sighting.
+  {% if not auto_add %}Auto-add is currently off, so new classes are detected but not identified.{% endif %}
+</div>
+
+<h3 class="sec">Custom sub-classes</h3>
+<div class="tablecard">
+  <div class="crow ccrow head">
+    <div>Class</div><div>Examples</div><div>Threshold</div><div></div>
+  </div>
+  {% for c in custom_classes %}
+  <div class="crow ccrow">
+    <div class="cname">
+      <span class="sw" style="background: oklch(0.72 0.16 320)"></span>
+      <span style="min-width:0">
+        <span class="t">{{ c.name }}</span><br>
+        <span class="d">
+          refines {{ c.parent_class or 'any class' }}{% if c.description %} · {{ c.description }}{% endif %}
+        </span>
+      </span>
+    </div>
+    <div class="mono">{{ c.example_count }}</div>
+    <div class="thr">
+      <span class="bar"><i style="width: {{ (c.threshold * 100) | round | int }}%"></i></span>
+      <span class="mono">{{ '%.2f' | format(c.threshold) }}</span>
+    </div>
+    <div>
+      <form method="post" action="/classes/custom/{{ c.id }}/delete" style="margin:0">
+        <button class="btn-outline sm" type="submit">Delete</button>
+      </form>
+    </div>
+  </div>
+  {% else %}
+  <div class="crow"><span class="d" style="color:var(--muted)">None defined yet.</span></div>
+  {% endfor %}
+</div>
+
+<div class="banner amber">
+  Sub-classes are a k-nearest-neighbour vote over the appearance embeddings
+  that already exist — there is no training run. A verified example counts
+  immediately; <code>siteloom classes rebuild</code> is only needed after the
+  embedder itself changes.
+  <a class="btn-outline sm" href="/training?show=needs_review">Open training data</a>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden>
+  <h3>New sub-class</h3>
+  <form method="post" action="/classes/custom">
+    <div class="field">
+      <label for="f-name">Name</label>
+      <input type="text" id="f-name" name="name" required placeholder="delivery-van">
+    </div>
+    <div class="field">
+      <label for="f-parent">Refines</label>
+      <select id="f-parent" name="parent_class">
+        <option value="">any class</option>
+        {% for c in detection_classes %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-desc">What it looks like</label>
+      <textarea id="f-desc" name="description"
+                placeholder="Panel van, courier livery, rear roller door"></textarea>
+    </div>
+    <div class="field">
+      <label for="f-thr">Vote threshold · <span id="thr-val">0.85</span></label>
+      <input type="range" id="f-thr" name="threshold" min="0.5" max="0.99" step="0.01" value="0.85">
+    </div>
+    <div class="advisory">
+      Creating the class does nothing on its own. It starts working once you
+      label example crops with it in training data — each one improves it
+      straight away.
+    </div>
+    <button class="btn-primary" type="submit" style="width:100%">Create &amp; label samples</button>
+  </form>
+</aside>
+
 <script>
-document.getElementById('chips').addEventListener('click', e => {
-  const chip = e.target.closest('.chip');
-  if (chip) chip.classList.toggle('on');
-});
-document.getElementById('b-add').onclick = () => {
-  const input = document.getElementById('newclass');
-  const name = input.value.trim().toLowerCase();
-  if (!name) return;
-  const chip = document.createElement('span');
-  chip.className = 'chip on';
-  chip.dataset.class = name;
-  chip.textContent = name;
-  document.getElementById('chips').appendChild(chip);
-  input.value = '';
-};
-document.getElementById('b-save').onclick = async () => {
-  const classes = [...document.querySelectorAll('.chip.on')].map(c => c.dataset.class);
-  const identifiers = {};
-  document.querySelectorAll('.thr').forEach(el => {
-    identifiers[el.dataset.key] = { threshold: parseFloat(el.value) };
+(function () {
+  var drawer = document.getElementById("drawer");
+  var scrim = document.getElementById("scrim");
+  function setOpen(open) { drawer.hidden = !open; scrim.hidden = !open; }
+  document.getElementById("b-new").onclick = function () { setOpen(true); };
+  scrim.onclick = function () { setOpen(false); };
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") setOpen(false);
   });
-  const res = await fetch('/classes/detection', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      classes,
-      identifiers,
-      confidence: parseFloat(document.getElementById('conf').value),
-      auto_add_classes: document.getElementById('autoadd').checked,
-    }),
+
+  var thr = document.getElementById("f-thr");
+  thr.addEventListener("input", function () {
+    document.getElementById("thr-val").textContent = Number(thr.value).toFixed(2);
   });
-  const data = await res.json();
-  document.getElementById('status').textContent = res.ok
-    ? (data.written_to ? 'saved to ' + data.written_to : 'applied (in-memory config)')
-    : 'save failed';
-};
+
+  document.querySelectorAll(".toggle").forEach(function (t) {
+    t.addEventListener("click", function () {
+      t.setAttribute("aria-pressed", t.getAttribute("aria-pressed") === "true" ? "false" : "true");
+      document.getElementById("status").textContent = "unsaved changes";
+    });
+  });
+
+  document.getElementById("b-save").onclick = function () {
+    var classes = [];
+    document.querySelectorAll('.toggle[aria-pressed="true"]').forEach(function (t) {
+      classes.push(t.getAttribute("data-class"));
+    });
+    var status = document.getElementById("status");
+    status.textContent = "saving…";
+    fetch("/classes/detection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ classes: classes })
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        status.textContent = res.ok
+          ? (res.d.written_to ? "saved to " + res.d.written_to : "applied in memory")
+          : "save failed";
+      })
+      .catch(function () { status.textContent = "save failed"; });
+  };
+})();
 </script>
 {% endblock %}

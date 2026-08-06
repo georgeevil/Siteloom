@@ -1,57 +1,363 @@
 {% extends "base.html" %}
 {% block title %}Events{% endblock %}
+{% block subtitle %}triage · {{ site_name }}{% endblock %}
+{% block main_class %}flush{% endblock %}
+
+{% block styles %}
+<style>
+  .filterbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 12px 20px; background: var(--toolbar);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .chip {
+    padding: 5px 10px; border-radius: 20px; font-size: 12px; line-height: 1;
+    border: 1px solid var(--control-border); background: transparent;
+    color: oklch(0.74 0.008 250); text-decoration: none; white-space: nowrap;
+  }
+  .chip:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .chip.on {
+    background: oklch(0.29 0.06 200); border-color: oklch(0.55 0.1 200);
+    color: oklch(0.9 0.08 200);
+  }
+  .chip-sep { width: 1px; height: 18px; background: var(--hairline); margin: 0 2px; }
+  .filterbar .count {
+    margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  }
+  .advanced-wrap { position: relative; }
+  .advanced-wrap > summary { list-style: none; cursor: pointer; display: inline-block; }
+  .advanced-wrap > summary::-webkit-details-marker { display: none; }
+  .advanced {
+    position: absolute; top: calc(100% + 8px); left: 0; z-index: 10;
+    display: flex; gap: 6px; align-items: center; padding: 10px;
+    background: var(--raised); border: 1px solid var(--hairline);
+    border-radius: 7px; box-shadow: 0 12px 32px oklch(0.1 0.01 250 / .5);
+  }
+  .clear-link { font-size: 11px; color: var(--muted); }
+  .advanced select, .advanced input {
+    padding: 4px 7px; border-radius: 6px; font: inherit; font-size: 11px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .advanced button {
+    padding: 4px 9px; border-radius: 6px; font: inherit; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+
+  /* Pane = the table's own box, so the column tiers respond to the space
+     the table actually has, not the window. That is the handoff's rule:
+     subtract the rails before choosing a column set. */
+  .triage { flex: 1; display: flex; min-height: 0; }
+  .triage-list { flex: 1; min-width: 0; overflow: auto; container-type: inline-size; }
+
+  .row {
+    display: grid; align-items: center; gap: 12px; padding: 0 14px;
+    height: 52px; text-decoration: none; color: var(--text);
+    border-bottom: 1px solid var(--row-rule); border-left: 2px solid transparent;
+    grid-template-columns: 70px minmax(130px, 1fr) 104px 84px;
+  }
+  .row:hover { background: oklch(0.235 0.01 250); color: var(--text); }
+  .row.sel { background: oklch(0.25 0.02 220); }
+  .row.rs-new { border-left-color: var(--accent); }
+  .row.rs-reviewing { border-left-color: oklch(0.75 0.14 85); }
+  .row.rs-flagged { border-left-color: oklch(0.68 0.16 30); }
+  .row.rs-cleared { border-left-color: oklch(0.38 0.01 250); }
+
+  .rowhead {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--canvas); border-bottom: 1px solid var(--hairline);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint); height: 30px;
+  }
+  .rowhead:hover { background: var(--canvas); }
+  .r-time { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+  .r-det { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .r-thumb {
+    width: 54px; height: 34px; flex: 0 0 auto; border-radius: 3px; object-fit: cover;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 4px, transparent 4px 9px),
+      oklch(0.26 0.01 250);
+  }
+  .r-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .r-sub {
+    font-size: 11px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .r-cam, .r-id { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-id { font-weight: 500; }
+  .r-id.unmatched { color: oklch(0.82 0.12 30); }
+  .r-conf { display: flex; align-items: center; gap: 6px; }
+  .bar { width: 42px; height: 4px; border-radius: 2px; background: oklch(0.3 0.01 250); }
+  .bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+  .bar.low i { background: var(--amber); }
+  .r-conf span { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+  .st-chip {
+    display: inline-block; padding: 3px 7px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: .06em; white-space: nowrap;
+  }
+  .st-chip.st-new { background: oklch(0.3 0.06 200); color: oklch(0.85 0.1 200); }
+  .st-chip.st-reviewing { background: oklch(0.3 0.05 85); color: oklch(0.87 0.1 85); }
+  .st-chip.st-flagged { background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); }
+  .st-chip.st-cleared { background: oklch(0.27 0.02 250); color: oklch(0.72 0.01 250); }
+
+  .r-cam, .r-conf { display: none; }
+  @container (min-width: 600px) {
+    .row { grid-template-columns: 78px minmax(150px, 1fr) 104px 100px 84px; }
+    .r-cam { display: block; }
+    .r-sub .inline-cam { display: none; }
+  }
+  @container (min-width: 770px) {
+    .row { grid-template-columns: 78px minmax(180px, 1fr) 132px 118px 74px 92px; }
+    .r-conf { display: flex; }
+    .r-sub .inline-conf { display: none; }
+  }
+
+  /* Detail rail */
+  .rail {
+    width: 372px; flex: 0 0 372px; overflow: auto;
+    background: var(--panel); border-left: 1px solid var(--hairline);
+    animation: slrise 180ms ease;
+  }
+  .rail-inner { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .rail-head { position: relative; }
+  .rail-media { position: relative; aspect-ratio: 16/9; border-radius: 7px; overflow: hidden; }
+  .rail-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ph {
+    width: 100%; height: 100%;
+    background:
+      repeating-linear-gradient(135deg, rgba(255,255,255,.06) 0 6px, transparent 6px 13px),
+      oklch(0.26 0.01 250);
+  }
+  .ph.sq { width: 44px; height: 44px; border-radius: 5px; flex: 0 0 auto; }
+  .ov-chip {
+    position: absolute; bottom: 8px; left: 8px; padding: 3px 7px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 10px;
+    background: oklch(0.16 0.01 250 / .78); color: var(--text);
+  }
+  .ov-chip.right { left: auto; right: 8px; }
+  .rail-close {
+    position: absolute; top: 8px; right: 8px; width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center; border-radius: 5px;
+    background: oklch(0.16 0.01 250 / .78); color: var(--text); font-size: 12px;
+  }
+  .rail-title { display: flex; align-items: center; gap: 9px; }
+  .rail-title h2 { margin: 0; font-size: 16px; font-weight: 700; }
+  .rail-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* Hairline table: 1px gaps over the rule colour, so the gaps are the rules. */
+  .facts {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+    background: var(--hairline); border: 1px solid var(--hairline); border-radius: 7px;
+    overflow: hidden;
+  }
+  .facts > div { background: var(--panel); padding: 8px 10px; }
+  .facts dt {
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint); margin: 0 0 3px;
+  }
+  .facts dd { margin: 0; font-size: 12px; }
+  .mono { font-family: var(--font-mono); }
+
+  .rail-section h3 {
+    margin: 0 0 8px; font-family: var(--font-mono); font-size: 9.5px;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--faint); font-weight: 500;
+  }
+  .id-card {
+    display: flex; align-items: center; gap: 10px; padding: 9px;
+    border: 1px solid var(--hairline); border-radius: 7px; margin-bottom: 8px;
+  }
+  .id-card img { width: 44px; height: 44px; border-radius: 5px; object-fit: cover; flex: 0 0 auto; }
+  .id-body { min-width: 0; flex: 1; }
+  .id-name { font-size: 12.5px; font-weight: 600; }
+  .id-name.unmatched { color: oklch(0.82 0.12 30); }
+  .id-sub { font-size: 10px; color: var(--muted); margin-bottom: 5px; }
+  .rail-empty {
+    margin: 0 0 9px; padding: 11px; border-radius: 7px; font-size: 11.5px;
+    color: var(--muted); line-height: 1.5;
+    border: 1px dashed var(--control-border);
+  }
+  .inline-form { display: inline; }
+  .rail-actions { display: flex; gap: 8px; }
+  .rail-actions form { flex: 1; }
+  .btn-primary {
+    width: 100%; padding: 9px 12px; border-radius: 6px; border: 0; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600;
+    background: var(--accent); color: var(--on-accent);
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-outline {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 9px 12px; border-radius: 6px; cursor: pointer; text-decoration: none;
+    font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: transparent; color: var(--text);
+  }
+  .btn-outline:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .btn-outline.sm { padding: 4px 9px; font-size: 11px; }
+  .btn-outline.on-amber { border-color: oklch(0.5 0.08 85); color: var(--amber); }
+
+  .empty { padding: 40px 20px; color: var(--muted); font-size: 13px; }
+  .pager { padding: 14px 20px; }
+
+  /* Narrow pane: the rail stops taking space and floats over the list. */
+  @media (max-width: 1000px) {
+    .rail {
+      position: absolute; top: 0; right: 0; bottom: 0; z-index: 5;
+      width: 340px; flex-basis: 340px;
+      box-shadow: -18px 0 44px oklch(0.11 0.01 250 / .55);
+    }
+    .triage { position: relative; }
+    /* An out-of-flow drawer would otherwise leave the list measuring its
+       full width and picking a column set that renders Identity and
+       Status underneath the drawer. Reserving the drawer's width shrinks
+       the query container to what is actually visible, so the tier below
+       selects itself. */
+    .triage:has(.rail) .triage-list { padding-right: 340px; }
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<form class="filters" method="get" action="/">
-  <select name="camera">
-    <option value="">All cameras</option>
-    {% for cam in cameras %}
-      <option value="{{ cam.id }}" {% if filters.camera == cam.id %}selected{% endif %}>{{ cam.name }}</option>
-    {% endfor %}
-  </select>
-  <select name="class">
-    <option value="">All classes</option>
-    {% for c in classes %}
-      <option value="{{ c }}" {% if filters['class'] == c %}selected{% endif %}>{{ c }}</option>
-    {% endfor %}
-  </select>
-  <input type="datetime-local" name="since" value="{{ filters.since }}" title="Since">
-  <input type="datetime-local" name="until" value="{{ filters.until }}" title="Until">
-  <button type="submit">Filter</button>
-  {% if filters.camera or filters['class'] or filters.since or filters.until %}
-    <a href="/" style="align-self:center; font-size:0.85rem;">clear</a>
-  {% endif %}
-</form>
-
-{% if events %}
-<div class="grid">
-  {% for e in events %}
-  <a class="card" href="/events/{{ e.id }}">
-    {% if e.best_crop_path %}
-      <img src="/media/{{ e.best_crop_path }}" alt="{{ e.class_name }}" loading="lazy">
-    {% else %}
-      <div class="noimg">no crop</div>
-    {% endif %}
-    <div class="meta">
-      <span class="badge">{{ e.class_name }}</span>
-      {% if e.guest_window %}<span class="badge guest">guest</span>{% endif %}
-      {% if e.missed_identity %}<span class="badge missed">missed</span>{% endif %}
-      {% set confirmed = e.identities | selectattr('verdict', 'equalto', 'confirmed') | list | length %}
-      {% set wrong = e.identities | selectattr('verdict', 'equalto', 'wrong') | list | length %}
-      {% if confirmed %}<span class="badge ok">&#10003;{{ confirmed }}</span>{% endif %}
-      {% if wrong %}<span class="badge bad">&#10007;{{ wrong }}</span>{% endif %}
-      {% if e.track_id is not none %}<span class="muted">track {{ e.track_id }}</span>{% endif %}<br>
-      {{ e.camera.name if e.camera else e.camera_id }}<br>
-      <span class="muted">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} · {{ e.detection_count }} detections</span>
-    </div>
-  </a>
+<div class="filterbar">
+  <a class="chip{% if chips.needs_review %} on{% endif %}" href="{{ chip_urls.needs_review }}">Needs review</a>
+  <a class="chip{% if chips.unmatched %} on{% endif %}" href="{{ chip_urls.unmatched }}">Unmatched</a>
+  <span class="chip-sep"></span>
+  {% for key, label in kind_labels.items() %}
+    <a class="chip{% if key in chips.kinds %} on{% endif %}" href="{{ chip_urls[key] }}">{{ label }}</a>
   {% endfor %}
-</div>
-{% else %}
-  <p class="muted">No events yet. Run <code>siteloom run --config site.yaml</code> to start ingesting.</p>
-{% endif %}
 
-<div class="pager">
-  {% if page > 1 %}<a href="?camera={{ filters.camera }}&class={{ filters['class'] }}&since={{ filters.since }}&until={{ filters.until }}&page={{ page - 1 }}">&larr; newer</a>{% endif %}
-  {% if has_next %}<a href="?camera={{ filters.camera }}&class={{ filters['class'] }}&since={{ filters.since }}&until={{ filters.until }}&page={{ page + 1 }}">older &rarr;</a>{% endif %}
+  <details class="advanced-wrap">
+  <summary class="chip{% if filters.camera or filters['class'] or filters.since or filters.until %} on{% endif %}">More filters</summary>
+  <form class="advanced" method="get" action="/">
+    {% for k in chips.kinds %}<input type="hidden" name="kind" value="{{ k }}">{% endfor %}
+    {% if chips.needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+    {% if chips.unmatched %}<input type="hidden" name="unmatched" value="1">{% endif %}
+    <select name="camera">
+      <option value="">All cameras</option>
+      {% for cam in cameras %}
+        <option value="{{ cam.id }}" {% if filters.camera == cam.id %}selected{% endif %}>{{ cam.name }}</option>
+      {% endfor %}
+    </select>
+    <select name="class">
+      <option value="">All classes</option>
+      {% for c in classes %}
+        <option value="{{ c }}" {% if filters['class'] == c %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+    <input type="datetime-local" name="since" value="{{ filters.since }}" title="Since">
+    <input type="datetime-local" name="until" value="{{ filters.until }}" title="Until">
+    <button type="submit">Apply</button>
+    <a class="clear-link" href="{{ clear_url }}">Clear</a>
+  </form>
+  </details>
+
+  <span class="count">
+    {{ matched }} of {{ total }} events{% if chip_count %} · {{ chip_count }} filter{{ '' if chip_count == 1 else 's' }}{% endif %}
+  </span>
 </div>
+
+<div class="triage">
+  <div class="triage-list" id="triage-list">
+    {% if events %}
+      <div class="row rowhead" aria-hidden="true">
+        <div>Time</div>
+        <div>Detection</div>
+        <div class="r-cam">Camera</div>
+        <div>Identity</div>
+        <div class="r-conf">Conf</div>
+        <div>Status</div>
+      </div>
+      {% for e in events %}
+      {% set st = e.review_status %}
+      {% set link = e.identities | first %}
+      <a class="row rs-{{ st }}{% if selected == e.id %} sel{% endif %}"
+         href="{{ row_urls[e.id] }}" data-event="{{ e.id }}">
+        <div class="r-time">{{ e.first_seen.strftime('%H:%M:%S') }}</div>
+        <div class="r-det">
+          {% if e.best_crop_path %}
+            <img class="r-thumb" src="/media/{{ e.best_crop_path }}" alt="" loading="lazy">
+          {% else %}
+            <span class="r-thumb"></span>
+          {% endif %}
+          <div style="min-width:0">
+            <div class="r-name">{{ e.class_name }}</div>
+            <div class="r-sub">
+              <span class="inline-cam">{{ e.camera.name if e.camera else e.camera_id }} · </span>
+              {{ e.detection_count }} det<span class="inline-conf"> · {{ '%.2f' | format(e.best_confidence) }}</span>
+              {%- if e.guest_window %} · guest{% endif %}
+            </div>
+          </div>
+        </div>
+        <div class="r-cam">{{ e.camera.name if e.camera else e.camera_id }}</div>
+        <div class="r-id{% if not link %} unmatched{% endif %}">
+          {{ link.identity.display_name if link else 'unmatched' }}
+        </div>
+        <div class="r-conf">
+          <span class="bar{% if e.best_confidence < 0.75 %} low{% endif %}">
+            <i style="width: {{ (e.best_confidence * 100) | round | int }}%"></i>
+          </span>
+          <span>{{ '%.2f' | format(e.best_confidence) }}</span>
+        </div>
+        <div><span class="st-chip st-{{ st }}">{{ st }}</span></div>
+      </a>
+      {% endfor %}
+
+      <div class="pager">
+        {% if page > 1 %}<a href="{{ prev_url }}">&larr; newer</a>{% endif %}
+        {% if has_next %}<a href="{{ next_url }}">older &rarr;</a>{% endif %}
+      </div>
+    {% else %}
+      <p class="empty">
+        No events match these filters.
+        {% if chip_count or filters.camera or filters['class'] %}
+          <a href="{{ clear_url }}">Clear all filters</a>
+        {% else %}
+          Run <code>siteloom run --config site.yaml</code> to start ingesting.
+        {% endif %}
+      </p>
+    {% endif %}
+  </div>
+
+  {% if rail %}
+  <aside class="rail" id="triage-rail">{% include "_event_rail.html" %}</aside>
+  {% endif %}
+</div>
+
+<script>
+  // Progressive enhancement only: without it every row is a real link that
+  // renders the same rail server-side. With it, selecting a row swaps the
+  // rail in place and keeps the list's scroll position.
+  (function () {
+    var list = document.getElementById("triage-list");
+    if (!list || !window.fetch || !window.history.pushState) return;
+
+    list.addEventListener("click", function (ev) {
+      var row = ev.target.closest(".row");
+      if (!row || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
+      ev.preventDefault();
+      var href = row.getAttribute("href");
+      var id = row.getAttribute("data-event");
+
+      fetch("/events/" + id + "/rail?back=" + encodeURIComponent(href))
+        .then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (html) {
+          if (html === null) { window.location.href = href; return; }
+          var rail = document.getElementById("triage-rail");
+          if (!rail) {
+            rail = document.createElement("aside");
+            rail.className = "rail";
+            rail.id = "triage-rail";
+            list.parentNode.appendChild(rail);
+          }
+          rail.innerHTML = html;
+          list.querySelectorAll(".row.sel").forEach(function (r) {
+            r.classList.remove("sel");
+          });
+          row.classList.add("sel");
+          window.history.pushState({}, "", href);
+        })
+        .catch(function () { window.location.href = href; });
+    });
+  })();
+</script>
 {% endblock %}
