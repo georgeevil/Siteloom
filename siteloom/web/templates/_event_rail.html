@@ -1,0 +1,98 @@
+{# Triage detail rail (CLD-20). Rendered both inside index.html and on its
+   own from /events/{id}/rail, so it must not extend base.html. #}
+{% set e = rail.event %}
+<div class="rail-inner">
+  <div class="rail-head">
+    <div class="rail-media">
+      {% if e.best_crop_path %}
+        <img src="/media/{{ e.best_crop_path }}" alt="{{ e.class_name }}">
+      {% else %}
+        <div class="ph"></div>
+      {% endif %}
+      <span class="ov-chip">{{ e.camera.name if e.camera else e.camera_id }}</span>
+      <span class="ov-chip right">{{ e.first_seen.strftime('%H:%M:%S') }}</span>
+    </div>
+    <a class="rail-close" href="/" title="Close">&#10005;</a>
+  </div>
+
+  <div class="rail-title">
+    <h2>{{ e.class_name }}</h2>
+    <span class="st-chip st-{{ rail.status }}">{{ rail.status }}</span>
+  </div>
+  <p class="rail-note">
+    {{ e.detection_count }} detection{{ '' if e.detection_count == 1 else 's' }}
+    over {{ ((e.last_seen - e.first_seen).total_seconds()) | round | int }}s{%
+    if rail.zones %} in {{ rail.zones | join(', ') }}{% endif %}.
+  </p>
+
+  <div class="facts">
+    <div><dt>Event</dt><dd class="mono">#{{ e.id }}</dd></div>
+    <div><dt>Track</dt><dd class="mono">{{ e.track_id if e.track_id is not none else '—' }}</dd></div>
+    <div><dt>Camera</dt><dd>{{ e.camera.name if e.camera else e.camera_id }}</dd></div>
+    <div><dt>Confidence</dt><dd class="mono">{{ '%.2f' | format(e.best_confidence) }}</dd></div>
+    <div><dt>First seen</dt><dd class="mono">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</dd></div>
+    <div><dt>Last seen</dt><dd class="mono">{{ e.last_seen.strftime('%Y-%m-%d %H:%M:%S') }}</dd></div>
+    <div><dt>Zones</dt><dd>{{ rail.zones | join(', ') if rail.zones else '—' }}</dd></div>
+    <div><dt>Guest window</dt><dd>{{ 'yes' if e.guest_window else 'no' }}</dd></div>
+  </div>
+
+  <div class="rail-section">
+    <h3>Linked identities</h3>
+    {% if rail.identity_links %}
+      {% for link in rail.identity_links %}
+      <div class="id-card">
+        {% if link.identity.best_crop_path %}
+          <img src="/media/{{ link.identity.best_crop_path }}" alt="">
+        {% else %}
+          <div class="ph sq"></div>
+        {% endif %}
+        <div class="id-body">
+          <div class="id-name{% if not link.identity.label %} unmatched{% endif %}">
+            {{ link.identity.display_name }}
+          </div>
+          <div class="id-sub mono">
+            {{ link.identity.identifier_key }} · sim {{ '%.2f' | format(link.similarity) }}
+            {%- if link.identity.plate %} · {{ link.identity.plate }}{% endif %}
+          </div>
+          {# The real review action this system has: was this claim right? #}
+          <form class="verdict" method="post"
+                action="/events/{{ e.id }}/identity/{{ link.id }}/verdict">
+            <button name="verdict" value="{{ 'clear' if link.verdict == 'confirmed' else 'confirmed' }}"
+                    class="ok{% if link.verdict == 'confirmed' %} on{% endif %}"
+                    title="Correct identification">&#10003;</button>
+            <button name="verdict" value="{{ 'clear' if link.verdict == 'wrong' else 'wrong' }}"
+                    class="bad{% if link.verdict == 'wrong' %} on{% endif %}"
+                    title="Wrong identification">&#10007;</button>
+          </form>
+        </div>
+        <a class="btn-outline sm" href="/identities/{{ link.identity_id }}">Open</a>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="rail-empty">
+        No identity was matched for this event.
+        {% if not e.missed_identity %}
+          If someone identifiable was present, mark it missed so the gap is counted.
+        {% endif %}
+      </p>
+    {% endif %}
+
+    <form method="post" action="/events/{{ e.id }}/missed" class="inline-form">
+      <input type="hidden" name="missed" value="{{ '0' if e.missed_identity else '1' }}">
+      <button type="submit" class="btn-outline sm{% if e.missed_identity %} on-amber{% endif %}">
+        {{ 'Clear missed mark' if e.missed_identity else 'Mark missed identity' }}
+      </button>
+    </form>
+  </div>
+
+  <div class="rail-actions">
+    <form method="post" action="/events/{{ e.id }}/review">
+      <input type="hidden" name="reviewed" value="{{ '0' if e.reviewed_at else '1' }}">
+      <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
+      <button type="submit" class="btn-primary">
+        {{ 'Reopen event' if e.reviewed_at else 'Clear event' }}
+      </button>
+    </form>
+    <a class="btn-outline" href="/events/{{ e.id }}">Full detail</a>
+  </div>
+</div>
