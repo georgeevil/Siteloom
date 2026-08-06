@@ -55,8 +55,26 @@ class FrameSource:
         self.source_id = source_id
         self._base_time = base_time
 
+    #: Live-stream open/read timeouts. Without them a network drop leaves
+    #: grab() blocked inside FFmpeg forever, so the ingest reconnect loop
+    #: never regains control; with them the stream ends and the caller
+    #: reconnects.
+    LIVE_TIMEOUT_MS = 15_000
+
     def frames(self, sample_fps: float = 2.0) -> Iterator[Frame]:
-        cap = cv2.VideoCapture(self._target)
+        if self._is_file:
+            cap = cv2.VideoCapture(self._target)
+        else:
+            cap = cv2.VideoCapture(
+                self._target,
+                cv2.CAP_FFMPEG,
+                [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                    self.LIVE_TIMEOUT_MS,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                    self.LIVE_TIMEOUT_MS,
+                ],
+            )
         if not cap.isOpened():
             raise IOError(f"could not open video source {self._target!r}")
         try:

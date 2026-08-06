@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +39,12 @@ from siteloom.store import (
 )
 
 log = logging.getLogger(__name__)
+
+# Live-stream reconnect pacing: exponential backoff between attempts,
+# reset once a connection has stayed up long enough to count as stable.
+LIVE_BACKOFF_S = 2.0
+LIVE_BACKOFF_MAX_S = 60.0
+LIVE_STABLE_S = 30.0
 
 
 def build_dispatcher(config: SiteConfig) -> JobDispatcher:
@@ -84,6 +94,16 @@ class IngestService:
 
         self.publisher = MqttPublisher(config.integrations.mqtt)
         self.notifier = WebhookNotifier(config.integrations.webhooks)
+
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        """Ask a running ingest to finish in-flight frames and return."""
+        self._stop.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop.is_set()
 
     def _sync_cameras(self) -> None:
         with self.Session() as session:
@@ -342,9 +362,116 @@ class IngestService:
         return str(path)
 
     def run(self, max_frames: int | None = None) -> None:
-        # Sequential over cameras for the PoC; per-camera threads or a
-        # process pool arrive with the multi-machine backends.
-        for cam in self.config.cameras:
+        """Ingest all configured cameras until stopped.
+
+        File cameras run sequentially to completion (the backfill shape,
+        PRD §6.6). Live cameras then run one worker thread each, so a
+        slow or dropped stream never starves the others; each worker
+        reconnects with backoff until stop() or a signal.
+        """
+        self._stop.clear()
+        file_cams = [c for c in self.config.cameras if c.adapter == "file"]
+        live_cams = [c for c in self.config.cameras if c.adapter != "file"]
+
+        for cam in file_cams:
+            if self._stop.is_set():
+                return
             log.info("ingesting camera %s (%s)", cam.id, cam.adapter)
             count = self.run_camera(cam, max_frames=max_frames)
             log.info("camera %s: %d frames processed", cam.id, count)
+
+        if not live_cams:
+            return
+        with self._stop_signals():
+            workers = [
+                threading.Thread(
+                    target=self._run_live,
+                    args=(cam, max_frames),
+                    name=f"ingest-{cam.id}",
+                    daemon=True,
+                )
+                for cam in live_cams
+            ]
+            for w in workers:
+                w.start()
+            # Join with a timeout so the main thread keeps handling signals.
+            while any(w.is_alive() for w in workers):
+                for w in workers:
+                    w.join(timeout=0.5)
+
+    def _run_live(self, cam: CameraConfig, max_frames: int | None) -> None:
+        """One camera's live loop: connect, ingest, reconnect on drop.
+
+        The adapter is rebuilt on every attempt — a fresh connect()
+        re-resolves stream URLs, which Protect can rotate — and gaps are
+        logged with their duration so a soak's blind spots are visible.
+        """
+        log.info("camera %s: live ingest started (%s)", cam.id, cam.adapter)
+        processed = 0
+        backoff = LIVE_BACKOFF_S
+
+        def done() -> bool:
+            return self._stop.is_set() or (
+                max_frames is not None and processed >= max_frames
+            )
+
+        while not done():
+            adapter = build_adapter(cam, self.config)
+            connected_at = time.monotonic()
+            got = 0
+            try:
+                adapter.connect()
+                source = adapter.get_live_stream(cam.source)
+                for frame in source.frames(cam.sample_fps):
+                    self._process_frame(cam, frame)
+                    processed += 1
+                    got += 1
+                    if done():
+                        break
+            except Exception:
+                log.exception("camera %s: live stream error", cam.id)
+            finally:
+                adapter.close()
+            if done():
+                break
+            uptime = time.monotonic() - connected_at
+            if uptime >= LIVE_STABLE_S:
+                backoff = LIVE_BACKOFF_S
+            log.warning(
+                "camera %s: stream dropped after %.0fs (%d frames); "
+                "reconnecting in %.0fs",
+                cam.id,
+                uptime,
+                got,
+                backoff,
+            )
+            self._stop.wait(backoff)
+            backoff = min(backoff * 2, LIVE_BACKOFF_MAX_S)
+        log.info("camera %s: live ingest stopped (%d frames)", cam.id, processed)
+
+    @contextmanager
+    def _stop_signals(self):
+        """Route SIGINT/SIGTERM/SIGHUP to a graceful stop (progress.py
+        convention): first signal drains in-flight frames, second aborts."""
+        from siteloom.progress import STOP_SIGNALS
+
+        def handler(signum, frame):
+            if self._stop.is_set():
+                raise KeyboardInterrupt
+            log.info(
+                "stop signal received — finishing in-flight frames "
+                "(send again to abort)"
+            )
+            self._stop.set()
+
+        previous: dict[int, object] = {}
+        try:
+            for sig in STOP_SIGNALS:
+                previous[sig] = signal.signal(sig, handler)
+        except ValueError:  # not the main thread (tests, embedded use)
+            pass
+        try:
+            yield
+        finally:
+            for sig, old in previous.items():
+                signal.signal(sig, old)
