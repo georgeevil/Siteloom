@@ -12,7 +12,9 @@ and resumable over archives too large to process in one sitting:
 Because phase 2 is bounded by `limit`, you can index 200 photos, label
 them, come back and index 200 more; nothing is lost or repeated. Items
 that fail are marked "failed" with the error, not silently dropped, so
-they surface in the UI instead of vanishing.
+they surface in the UI instead of vanishing — and because nothing picks
+a failed item up again on its own, every result reports them separately
+from `remaining` and `process(retry_failed=True)` re-queues them.
 
 The detection pass reuses the same JobDispatcher and modules as live
 ingestion — improvements to detection accuracy apply to both (PRD §6.6).
@@ -58,6 +60,11 @@ class ProcessResult:
     failed: int
     annotations: int
     remaining: int
+    # Items sitting in `failed` after this run. They are not `remaining`
+    # — nothing will pick them up again on its own — so reporting only
+    # `remaining` let a run claim it was finished while work was left.
+    failed_total: int = 0
+    retried: int = 0
 
 
 def _now() -> datetime:
@@ -163,13 +170,32 @@ class LibraryIndexer:
         limit: int = 100,
         identify: bool = True,
         progress=None,
+        retry_failed: bool = False,
     ) -> ProcessResult:
-        """Run detection (+ identification) over pending items."""
+        """Run detection (+ identification) over pending items.
+
+        `retry_failed` re-queues items that failed earlier. It is opt-in:
+        a genuinely corrupt file fails identically every time, and
+        retrying it on every pass over a 26k archive is pure cost. But
+        the common failures — a file still being written, a transient
+        decode error, an out-of-memory kill — are worth one more go, and
+        without this there was no way to ask for one.
+        """
         from siteloom.library.takeout import _NullProgress
 
         progress = progress or _NullProgress()
-        processed = failed = annotation_count = 0
+        processed = failed = annotation_count = retried = 0
         with self.Session() as session:
+            if retry_failed:
+                q = select(LibraryItem).filter_by(status="failed")
+                if source_id is not None:
+                    q = q.filter_by(source_id=source_id)
+                for item in session.scalars(q).all():
+                    item.status = "pending"
+                    item.error = None
+                    retried += 1
+                session.commit()
+
             q = select(LibraryItem).filter_by(status="pending")
             if source_id is not None:
                 q = q.filter_by(source_id=source_id)
@@ -178,6 +204,7 @@ class LibraryIndexer:
             with progress.phase("Indexing media", total=len(items)):
                 for item in items:
                     boxes = 0
+                    item.attempts = (item.attempts or 0) + 1
                     try:
                         boxes = self._process_item(session, item, identify)
                         annotation_count += boxes
@@ -196,10 +223,20 @@ class LibraryIndexer:
                     )
                     progress.check_interrupt()
 
-            remaining = session.scalar(
-                select(func.count()).select_from(LibraryItem).filter_by(status="pending")
-            )
-        return ProcessResult(processed, failed, annotation_count, remaining or 0)
+            # Scoped to the same source the run was: a per-source run
+            # reporting the whole library's backlog turns "still pending"
+            # into a number the printed resume command will not act on.
+            def _count(status: str) -> int:
+                q = select(func.count()).select_from(LibraryItem).filter_by(status=status)
+                if source_id is not None:
+                    q = q.filter_by(source_id=source_id)
+                return session.scalar(q) or 0
+
+            remaining = _count("pending")
+            failed_total = _count("failed")
+        return ProcessResult(
+            processed, failed, annotation_count, remaining, failed_total, retried
+        )
 
     def _process_item(self, session: Session, item: LibraryItem, identify: bool) -> int:
         # Drop stale machine annotations; human work is never discarded.

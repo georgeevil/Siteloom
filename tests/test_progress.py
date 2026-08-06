@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -109,14 +112,35 @@ def test_disabled_reporter_is_inert(Session):
         assert session.query(OperationRun).count() == 0
 
 
+def test_hiding_the_bar_keeps_the_run_tracked(Session):
+    """`-q` hides the bar and nothing else: a run nobody can see in
+    `siteloom jobs`, and that cannot be stopped cleanly, is worse than a
+    noisy terminal."""
+    p = ProgressReporter(
+        Session, "test-op", bar=False, console=Console(force_terminal=True, quiet=True)
+    )
+    with p as prog:
+        assert prog.interactive is False
+        with prog.phase("Working", total=3):
+            prog.advance(3)
+            prog.interrupt_requested = True
+            with pytest.raises(Interrupted):
+                prog.check_interrupt()
+    run = latest(Session)
+    assert run is not None and run.status == "interrupted"
+    assert run.current == 3
+
+
 # -- derived metrics --------------------------------------------------------
 
 
 def make_run(**kw) -> OperationRun:
-    base = datetime(2026, 8, 5, 12, 0, 0)
+    """A live run: heartbeat now, started 100s ago. Anchored to the
+    present because liveness is part of what these properties mean."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     defaults = dict(
-        kind="k", status="running", started_at=base,
-        updated_at=base + timedelta(seconds=100), current=25, total=100,
+        kind="k", status="running", started_at=now - timedelta(seconds=100),
+        updated_at=now, current=25, total=100,
     )
     defaults.update(kw)
     return OperationRun(**defaults)
@@ -124,7 +148,14 @@ def make_run(**kw) -> OperationRun:
 
 def test_eta_from_observed_rate():
     # 25 items in 100s -> 0.25/s; 75 left -> 300s
-    assert make_run().eta_s == pytest.approx(300.0)
+    assert make_run().eta_s == pytest.approx(300.0, rel=0.01)
+
+
+def test_no_eta_for_abandoned_run():
+    """A run nobody is working on must not advertise an ETA — that is
+    what made a killed job read as healthy."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert make_run(updated_at=now - timedelta(minutes=10)).eta_s is None
 
 
 def test_no_eta_for_finished_run():
@@ -143,6 +174,27 @@ def test_stale_detection():
     assert make_run(updated_at=now - timedelta(minutes=10)).is_stale
     assert not make_run(updated_at=now).is_stale
     assert not make_run(status="complete", updated_at=now - timedelta(days=1)).is_stale
+
+
+def test_dead_pid_is_stale_immediately():
+    """Waiting out a two-minute heartbeat timeout to notice a process
+    that is provably gone helps nobody."""
+    from siteloom.health import hostname
+
+    dead = make_run(pid=_dead_pid(), host=hostname())
+    assert dead.is_stale
+    # Live pid, fresh heartbeat: healthy.
+    assert not make_run(pid=os.getpid(), host=hostname()).is_stale
+    # Another machine's run: the pid means nothing here, so fall back to
+    # the heartbeat.
+    assert not make_run(pid=_dead_pid(), host="some-other-host").is_stale
+
+
+def _dead_pid() -> int:
+    """A pid that has certainly exited: spawn and reap a trivial child."""
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
 
 
 @pytest.mark.parametrize(

@@ -119,19 +119,27 @@ and interruptible rather than opaque:
   terminal; periodic log lines when output is redirected, so background runs
   aren't silent either. `--log-file` adds a rotating file log.
 - **Ctrl-C is safe** — the current batch finishes, work is committed, the run
-  is recorded as interrupted, and the exact resume command is printed.
-  Everything is resumable; rerunning skips what's done.
+  is recorded as interrupted, and the exact resume command is printed (rebuilt
+  from the flags you actually passed). Everything is resumable; rerunning skips
+  what's done. Files that failed are reported separately from what's pending,
+  and `library index --retry-failed` re-queues them.
 - **Watch from anywhere** — every batch heartbeats to the database, so a run
   started in one terminal is visible from another and from the browser. A run
   whose process died shows as `stale` with its last position, rather than
   looking healthy forever.
+- **Steer from anywhere** — stop a job from a terminal that did not start it,
+  and clear up after one that died.
 
 ```bash
-siteloom jobs list     # recent runs, progress, outcome, resume commands
-siteloom jobs watch    # live view of whatever is running
+siteloom jobs list       # recent runs, progress, outcome, resume commands
+siteloom jobs watch      # live view of whatever is running
+siteloom jobs cancel 12  # graceful stop: finishes the batch, leaves a resume command
+siteloom jobs reap       # close out runs whose process is gone
 ```
 
-The `/jobs` page shows the same thing with live progress bars.
+The `/jobs` page shows the same thing with live progress bars. SIGTERM and
+SIGHUP stop a job as gracefully as Ctrl-C, so a service manager or a closing
+terminal costs at most the batch in flight.
 
 ### Training
 
@@ -178,8 +186,29 @@ pytest                                     # test suite
 pip install -r requirements-plates.txt     # optional plate detection + OCR
 ```
 
+Tests use stub modules and synthetic media, so they need no model weights and
+no cameras. What they cannot check by machine — whether a job really survives a
+kill, a reboot, or a 26k-item archive — is written up as a runbook in
+[docs/testing/resumability-runbook.md](docs/testing/resumability-runbook.md),
+with `scripts/make_resume_corpus.py` to build a corpus big enough to interrupt.
+
 For UniFi Protect, put the console host/credentials under `unifi:` in your
 site YAML and use each camera's Protect id as its `source`.
+
+## Running it as a service
+
+```bash
+siteloom doctor --config site.yaml   # is this deployment fit to run? exit 1 if not
+```
+
+`doctor` checks the database and schema, media dir and free space, the vector
+store (including *who is holding it*), model weights, optional plate-OCR deps,
+abandoned jobs, and integration coherence — each with a remedy. The server
+exposes `/healthz` (liveness) and `/readyz` (readiness, 503 when it cannot
+work).
+
+launchd and systemd unit templates, stop-signal semantics, and the
+one-process-per-vector-store rule are in [docs/operations.md](docs/operations.md).
 
 ## Web UI
 
@@ -242,10 +271,12 @@ siteloom/
   store/       # SQLAlchemy: events, identities, library items, annotations,
                # custom classes, noise, bookings, training runs
   ingest.py    # adapter -> sampler -> dispatcher -> stores
+  progress.py  # heartbeated, interruptible, resumable long operations
+  health.py    # preflight checks behind `doctor` and /readyz
   web/         # FastAPI + Jinja2 operator UI (events, library, labeling,
                # classes, training review)
-  cli.py       # init-db | run | serve | cameras | backfill | sync-bookings
-               # library | takeout | classes | train
+  cli.py       # init-db | run | serve | doctor | cameras | backfill
+               # sync-bookings | library | takeout | classes | train | jobs
 ```
 
 ## Roadmap

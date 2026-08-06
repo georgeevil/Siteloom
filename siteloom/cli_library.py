@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,9 +16,15 @@ classes_app = typer.Typer(help="Manage custom sub-classes.")
 train_app = typer.Typer(help="Train face models from verified annotations.")
 jobs_app = typer.Typer(help="Inspect long-running operations.")
 
+# 128 + SIGINT, the shell convention: an interrupted run is neither a
+# success nor a crash, and wrapping scripts need to tell them apart.
+INTERRUPTED_EXIT = 130
+
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
 LOG_FILE_OPT = typer.Option(None, "--log-file", help="Also write logs to this file")
-QUIET_OPT = typer.Option(False, "--quiet", "-q", help="No progress bar (logs only)")
+QUIET_OPT = typer.Option(
+    False, "--quiet", "-q", help="No progress bar (log lines only; still tracked)"
+)
 
 
 def _setup(config_path, log_file: str | None = None, level: str = "INFO"):
@@ -42,6 +49,72 @@ def _setup(config_path, log_file: str | None = None, level: str = "INFO"):
         )
     indexer = LibraryIndexer(config, Session, dispatcher, resolver)
     return config, Session, indexer
+
+
+def _light_setup(config_path, level: str = "INFO"):
+    """Config + DB only — no dispatcher, no resolver, no vector store.
+
+    Embedded Qdrant allows one client per path per machine, so the full
+    `_setup` cannot run while a job holds the store. Every command that
+    only reads rows (the jobs dashboard above all — the thing you reach
+    for *because* a job is running) must take this path instead.
+    """
+    from siteloom.config import load_config
+    from siteloom.progress import setup_logging
+    from siteloom.store import get_session, init_db, make_engine
+
+    setup_logging(level=level)
+    config = load_config(config_path)
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    return config, get_session(engine)
+
+
+def _resume_command(ctx: typer.Context) -> str:
+    """This invocation, rebuilt from the parsed parameters.
+
+    A resume line is a promise that rerunning it continues *this* job.
+    Composing it from a couple of interesting fields quietly broke that
+    promise: it dropped every other flag, so resuming a
+    `--no-auto-verify` import started auto-verifying — writing
+    unreviewed annotations that `training/dataset.py` reads as ground
+    truth. Rebuilding from `ctx` cannot drift from the real signature,
+    because the parameters are the signature.
+    """
+    import shlex
+
+    # The subcommand chain, under a fixed program name: `ctx.command_path`
+    # starts with whatever argv[0] happened to be (a venv path, "root"
+    # under a test runner), and a resume line has to be pasteable.
+    parts = ["siteloom", *ctx.command_path.split()[1:]]
+    for param in ctx.command.params:
+        if param.name not in ctx.params:
+            continue
+        value = ctx.params[param.name]
+        if value is None:
+            continue
+        # Positionals carry a bare name where options carry flags. Don't
+        # test the class — typer's TyperArgument is not a click.Argument.
+        if param.opts and not param.opts[0].startswith("-"):
+            parts.append(shlex.quote(str(value)))
+            continue
+        # --config even at its default: it decides which deployment the
+        # command touches, and a resume line read out of `jobs list` has
+        # to be unambiguous about that.
+        if value == param.default and param.name != "config":
+            continue
+        if isinstance(value, bool):
+            # A bool that differs from its default is expressed by one of
+            # the two flags typer generated for it.
+            flags = param.opts if value else (param.secondary_opts or param.opts)
+            if flags:
+                parts.append(flags[0])
+            continue
+        if not param.opts:
+            continue
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            parts.extend([param.opts[0], shlex.quote(str(item))])
+    return " ".join(parts)
 
 
 def _now() -> datetime:
@@ -92,11 +165,15 @@ def library_scan(
 
 @library_app.command("index")
 def library_index(
+    ctx: typer.Context,
     config: Path = CONFIG_OPT,
     source_id: int = typer.Option(None, help="Only this source"),
     limit: int = typer.Option(None, help="Max items this run (default: config)"),
     all_pending: bool = typer.Option(False, "--all", help="Process everything pending"),
     no_identify: bool = typer.Option(False, help="Skip identification (faster pass)"),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Re-queue items that failed on an earlier run"
+    ),
     log_file: str = LOG_FILE_OPT,
     quiet: bool = QUIET_OPT,
 ):
@@ -105,34 +182,48 @@ def library_index(
     from siteloom.progress import ProgressReporter
 
     batch = limit or (10**9 if all_pending else cfg.library.batch_size)
-    resume = f"siteloom library index --config {config}" + (
-        " --all" if all_pending else ""
-    )
+    resume = _resume_command(ctx)
+    # Assigned inside the block, read after it: the reporter swallows the
+    # Ctrl-C so the run can be recorded, which leaves this unset. `None`
+    # is how the summary below knows the work never finished.
+    result = None
     with ProgressReporter(
         Session,
         "library-index",
         target=f"source {source_id}" if source_id else "all sources",
         resume_command=resume,
-        enabled=not quiet,
+        bar=not quiet,
     ) as progress:
         result = indexer.process(
             source_id=source_id,
             limit=batch,
             identify=not no_identify and cfg.library.identify_on_index,
             progress=progress,
+            retry_failed=retry_failed,
         )
+    if result is None:
+        # Interrupted; the reporter already printed the resume command.
+        raise typer.Exit(INTERRUPTED_EXIT)
+    retried = f"retried {result.retried}, " if result.retried else ""
     typer.echo(
-        f"indexed {result.processed} items ({result.annotations} boxes), "
+        f"{retried}indexed {result.processed} items ({result.annotations} boxes), "
         f"{result.failed} failed, {result.remaining} still pending"
     )
     if result.remaining:
         typer.echo(f"continue with: {resume}")
+    # Failed items are not pending: nothing picks them up again, so a run
+    # that stops mentioning them reads as "all done" when it isn't.
+    if result.failed_total and not retry_failed:
+        typer.echo(
+            f"{result.failed_total} item(s) failed earlier and will not be "
+            f"retried automatically; retry with: {resume} --retry-failed"
+        )
 
 
 @library_app.command("status")
 def library_status(config: Path = CONFIG_OPT):
     """Show per-source indexing progress."""
-    _cfg, Session, _indexer = _setup(config)
+    _cfg, Session = _light_setup(config)
     from sqlalchemy import func, select
 
     from siteloom.store import Annotation, LibraryItem, LibrarySource
@@ -150,6 +241,15 @@ def library_status(config: Path = CONFIG_OPT):
                 f"#{source.id} {source.name} [{source.kind}] "
                 + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
             )
+            for item in session.scalars(
+                select(LibraryItem)
+                .filter_by(source_id=source.id, status="failed")
+                .order_by(LibraryItem.attempts.desc())
+                .limit(5)
+            ).all():
+                typer.echo(
+                    f"    failed x{item.attempts}: {Path(item.path).name} — {item.error}"
+                )
         total = session.scalar(select(func.count()).select_from(Annotation)) or 0
         verified = (
             session.scalar(
@@ -167,6 +267,7 @@ def library_status(config: Path = CONFIG_OPT):
 
 @takeout_app.command("import")
 def takeout_import(
+    ctx: typer.Context,
     path: Path = typer.Argument(..., help="Google Photos Takeout directory"),
     config: Path = CONFIG_OPT,
     limit: int = typer.Option(None, help="Max media files to consider"),
@@ -191,13 +292,14 @@ def takeout_import(
     from siteloom.library.takeout import TakeoutImporter
     from siteloom.progress import ProgressReporter
 
-    resume = f'siteloom takeout import "{path}" --config {config}'
+    resume = _resume_command(ctx)
+    stats = timings = None
     with ProgressReporter(
         Session,
         "takeout-import",
         target=str(path),
         resume_command=resume,
-        enabled=not quiet,
+        bar=not quiet,
     ) as progress:
         importer = TakeoutImporter(
             indexer,
@@ -212,6 +314,8 @@ def takeout_import(
         )
         timings = progress.summary_lines()
 
+    if stats is None:
+        raise typer.Exit(INTERRUPTED_EXIT)
     _print_import_summary(stats, no_auto_verify, timings)
 
 
@@ -427,7 +531,7 @@ def jobs_list(
     from siteloom.progress import humanize
     from siteloom.store import OperationRun
 
-    _cfg, Session, _indexer = _setup(config, level="WARNING")
+    _cfg, Session = _light_setup(config, level="WARNING")
     with Session() as session:
         runs = session.scalars(
             select(OperationRun).order_by(OperationRun.id.desc()).limit(limit)
@@ -473,6 +577,7 @@ def jobs_list(
         "complete": "green",
         "running": "cyan",
         "interrupted": "yellow",
+        "abandoned": "yellow",
         "failed": "red",
         "stale": "red",
     }
@@ -503,10 +608,110 @@ def jobs_list(
                 f"[dim]#{rid}[/] "
                 + " ".join(f"{k}={v:,}" for k, v in list(counters.items())[:5])
             )
-        if status in ("interrupted", "stale") and resume:
-            console.print(f"[yellow]#{rid} resume:[/] {resume}")
+        if status in ("interrupted", "stale", "abandoned") and resume:
+            # soft_wrap: a command broken across lines cannot be pasted.
+            console.print(
+                f"[yellow]#{rid} resume:[/] {resume}", soft_wrap=True, highlight=False
+            )
         elif status == "failed" and message:
             console.print(f"[red]#{rid} failed:[/] {message}")
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(
+    run_id: int = typer.Argument(..., help="Run id from `siteloom jobs list`"),
+    config: Path = CONFIG_OPT,
+    force: bool = typer.Option(
+        False, "--force", help="SIGKILL instead — loses the batch in flight"
+    ),
+):
+    """Stop a running job from another terminal, gracefully.
+
+    Sends the same signal Ctrl-C does, so the job finishes its batch,
+    commits, records itself interrupted and leaves a resume command —
+    the operator does not have to be at the terminal that started it.
+    """
+    import signal
+
+    from siteloom.health import hostname, process_alive
+    from siteloom.store import OperationRun
+
+    _cfg, Session = _light_setup(config, level="WARNING")
+    with Session() as session:
+        run = session.get(OperationRun, run_id)
+        if run is None:
+            typer.echo(f"no run #{run_id}", err=True)
+            raise typer.Exit(1)
+        if run.status != "running":
+            typer.echo(f"run #{run_id} is already {run.status}")
+            return
+        pid, host, kind = run.pid, run.host, run.kind
+
+    if host and host != hostname():
+        typer.echo(
+            f"run #{run_id} belongs to {host}; cancel it there "
+            f"(this is {hostname()})",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not pid or not process_alive(pid):
+        typer.echo(
+            f"run #{run_id} ({kind}) has no live process — it died without "
+            f"recording an outcome; clear it with `siteloom jobs reap`",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    os.kill(pid, signal.SIGKILL if force else signal.SIGINT)
+    if force:
+        typer.echo(f"killed #{run_id} ({kind}, pid {pid}) — work since the last commit is lost")
+        return
+    typer.echo(
+        f"asked #{run_id} ({kind}, pid {pid}) to stop; it will finish the "
+        f"current batch and print a resume command in its own terminal"
+    )
+
+
+@jobs_app.command("reap")
+def jobs_reap(
+    config: Path = CONFIG_OPT,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask"),
+):
+    """Close out runs whose process is gone.
+
+    A killed process leaves its row saying `running` forever, which makes
+    every later `jobs list` ambiguous. This marks those rows `abandoned`,
+    keeping their position and resume command intact.
+    """
+    from sqlalchemy import select
+
+    from siteloom.store import OperationRun
+
+    _cfg, Session = _light_setup(config, level="WARNING")
+    with Session() as session:
+        stale = [
+            r
+            for r in session.scalars(
+                select(OperationRun).filter(OperationRun.status == "running")
+            ).all()
+            if r.is_stale
+        ]
+        if not stale:
+            typer.echo("nothing to reap — no abandoned runs")
+            return
+        for run in stale:
+            typer.echo(
+                f"#{run.id} {run.kind} {run.current:,}/{run.total:,} "
+                f"(pid {run.pid} on {run.host or '?'}, last beat {run.updated_at:%Y-%m-%d %H:%M})"
+            )
+        if not yes and not typer.confirm(f"mark {len(stale)} run(s) abandoned?"):
+            raise typer.Abort()
+        for run in stale:
+            run.status = "abandoned"
+            run.message = "process gone; closed out by `jobs reap`"
+            run.finished_at = _now()
+        session.commit()
+    typer.echo(f"reaped {len(stale)} run(s); resume commands are preserved")
 
 
 @jobs_app.command("watch")
@@ -525,7 +730,7 @@ def jobs_watch(
     from siteloom.progress import humanize
     from siteloom.store import OperationRun
 
-    _cfg, Session, _indexer = _setup(config, level="WARNING")
+    _cfg, Session = _light_setup(config, level="WARNING")
     console = Console()
 
     def render() -> Table:
@@ -574,7 +779,7 @@ def jobs_watch(
 @classes_app.command("list")
 def classes_list(config: Path = CONFIG_OPT):
     """Show detection classes, identifiers, and custom sub-classes."""
-    cfg, Session, _indexer = _setup(config)
+    cfg, Session = _light_setup(config)
     from sqlalchemy import select
 
     from siteloom.store import CustomClass
@@ -684,7 +889,9 @@ def train_status(config: Path = CONFIG_OPT):
 
 
 @train_app.command("enroll")
-def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
+def train_enroll(
+    ctx: typer.Context, config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT
+):
     """Enroll verified faces into the recognition collection.
 
     Sweeps every verified, not-yet-enrolled face annotation and adds its
@@ -712,12 +919,13 @@ def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
     embedder = FaceEmbedder(
         projection_path=cfg.identity.face_projection_path or None
     )
+    stats = None
     try:
         with ProgressReporter(
             Session,
             "face-enroll",
-            resume_command=f"siteloom train enroll --config {config}",
-            enabled=not quiet,
+            resume_command=_resume_command(ctx),
+            bar=not quiet,
         ) as progress:
             with Session() as session:
                 with progress.phase("Enrolling verified faces"):
@@ -727,6 +935,8 @@ def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
     finally:
         if owns_vectors:
             vectors.close()
+    if stats is None:
+        raise typer.Exit(INTERRUPTED_EXIT)
     typer.echo(
         f"enrolled {stats.enrolled} embeddings across {stats.identities} people "
         f"({stats.skipped_cap} skipped: per-person cap reached or unusable crop)"

@@ -8,11 +8,17 @@ those workflows build on.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+)
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -269,6 +275,25 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         if not str(full).startswith(str(media_root)) or not full.is_file():
             raise HTTPException(404)
         return FileResponse(full)
+
+    # -- supervision -------------------------------------------------------
+
+    @app.get("/healthz")
+    def healthz():
+        """Liveness: the process is up and serving. Deliberately touches
+        nothing else, so a slow database cannot get the server killed and
+        restarted into the same slow database."""
+        return {"status": "ok", "site": config.site_id, "pid": os.getpid()}
+
+    @app.get("/readyz")
+    def readyz():
+        """Readiness: can this process actually do its job? Runs the
+        cheap half of `siteloom doctor` — never the vector store, which
+        this process is already holding."""
+        from siteloom.health import LIVE_CHECKS, run_checks
+
+        report = run_checks(config, LIVE_CHECKS)
+        return JSONResponse(report.as_dict(), status_code=200 if report.ok else 503)
 
     return app
 

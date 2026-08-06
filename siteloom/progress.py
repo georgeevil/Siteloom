@@ -48,12 +48,18 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from siteloom.health import hostname
 from siteloom.store import OperationRun
 
 log = logging.getLogger(__name__)
 
 HEARTBEAT_S = 2.0  # DB write interval
 LOG_INTERVAL_S = 15.0  # non-TTY log line interval
+
+# Every signal that means "stop": Ctrl-C, a service manager stopping the
+# unit, and the terminal going away. A job that only honours SIGINT
+# survives the operator and dies to the machine, which is backwards.
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def _now() -> datetime:
@@ -84,6 +90,7 @@ class ProgressReporter:
         resume_command: str = "",
         console: Console | None = None,
         enabled: bool = True,
+        bar: bool = True,
     ):
         self.Session = session_factory
         self.kind = kind
@@ -91,9 +98,11 @@ class ProgressReporter:
         self.resume_command = resume_command
         self.enabled = enabled
         self.console = console or Console(stderr=True)
-        # A progress bar is only useful on a terminal; redirected output
-        # gets log lines instead so background runs are still traceable.
-        self.interactive = self.console.is_terminal and enabled
+        # `bar` hides the live bar; `enabled` switches the whole reporter
+        # off. They are separate because the heartbeat and the Ctrl-C
+        # handler are what make a run observable and resumable — a user
+        # who only wants a quieter terminal must not silently lose them.
+        self.interactive = self.console.is_terminal and enabled and bar
 
         self.counters: dict[str, int] = defaultdict(int)
         self.phase_timings: dict[str, float] = {}
@@ -109,7 +118,7 @@ class ProgressReporter:
         self._last_beat = 0.0
         self._last_log = 0.0
         self._started = time.monotonic()
-        self._prev_sigint = None
+        self._prev_handlers: dict[int, object] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -125,12 +134,19 @@ class ProgressReporter:
                 updated_at=_now(),
                 resume_command=self.resume_command,
                 pid=os.getpid(),
+                host=hostname(),
             )
             session.add(run)
             session.commit()
             self.run_id = run.id
-        self._prev_sigint = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, self._on_sigint)
+        for signum in STOP_SIGNALS:
+            try:
+                self._prev_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._on_stop)
+            except ValueError:
+                # Not the main thread (embedded callers); the run is
+                # still tracked, it just cannot be stopped by signal.
+                self._prev_handlers.pop(signum, None)
         if self.interactive:
             self._progress = Progress(
                 SpinnerColumn(),
@@ -152,8 +168,8 @@ class ProgressReporter:
         self._close_phase()
         if self._progress is not None:
             self._progress.stop()
-        if self._prev_sigint is not None:
-            signal.signal(signal.SIGINT, self._prev_sigint)
+        for signum, handler in self._prev_handlers.items():
+            signal.signal(signum, handler)
 
         if exc_type is Interrupted or self.interrupt_requested:
             self.finish("interrupted", "stopped by user")
@@ -165,16 +181,22 @@ class ProgressReporter:
         self.finish("complete")
         return False
 
-    def _on_sigint(self, signum, frame) -> None:
-        # First Ctrl-C asks the loop to stop cleanly; a second one is the
-        # user insisting, so restore default handling and let it through.
+    def _on_stop(self, signum, frame) -> None:
+        # The first signal asks the loop to stop cleanly; a second one is
+        # the sender insisting, so restore default handling and let it
+        # through. SIGTERM's default is death, which is the right answer
+        # to a service manager that has already asked once.
         if self.interrupt_requested:
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
-            raise KeyboardInterrupt
+            signal.signal(signum, signal.SIG_DFL)
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            os.kill(os.getpid(), signum)
+            return
         self.interrupt_requested = True
+        name = signal.Signals(signum).name
         self.console.print(
-            "\n[yellow]Interrupt received — finishing the current batch and "
-            "saving progress. Press Ctrl-C again to abort immediately.[/]"
+            f"\n[yellow]{name} received — finishing the current batch and "
+            f"saving progress. Send it again to abort immediately.[/]"
         )
 
     def check_interrupt(self) -> None:
@@ -313,10 +335,10 @@ class ProgressReporter:
 
     def _print_resume(self) -> None:
         if self.resume_command:
-            self.console.print(
-                f"\n[green]Progress saved.[/] Resume with:\n  "
-                f"[bold]{self.resume_command}[/]"
-            )
+            self.console.print("\n[green]Progress saved.[/] Resume with:")
+            # soft_wrap: a resume command broken across lines by the
+            # console width is a command nobody can paste.
+            self.console.print(f"  {self.resume_command}", soft_wrap=True, highlight=False)
 
     # -- summary -----------------------------------------------------------
 
