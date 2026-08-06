@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from siteloom.store.models import Base
@@ -11,7 +11,19 @@ log = logging.getLogger(__name__)
 
 
 def make_engine(db_url: str) -> Engine:
-    return create_engine(db_url)
+    engine = create_engine(db_url)
+    if engine.dialect.name == "sqlite":
+        # Per-camera ingest threads and the web UI write concurrently;
+        # WAL lets readers proceed during a write, and the busy timeout
+        # rides out the brief writer-writer contention that remains.
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_conn, _record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+
+    return engine
 
 
 def init_db(engine: Engine) -> None:

@@ -7,6 +7,7 @@ weights load a single time per process.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from siteloom.dispatch.base import Job, JobDispatcher, JobHandle, JobResult
@@ -23,9 +24,16 @@ class _ResolvedHandle(JobHandle):
 class LocalBackend(JobDispatcher):
     def __init__(self) -> None:
         self._modules: dict[str, Any] = {}
+        # Warm module instances hold state that is not thread-safe (per-
+        # camera tracker state, OpenCV detectors), so submissions from
+        # concurrent callers — e.g. per-camera ingest threads — are
+        # serialized per module. Distributed backends get their
+        # concurrency from separate worker processes instead.
+        self._locks: dict[str, threading.Lock] = {}
 
     def register(self, name: str, module: Any) -> None:
         self._modules[name] = module
+        self._locks[name] = threading.Lock()
 
     def submit(self, job: Job) -> JobHandle:
         module = self._modules.get(job.module)
@@ -39,7 +47,8 @@ class LocalBackend(JobDispatcher):
                 )
             )
         try:
-            result = module.process(job)
+            with self._locks[job.module]:
+                result = module.process(job)
             return _ResolvedHandle(
                 JobResult(job_id=job.job_id, module=job.module, ok=True, result=result)
             )

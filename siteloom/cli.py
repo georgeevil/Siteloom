@@ -50,6 +50,10 @@ def run(
 
     service = IngestService(load_config(config))
     service.run(max_frames=max_frames)
+    if service.stopped:
+        from siteloom.cli_library import INTERRUPTED_EXIT
+
+        raise typer.Exit(INTERRUPTED_EXIT)
 
 
 @app.command()
