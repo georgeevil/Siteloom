@@ -1,0 +1,1284 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0;background:oklch(0.17 0.008 250);color:oklch(0.95 0.005 250);font-family:Archivo,'Helvetica Neue',Helvetica,sans-serif;-webkit-font-smoothing:antialiased}
+  *{box-sizing:border-box}
+  a{color:oklch(0.78 0.13 200);text-decoration:none}
+  a:hover{color:oklch(0.88 0.10 200)}
+  ::selection{background:oklch(0.72 0.16 200 / .3)}
+  @keyframes slpulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @keyframes slrise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:oklch(0.33 0.01 250);border-radius:6px;border:3px solid oklch(0.17 0.008 250)}
+</style>
+</helmet>
+
+<div style="display:flex;height:100vh;overflow:hidden;background:oklch(0.17 0.008 250)">
+
+  <aside style="width:236px;flex:none;display:flex;flex-direction:column;background:oklch(0.205 0.009 250);border-right:1px solid oklch(0.28 0.01 250)">
+    <div style="display:flex;align-items:center;gap:10px;padding:18px 18px 16px">
+      <div style="display:grid;grid-template-columns:repeat(3,5px);grid-template-rows:repeat(3,5px);gap:2px">
+        <div style="background:oklch(0.72 0.16 200)"></div><div style="background:oklch(0.4 0.02 250)"></div><div style="background:oklch(0.72 0.16 200)"></div>
+        <div style="background:oklch(0.4 0.02 250)"></div><div style="background:oklch(0.72 0.16 200)"></div><div style="background:oklch(0.4 0.02 250)"></div>
+        <div style="background:oklch(0.72 0.16 200)"></div><div style="background:oklch(0.4 0.02 250)"></div><div style="background:oklch(0.72 0.16 200)"></div>
+      </div>
+      <div style="font-size:15px;font-weight:700;letter-spacing:-0.2px">Siteloom</div>
+      <div style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:9px;color:oklch(0.6 0.008 250);border:1px solid oklch(0.3 0.01 250);padding:2px 4px;border-radius:3px">v0.4</div>
+    </div>
+
+    <div style="padding:0 12px 14px">
+      <button style="width:100%;display:flex;align-items:center;gap:8px;padding:8px 10px;background:oklch(0.24 0.01 250);border:1px solid oklch(0.3 0.01 250);border-radius:6px;color:oklch(0.9 0.005 250);font-family:Archivo,sans-serif;font-size:12px;cursor:pointer;text-align:left" style-hover="border-color:oklch(0.45 0.03 250)">
+        <span style="width:6px;height:6px;border-radius:50%;background:oklch(0.72 0.16 145);animation:slpulse 2s infinite"></span>
+        <span style="font-weight:600">Harbour Point</span>
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.6 0.008 250)">18 cams</span>
+      </button>
+    </div>
+
+    <nav style="display:flex;flex-direction:column;gap:2px;padding:0 8px">
+      <sc-for list="{{ nav }}" as="item" hint-placeholder-count="6">
+        <button onClick="{{ item.go }}" style="display:flex;align-items:center;gap:10px;padding:9px 10px;border:0;border-radius:6px;background:{{ item.bg }};color:{{ item.fg }};font-family:Archivo,sans-serif;font-size:13px;font-weight:500;cursor:pointer;text-align:left;width:100%" style-hover="background:oklch(0.26 0.01 250)">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;width:22px;flex:none;text-align:center;padding:2px 0;border-radius:3px;background:{{ item.tagBg }};color:{{ item.tagFg }}">{{ item.code }}</span>
+          <span style="flex:1">{{ item.label }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{{ item.badgeFg }}">{{ item.badge }}</span>
+        </button>
+      </sc-for>
+    </nav>
+
+    <div style="margin-top:auto;padding:14px;border-top:1px solid oklch(0.28 0.01 250);display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="width:26px;height:26px;border-radius:50%;background:oklch(0.35 0.03 250);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:oklch(0.85 0.01 250)">AL</div>
+        <div style="line-height:1.25">
+          <div style="font-size:12px;font-weight:600">A. Lindqvist</div>
+          <div style="font-size:10px;color:oklch(0.62 0.008 250)">Security lead · on shift</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button onClick="{{ toggleMobile }}" style="flex:1;padding:6px;background:transparent;border:1px solid oklch(0.3 0.01 250);border-radius:5px;color:oklch(0.72 0.008 250);font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer" style-hover="color:oklch(0.95 0.005 250);border-color:oklch(0.45 0.03 250)">{{ deviceLabel }}</button>
+      </div>
+    </div>
+  </aside>
+
+  <main style="flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden">
+
+    <header style="flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;height:56px;border-bottom:1px solid oklch(0.28 0.01 250);background:oklch(0.19 0.008 250)">
+      <div style="font-size:15px;font-weight:600;letter-spacing:-0.1px">{{ screenTitle }}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.6 0.008 250)">{{ screenSub }}</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:7px;padding:6px 10px;background:oklch(0.23 0.01 250);border:1px solid oklch(0.29 0.01 250);border-radius:6px;width:230px">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.55 0.008 250)">⌕</span>
+          <input placeholder="Search events, people, plates" style="flex:1;background:transparent;border:0;outline:none;color:oklch(0.92 0.005 250);font-family:Archivo,sans-serif;font-size:12px">
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.72 0.008 250);padding:6px 9px;border:1px solid oklch(0.29 0.01 250);border-radius:6px">{{ clock }}</div>
+      </div>
+    </header>
+
+    <!-- ============ EVENTS ============ -->
+    <sc-if value="{{ isEvents }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Events" style="flex:1;min-height:0;display:flex;flex-direction:column">
+
+        <div style="flex:none;display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid oklch(0.28 0.01 250);background:oklch(0.185 0.008 250)">
+          <div style="display:flex;background:oklch(0.23 0.01 250);border:1px solid oklch(0.29 0.01 250);border-radius:6px;padding:2px;gap:2px">
+            <sc-for list="{{ variants }}" as="v" hint-placeholder-count="3">
+              <button onClick="{{ v.pick }}" style="padding:5px 11px;border:0;border-radius:4px;background:{{ v.bg }};color:{{ v.fg }};font-family:Archivo,sans-serif;font-size:11.5px;font-weight:600;cursor:pointer">{{ v.label }}</button>
+            </sc-for>
+          </div>
+          <div style="width:1px;height:20px;background:oklch(0.29 0.01 250)"></div>
+          <sc-for list="{{ filters }}" as="f" hint-placeholder-count="5">
+            <button onClick="{{ f.toggle }}" style="padding:5px 10px;border:1px solid {{ f.bd }};border-radius:20px;background:{{ f.bg }};color:{{ f.fg }};font-family:Archivo,sans-serif;font-size:11.5px;cursor:pointer">{{ f.label }}</button>
+          </sc-for>
+          <div style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.62 0.008 250)">{{ eventCountLabel }}</div>
+        </div>
+
+        <!-- Variant A: triage table + detail -->
+        <sc-if value="{{ isA }}" hint-placeholder-val="{{ true }}">
+          <div style="flex:1;min-height:0;display:flex;position:relative">
+            <div style="flex:1;min-width:0;overflow:auto">
+              <div style="display:grid;grid-template-columns:{{ gridCols }};gap:12px;padding:0 14px;height:32px;align-items:center;position:sticky;top:0;background:oklch(0.21 0.009 250);border-bottom:1px solid oklch(0.28 0.01 250);font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:oklch(0.6 0.008 250);z-index:2">
+                <div>Time</div><div>Detection</div><div style="display:{{ camDisp }}">Camera</div><div>Identity</div><div style="display:{{ confDisp }}">Conf</div><div>Status</div>
+              </div>
+              <sc-for list="{{ events }}" as="e" hint-placeholder-count="8">
+                <div onClick="{{ e.select }}" style="display:grid;grid-template-columns:{{ gridCols }};gap:12px;align-items:center;padding:0 14px;height:52px;border-bottom:1px solid oklch(0.24 0.009 250);cursor:pointer;background:{{ e.rowBg }};border-left:2px solid {{ e.accent }}" style-hover="background:oklch(0.235 0.01 250)">
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:oklch(0.8 0.008 250)">{{ e.time }}</div>
+                  <div style="display:flex;align-items:center;gap:10px;min-width:0">
+                    <div style="width:54px;height:34px;flex:none;border-radius:3px;background-color:oklch(0.26 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.055) 0 5px,transparent 5px 10px);border:1px solid oklch(0.3 0.01 250)"></div>
+                    <div style="min-width:0">
+                      <div style="display:flex;align-items:baseline;gap:7px">
+                        <div style="font-size:12.5px;font-weight:600">{{ e.cls }}</div>
+                        <div style="display:{{ narrowConfDisp }};font-family:'JetBrains Mono',monospace;font-size:10px;color:{{ e.confColor }}">{{ e.conf }}</div>
+                      </div>
+                      <div style="font-size:11px;color:oklch(0.63 0.008 250);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.subline }}</div>
+                    </div>
+                  </div>
+                  <div style="display:{{ camDisp }};font-size:12px;color:oklch(0.78 0.008 250);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.camera }}</div>
+                  <div style="font-size:12px;color:{{ e.idColor }};font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.identity }}</div>
+                  <div style="display:{{ confDisp }}">
+                    <div style="height:4px;border-radius:2px;background:oklch(0.3 0.01 250);overflow:hidden;width:42px">
+                      <div style="height:100%;width:{{ e.confPct }};background:{{ e.confColor }}"></div>
+                    </div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.65 0.008 250);margin-top:3px">{{ e.conf }}</div>
+                  </div>
+                  <div><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;padding:3px 7px;border-radius:3px;background:{{ e.statusBg }};color:{{ e.statusFg }}">{{ e.status }}</span></div>
+                </div>
+              </sc-for>
+            </div>
+
+            <sc-if value="{{ asideVisible }}" hint-placeholder-val="{{ true }}">
+            <aside style="width:{{ asideW }};flex:none;position:{{ asidePos }};right:0;top:0;bottom:0;z-index:20;box-shadow:{{ asideShadow }};border-left:1px solid oklch(0.28 0.01 250);background:oklch(0.195 0.008 250);overflow:auto;padding:16px">
+              <div style="animation:slrise .18s ease">
+                <button onClick="{{ closeDetail }}" style="display:{{ closeDisp }};align-items:center;justify-content:center;width:26px;height:26px;margin:0 0 10px auto;border:1px solid oklch(0.32 0.01 250);border-radius:5px;background:oklch(0.22 0.01 250);color:oklch(0.75 0.008 250);cursor:pointer;font-size:12px">✕</button>
+                <div style="aspect-ratio:16/9;border-radius:6px;background-color:oklch(0.24 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.05) 0 7px,transparent 7px 14px);border:1px solid oklch(0.3 0.01 250);display:flex;align-items:flex-end;justify-content:space-between;padding:10px">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.68 0.008 250);background:oklch(0.17 0.008 250 / .8);padding:3px 6px;border-radius:3px">event clip · 8s</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.68 0.008 250);background:oklch(0.17 0.008 250 / .8);padding:3px 6px;border-radius:3px">{{ sel.time }}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin:14px 0 4px">
+                  <div style="font-size:16px;font-weight:700">{{ sel.cls }}</div>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;padding:3px 7px;border-radius:3px;background:{{ sel.statusBg }};color:{{ sel.statusFg }}">{{ sel.status }}</span>
+                </div>
+                <div style="font-size:12px;color:oklch(0.66 0.008 250);margin-bottom:14px">{{ sel.note }}</div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:oklch(0.28 0.01 250);border:1px solid oklch(0.28 0.01 250);border-radius:6px;overflow:hidden;margin-bottom:14px">
+                  <sc-for list="{{ selFacts }}" as="f" hint-placeholder-count="6">
+                    <div style="background:oklch(0.215 0.009 250);padding:9px 11px">
+                      <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:oklch(0.58 0.008 250)">{{ f.k }}</div>
+                      <div style="font-size:12.5px;font-weight:500;margin-top:3px">{{ f.v }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin-bottom:8px">Linked identity</div>
+                <div style="display:flex;align-items:center;gap:11px;padding:11px;border:1px solid oklch(0.29 0.01 250);border-radius:6px;background:oklch(0.215 0.009 250)">
+                  <div style="width:44px;height:44px;flex:none;border-radius:5px;background-color:oklch(0.28 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 5px,transparent 5px 10px)"></div>
+                  <div style="min-width:0;flex:1">
+                    <div style="font-size:13px;font-weight:600">{{ sel.identity }}</div>
+                    <div style="font-size:11px;color:oklch(0.64 0.008 250)">{{ sel.idMeta }}</div>
+                  </div>
+                  <button onClick="{{ goIdentities }}" style="padding:5px 9px;background:transparent;border:1px solid oklch(0.33 0.01 250);border-radius:5px;color:oklch(0.8 0.05 200);font-family:Archivo,sans-serif;font-size:11px;cursor:pointer;flex:none" style-hover="border-color:oklch(0.6 0.1 200)">Open</button>
+                </div>
+
+                <div style="display:flex;gap:7px;margin-top:16px">
+                  <button style="flex:1;padding:9px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">Clear event</button>
+                  <button style="flex:1;padding:9px;border:1px solid oklch(0.45 0.12 30);border-radius:6px;background:transparent;color:oklch(0.75 0.14 30);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:600;cursor:pointer" style-hover="background:oklch(0.3 0.06 30)">Escalate</button>
+                </div>
+                <button onClick="{{ openTraining }}" style="width:100%;margin-top:7px;padding:9px;border:1px dashed oklch(0.35 0.01 250);border-radius:6px;background:transparent;color:oklch(0.72 0.008 250);font-family:Archivo,sans-serif;font-size:12px;cursor:pointer" style-hover="border-color:oklch(0.55 0.08 200);color:oklch(0.9 0.005 250)">Send crop to training data →</button>
+              </div>
+            </aside>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- Variant B: timeline lanes -->
+        <sc-if value="{{ isB }}" hint-placeholder-val="{{ true }}">
+          <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto">
+            <div style="padding:14px 20px 4px;display:flex;gap:0;align-items:center">
+              <div style="width:150px;flex:none"></div>
+              <div style="flex:1;display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.58 0.008 250);border-bottom:1px solid oklch(0.28 0.01 250);padding-bottom:5px">
+                <span>07:00</span><span>07:30</span><span>08:00</span><span>08:30</span><span>09:00</span>
+              </div>
+            </div>
+            <div style="padding:0 20px 18px">
+              <sc-for list="{{ lanes }}" as="lane" hint-placeholder-count="5">
+                <div style="display:flex;align-items:center;height:58px;border-bottom:1px solid oklch(0.235 0.009 250)">
+                  <div style="width:150px;flex:none;padding-right:12px">
+                    <div style="font-size:12.5px;font-weight:600">{{ lane.name }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.58 0.008 250)">{{ lane.zone }}</div>
+                  </div>
+                  <div style="flex:1;position:relative;height:100%">
+                    <div style="position:absolute;top:50%;left:0;right:0;height:2px;background:oklch(0.25 0.01 250)"></div>
+                    <sc-for list="{{ lane.events }}" as="e" hint-placeholder-count="2">
+                      <button onClick="{{ e.select }}" style="position:absolute;top:50%;left:{{ e.leftPct }};transform:translate(-50%,-50%);display:flex;align-items:center;gap:6px;padding:4px 8px 4px 5px;border:1px solid {{ e.accent }};border-radius:16px;background:{{ e.pipBg }};color:oklch(0.93 0.005 250);font-family:Archivo,sans-serif;font-size:11px;cursor:pointer;white-space:nowrap" style-hover="background:oklch(0.3 0.02 250)">
+                        <span style="width:16px;height:16px;border-radius:50%;background:{{ e.accent }};display:block"></span>
+                        <span style="font-weight:600">{{ e.cls }}</span>
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.72 0.008 250)">{{ e.identityShort }}</span>
+                      </button>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin:0 20px 20px;padding:14px;border:1px solid oklch(0.28 0.01 250);border-radius:8px;background:oklch(0.2 0.009 250);display:flex;gap:16px">
+              <div style="width:220px;flex:none;aspect-ratio:16/9;border-radius:5px;background-color:oklch(0.25 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.05) 0 6px,transparent 6px 12px);border:1px solid oklch(0.3 0.01 250)"></div>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:9px">
+                  <div style="font-size:15px;font-weight:700">{{ sel.cls }}</div>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.68 0.008 250)">{{ sel.time }} · {{ sel.camera }}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;padding:3px 7px;border-radius:3px;background:{{ sel.statusBg }};color:{{ sel.statusFg }}">{{ sel.status }}</span>
+                </div>
+                <div style="font-size:12px;color:oklch(0.66 0.008 250);margin:5px 0 12px">{{ sel.note }}</div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px">
+                  <sc-for list="{{ selFacts }}" as="f" hint-placeholder-count="6">
+                    <div style="padding:6px 10px;border:1px solid oklch(0.29 0.01 250);border-radius:5px;background:oklch(0.225 0.009 250)">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:oklch(0.58 0.008 250)">{{ f.k }} </span>
+                      <span style="font-size:12px;font-weight:500">{{ f.v }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- Variant C: card wall -->
+        <sc-if value="{{ isC }}" hint-placeholder-val="{{ true }}">
+          <div style="flex:1;min-height:0;overflow:auto;padding:18px 20px">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:14px">
+              <sc-for list="{{ events }}" as="e" hint-placeholder-count="8">
+                <div onClick="{{ e.select }}" style="border:1px solid {{ e.cardBd }};border-radius:8px;overflow:hidden;background:oklch(0.21 0.009 250);cursor:pointer" style-hover="border-color:oklch(0.5 0.06 200)">
+                  <div style="aspect-ratio:16/10;background-color:oklch(0.25 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.05) 0 6px,transparent 6px 12px);position:relative;display:flex;align-items:flex-start;justify-content:space-between;padding:9px">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;padding:3px 7px;border-radius:3px;background:{{ e.statusBg }};color:{{ e.statusFg }}">{{ e.status }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.72 0.008 250);background:oklch(0.17 0.008 250 / .82);padding:3px 6px;border-radius:3px">{{ e.time }}</span>
+                  </div>
+                  <div style="padding:11px 12px 12px">
+                    <div style="display:flex;align-items:baseline;gap:7px">
+                      <div style="font-size:13.5px;font-weight:700">{{ e.cls }}</div>
+                      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.6 0.008 250)">{{ e.conf }}</div>
+                    </div>
+                    <div style="font-size:11.5px;color:oklch(0.65 0.008 250);margin-top:2px">{{ e.camera }}</div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid oklch(0.26 0.01 250)">
+                      <div style="width:24px;height:24px;flex:none;border-radius:4px;background-color:oklch(0.29 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 4px,transparent 4px 8px)"></div>
+                      <div style="font-size:12px;font-weight:500;color:{{ e.idColor }};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.identity }}</div>
+                    </div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <!-- ============ MEDIA ============ -->
+    <sc-if value="{{ isMedia }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Media library" style="flex:1;min-height:0;overflow:auto;padding:18px 20px">
+        <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center">
+          <sc-for list="{{ mediaTabs }}" as="t" hint-placeholder-count="4">
+            <button onClick="{{ t.pick }}" style="padding:6px 12px;border:1px solid {{ t.bd }};border-radius:6px;background:{{ t.bg }};color:{{ t.fg }};font-family:Archivo,sans-serif;font-size:12px;font-weight:600;cursor:pointer">{{ t.label }}</button>
+          </sc-for>
+          <div style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.6 0.008 250)">retention 30d · 4.2 TB of 8 TB</div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:14px">
+          <sc-for list="{{ cameras }}" as="c" hint-placeholder-count="9">
+            <div style="border:1px solid oklch(0.28 0.01 250);border-radius:8px;overflow:hidden;background:oklch(0.21 0.009 250)" style-hover="border-color:oklch(0.42 0.03 250)">
+              <div style="aspect-ratio:16/9;background-color:oklch(0.245 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.05) 0 6px,transparent 6px 12px);position:relative;display:flex;align-items:flex-start;justify-content:space-between;padding:8px">
+                <span style="display:flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:oklch(0.8 0.008 250);background:oklch(0.17 0.008 250 / .8);padding:3px 6px;border-radius:3px">
+                  <span style="width:5px;height:5px;border-radius:50%;background:{{ c.dot }}"></span>{{ c.state }}
+                </span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:oklch(0.72 0.008 250);background:oklch(0.17 0.008 250 / .8);padding:3px 6px;border-radius:3px">{{ c.res }}</span>
+              </div>
+              <div style="padding:10px 11px 11px">
+                <div style="font-size:13px;font-weight:600">{{ c.name }}</div>
+                <div style="font-size:11px;color:oklch(0.63 0.008 250);margin-top:2px">{{ c.zone }}</div>
+                <div style="display:flex;gap:5px;margin-top:9px">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;padding:2px 6px;border-radius:3px;background:oklch(0.26 0.01 250);color:oklch(0.75 0.008 250)">{{ c.clips }} clips</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;padding:2px 6px;border-radius:3px;background:oklch(0.26 0.01 250);color:oklch(0.75 0.008 250)">{{ c.events }} events</span>
+                </div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- ============ IDENTITIES ============ -->
+    <sc-if value="{{ isIdentities }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Identities" style="flex:1;min-height:0;display:flex">
+        <div style="flex:1;min-width:0;overflow:auto;padding:18px 20px">
+          <div style="display:flex;gap:8px;margin-bottom:14px">
+            <sc-for list="{{ idFilters }}" as="f" hint-placeholder-count="4">
+              <button onClick="{{ f.toggle }}" style="padding:5px 11px;border:1px solid {{ f.bd }};border-radius:20px;background:{{ f.bg }};color:{{ f.fg }};font-family:Archivo,sans-serif;font-size:11.5px;cursor:pointer">{{ f.label }}</button>
+            </sc-for>
+            <button style="margin-left:auto;padding:6px 12px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:12px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">Enrol identity</button>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
+            <sc-for list="{{ identities }}" as="p" hint-placeholder-count="6">
+              <div onClick="{{ p.select }}" style="display:flex;gap:12px;padding:13px;border:1px solid {{ p.bd }};border-radius:8px;background:oklch(0.21 0.009 250);cursor:pointer" style-hover="border-color:oklch(0.5 0.06 200)">
+                <div style="width:52px;height:52px;flex:none;border-radius:6px;background-color:oklch(0.28 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 5px,transparent 5px 10px)"></div>
+                <div style="min-width:0;flex:1">
+                  <div style="display:flex;align-items:center;gap:7px">
+                    <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.name }}</div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.05em;padding:2px 6px;border-radius:3px;background:{{ p.roleBg }};color:{{ p.roleFg }};flex:none">{{ p.role }}</span>
+                  </div>
+                  <div style="font-size:11.5px;color:oklch(0.64 0.008 250);margin-top:2px">{{ p.org }}</div>
+                  <div style="display:flex;align-items:center;gap:10px;margin-top:9px;font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.62 0.008 250)">
+                    <span>{{ p.samples }} samples</span><span>·</span><span>{{ p.lastSeen }}</span>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <aside style="width:340px;flex:none;border-left:1px solid oklch(0.28 0.01 250);background:oklch(0.195 0.008 250);overflow:auto;padding:16px">
+          <div style="display:flex;gap:12px;align-items:center">
+            <div style="width:64px;height:64px;flex:none;border-radius:8px;background-color:oklch(0.28 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 5px,transparent 5px 10px)"></div>
+            <div>
+              <div style="font-size:16px;font-weight:700">{{ selId.name }}</div>
+              <div style="font-size:12px;color:oklch(0.65 0.008 250)">{{ selId.org }}</div>
+            </div>
+          </div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:18px 0 8px">Enrolled samples · {{ selId.samples }}</div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+            <sc-for list="{{ sampleSlots }}" as="s" hint-placeholder-count="8">
+              <div style="aspect-ratio:1;border-radius:4px;background-color:oklch(0.26 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 4px,transparent 4px 8px);border:1px solid oklch(0.3 0.01 250)"></div>
+            </sc-for>
+          </div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:18px 0 8px">Recent events</div>
+          <div style="display:flex;flex-direction:column;gap:1px;border:1px solid oklch(0.28 0.01 250);border-radius:6px;overflow:hidden;background:oklch(0.28 0.01 250)">
+            <sc-for list="{{ selIdEvents }}" as="e" hint-placeholder-count="3">
+              <div onClick="{{ e.open }}" style="display:flex;align-items:center;gap:9px;padding:9px 11px;background:oklch(0.215 0.009 250);cursor:pointer" style-hover="background:oklch(0.25 0.01 250)">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.78 0.008 250)">{{ e.time }}</span>
+                <span style="font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.camera }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.62 0.008 250)">{{ e.cls }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <button onClick="{{ openTraining }}" style="width:100%;margin-top:16px;padding:9px;border:1px dashed oklch(0.35 0.01 250);border-radius:6px;background:transparent;color:oklch(0.72 0.008 250);font-family:Archivo,sans-serif;font-size:12px;cursor:pointer" style-hover="border-color:oklch(0.55 0.08 200);color:oklch(0.9 0.005 250)">Add training samples →</button>
+        </aside>
+      </div>
+    </sc-if>
+
+    <!-- ============ CLASSES ============ -->
+    <sc-if value="{{ isClasses }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Classes" style="flex:1;min-height:0;display:flex">
+        <div style="flex:1;min-width:0;overflow:auto;padding:18px 20px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <div style="font-size:13px;font-weight:600">Detection classes</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.6 0.008 250)">model harbour-v4 · trained 2d ago</div>
+            <button onClick="{{ toggleNewClass }}" style="margin-left:auto;padding:6px 12px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:12px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">New class</button>
+          </div>
+          <div style="border:1px solid oklch(0.28 0.01 250);border-radius:8px;overflow:hidden">
+            <div style="display:grid;grid-template-columns:1fr 116px 128px 96px 64px;padding:0 14px;height:32px;align-items:center;background:oklch(0.225 0.009 250);border-bottom:1px solid oklch(0.28 0.01 250);font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:oklch(0.6 0.008 250)">
+              <div>Class</div><div>Samples</div><div>Threshold</div><div>Precision</div><div>Active</div>
+            </div>
+            <sc-for list="{{ classes }}" as="c" hint-placeholder-count="6">
+              <div style="display:grid;grid-template-columns:1fr 116px 128px 96px 64px;align-items:center;padding:0 14px;height:56px;border-bottom:1px solid oklch(0.25 0.009 250);background:oklch(0.205 0.009 250)" style-hover="background:oklch(0.23 0.01 250)">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="width:10px;height:10px;border-radius:2px;background:{{ c.color }};flex:none"></span>
+                  <div>
+                    <div style="font-size:12.5px;font-weight:600">{{ c.name }}</div>
+                    <div style="font-size:11px;color:oklch(0.62 0.008 250)">{{ c.desc }}</div>
+                  </div>
+                </div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:oklch(0.8 0.008 250)">{{ c.samples }}</div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="flex:1;height:4px;border-radius:2px;background:oklch(0.3 0.01 250);overflow:hidden"><div style="height:100%;width:{{ c.thrPct }};background:oklch(0.72 0.16 200)"></div></div>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:oklch(0.72 0.008 250)">{{ c.thr }}</span>
+                </div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:{{ c.precColor }}">{{ c.prec }}</div>
+                <div><div onClick="{{ c.toggle }}" style="width:34px;height:19px;border-radius:12px;background:{{ c.swBg }};padding:2px;cursor:pointer;display:flex;justify-content:{{ c.swJustify }}"><div style="width:15px;height:15px;border-radius:50%;background:oklch(0.96 0.005 250)"></div></div></div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:16px;padding:14px;border:1px solid oklch(0.28 0.01 250);border-radius:8px;background:oklch(0.2 0.009 250);display:flex;align-items:center;gap:14px">
+            <div style="flex:1">
+              <div style="font-size:12.5px;font-weight:600">2 classes have unverified examples</div>
+              <div style="font-size:11.5px;color:oklch(0.65 0.008 250);margin-top:2px">Loitering (48) and Tailgating (12) improve the moment their crops are verified — no retraining, the k-NN vote picks them up immediately.</div>
+            </div>
+            <button onClick="{{ openTraining }}" style="padding:8px 14px;border:1px solid oklch(0.5 0.1 200);border-radius:6px;background:transparent;color:oklch(0.82 0.1 200);font-family:Archivo,sans-serif;font-size:12px;font-weight:600;cursor:pointer" style-hover="background:oklch(0.28 0.05 200)">Open training data</button>
+          </div>
+        </div>
+
+        <sc-if value="{{ newClassOpen }}" hint-placeholder-val="{{ true }}">
+          <aside style="width:352px;flex:none;border-left:1px solid oklch(0.28 0.01 250);background:oklch(0.195 0.008 250);overflow:auto;padding:16px;animation:slrise .18s ease">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+              <div style="font-size:14px;font-weight:700">New class</div>
+              <button onClick="{{ toggleNewClass }}" style="margin-left:auto;width:24px;height:24px;border:1px solid oklch(0.3 0.01 250);border-radius:5px;background:transparent;color:oklch(0.7 0.008 250);cursor:pointer;font-size:12px">✕</button>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin-bottom:6px">Name</div>
+            <input value="Tailgating" style="width:100%;padding:9px 10px;background:oklch(0.23 0.01 250);border:1px solid oklch(0.3 0.01 250);border-radius:6px;color:oklch(0.93 0.005 250);font-family:Archivo,sans-serif;font-size:12.5px;outline:none" style-focus="border-color:oklch(0.6 0.12 200)">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:14px 0 6px">Behaviour definition</div>
+            <textarea rows="3" style="width:100%;padding:9px 10px;background:oklch(0.23 0.01 250);border:1px solid oklch(0.3 0.01 250);border-radius:6px;color:oklch(0.93 0.005 250);font-family:Archivo,sans-serif;font-size:12.5px;outline:none;resize:vertical">Two or more people passing a badge reader on a single credential read.</textarea>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:14px 0 6px">Trigger type</div>
+            <div style="display:flex;gap:6px">
+              <sc-for list="{{ triggerTypes }}" as="t" hint-placeholder-count="3">
+                <button onClick="{{ t.pick }}" style="flex:1;padding:8px;border:1px solid {{ t.bd }};border-radius:6px;background:{{ t.bg }};color:{{ t.fg }};font-family:Archivo,sans-serif;font-size:11.5px;font-weight:600;cursor:pointer">{{ t.label }}</button>
+              </sc-for>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:14px 0 6px">Cameras in scope</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <sc-for list="{{ scopeChips }}" as="s" hint-placeholder-count="4">
+                <span style="padding:4px 9px;border:1px solid oklch(0.32 0.01 250);border-radius:16px;background:oklch(0.24 0.01 250);font-size:11.5px;color:oklch(0.85 0.008 250)">{{ s }}</span>
+              </sc-for>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:14px 0 6px">Confidence threshold · {{ newThr }}</div>
+            <input type="range" min="50" max="99" value="{{ newThrNum }}" onChange="{{ setThr }}" style="width:100%;accent-color:oklch(0.72 0.16 200)">
+            <div style="margin-top:18px;padding:11px;border:1px solid oklch(0.32 0.06 85);border-radius:6px;background:oklch(0.24 0.03 85);font-size:11.5px;color:oklch(0.86 0.05 85);line-height:1.45">
+              A new class needs at least 30 labelled samples before it can be activated. You have 12.
+            </div>
+            <div style="display:flex;gap:7px;margin-top:14px">
+              <button onClick="{{ openTraining }}" style="flex:1;padding:9px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">Create &amp; label samples</button>
+              <button onClick="{{ toggleNewClass }}" style="padding:9px 13px;border:1px solid oklch(0.32 0.01 250);border-radius:6px;background:transparent;color:oklch(0.78 0.008 250);font-family:Archivo,sans-serif;font-size:12.5px;cursor:pointer">Cancel</button>
+            </div>
+          </aside>
+        </sc-if>
+      </div>
+    </sc-if>
+    <!-- ============ TRAINING DATA ============ -->
+    <sc-if value="{{ isTraining }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="Training data" style="flex:1;min-height:0;display:flex;position:relative">
+
+        <div style="display:{{ srcRailDisp }};width:262px;flex:none;border-right:1px solid oklch(0.28 0.01 250);background:oklch(0.195 0.008 250);overflow:auto;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250)">Library sources</div>
+            <button onClick="{{ openImport }}" style="margin-left:auto;padding:4px 9px;border:0;border-radius:5px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:11px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">Import</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ sourceRows }}" as="x" hint-placeholder-count="4">
+              <div onClick="{{ x.pick }}" style="padding:11px;border:1px solid {{ x.bd }};border-radius:7px;background:oklch(0.215 0.009 250);cursor:pointer" style-hover="border-color:oklch(0.45 0.05 200)">
+                <div style="font-size:12.5px;font-weight:600">{{ x.name }}</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:oklch(0.58 0.008 250);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ x.path }}</div>
+                <div style="height:4px;border-radius:2px;background:oklch(0.3 0.01 250);overflow:hidden;margin:9px 0 6px">
+                  <div style="height:100%;width:{{ x.pct }};background:oklch(0.72 0.16 200)"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:oklch(0.65 0.008 250)">
+                  <span>{{ x.totalLabel }} items</span><span>{{ x.pendingLabel }}</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9.5px;margin-top:3px;color:{{ x.failedFg }}">
+                  <span>{{ x.failedLabel }}</span><span style="color:oklch(0.55 0.008 250)">{{ x.last }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:14px;padding:11px;border:1px dashed oklch(0.33 0.01 250);border-radius:7px;font-size:11.5px;line-height:1.5;color:oklch(0.66 0.008 250)">
+            Indexing is resumable — 100 items per pass. Verified crops enrol into the same face collection the cameras read.
+          </div>
+        </div>
+
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+          <div style="display:{{ srcTabsDisp }};flex:none;align-items:center;gap:7px;padding:10px 18px 0;overflow-x:auto">
+            <sc-for list="{{ srcTabs }}" as="t" hint-placeholder-count="5">
+              <button onClick="{{ t.pick }}" style="flex:none;display:flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid {{ t.bd }};border-radius:6px;background:{{ t.bg }};color:{{ t.fg }};font-family:Archivo,sans-serif;font-size:11.5px;font-weight:600;cursor:pointer;white-space:nowrap">
+                {{ t.name }}<span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:oklch(0.6 0.008 250)">{{ t.count }}</span>
+              </button>
+            </sc-for>
+            <button onClick="{{ openImport }}" style="flex:none;margin-left:auto;padding:5px 11px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:11.5px;font-weight:700;cursor:pointer;white-space:nowrap">Import</button>
+          </div>
+          <div style="flex:none;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;padding:12px 18px;border-bottom:1px solid oklch(0.28 0.01 250);background:oklch(0.185 0.008 250)">
+            <div style="display:flex;align-items:center;gap:7px;min-width:0;overflow-x:auto;padding-bottom:2px">
+              <sc-for list="{{ tFilters }}" as="f" hint-placeholder-count="7">
+                <button onClick="{{ f.pick }}" style="flex:none;padding:5px 10px;border:1px solid {{ f.bd }};border-radius:20px;background:{{ f.bg }};color:{{ f.fg }};font-family:Archivo,sans-serif;font-size:11.5px;cursor:pointer;white-space:nowrap">{{ f.label }}</button>
+              </sc-for>
+            </div>
+            <div style="margin-left:auto;flex:none;display:flex;align-items:center;gap:8px">
+              <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.62 0.008 250);white-space:nowrap">{{ libCount }}</div>
+              <div style="display:flex;gap:4px">
+                <sc-for list="{{ groupBtns }}" as="g" hint-placeholder-count="2">
+                  <button onClick="{{ g.pick }}" style="padding:5px 10px;border:1px solid {{ g.bd }};border-radius:5px;background:{{ g.bg }};color:{{ g.fg }};font-family:Archivo,sans-serif;font-size:11.5px;cursor:pointer;white-space:nowrap">{{ g.label }}</button>
+                </sc-for>
+              </div>
+              <div style="display:flex;gap:3px">
+                <sc-for list="{{ sizeBtns }}" as="z" hint-placeholder-count="3">
+                  <button onClick="{{ z.pick }}" style="width:26px;padding:5px 0;border:1px solid {{ z.bd }};border-radius:5px;background:{{ z.bg }};color:{{ z.fg }};font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer">{{ z.label }}</button>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow:auto;padding:16px 18px 22px">
+            <sc-for list="{{ groups }}" as="g" hint-placeholder-count="4">
+              <div style="margin-bottom:22px">
+                <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:10px">
+                  <div style="font-size:13px;font-weight:700">{{ g.name }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:oklch(0.6 0.008 250)">{{ g.meta }}</div>
+                </div>
+                <div style="display:grid;grid-template-columns:{{ cropCols }};gap:9px">
+                  <sc-for list="{{ g.items }}" as="c" hint-placeholder-count="12">
+                    <div onClick="{{ c.toggle }}" style="cursor:pointer">
+                      <div style="aspect-ratio:1;border-radius:5px;border:2px solid {{ c.bd }};background-color:oklch(0.26 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 5px,transparent 5px 10px);position:relative;display:flex;align-items:flex-end;padding:5px">
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:oklch(0.78 0.008 250);background:oklch(0.16 0.008 250 / .85);padding:2px 4px;border-radius:2px">{{ c.conf }}</span>
+                        <span style="position:absolute;top:4px;left:4px;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:.04em;text-transform:uppercase;padding:2px 5px;border-radius:2px;background:{{ c.stateBg }};color:{{ c.stateFg }}">{{ c.stateLabel }}</span>
+                        <span style="position:absolute;top:4px;right:4px;width:15px;height:15px;border-radius:3px;background:{{ c.chkBg }};border:1px solid {{ c.bd }};color:oklch(0.16 0.03 240);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">{{ c.chk }}</span>
+                        <span style="display:{{ c.enrolledDisp }};position:absolute;bottom:5px;right:5px;width:7px;height:7px;border-radius:50%;background:oklch(0.72 0.16 145)"></span>
+                      </div>
+                      <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:oklch(0.58 0.008 250);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.file }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <sc-if value="{{ tAsideVisible }}" hint-placeholder-val="{{ true }}">
+        <aside style="width:326px;flex:none;position:{{ tAsidePos }};right:0;top:0;bottom:0;z-index:20;box-shadow:{{ tAsideShadow }};border-left:1px solid oklch(0.28 0.01 250);background:oklch(0.195 0.008 250);overflow:auto;padding:16px;display:flex;flex-direction:column">
+          <button onClick="{{ clearSel }}" style="display:{{ tCloseDisp }};align-items:center;justify-content:center;width:26px;height:26px;margin:0 0 10px auto;border:1px solid oklch(0.32 0.01 250);border-radius:5px;background:oklch(0.22 0.01 250);color:oklch(0.75 0.008 250);cursor:pointer;font-size:12px">✕</button>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="font-size:14px;font-weight:700">{{ selCountLabel }}</div>
+            <button onClick="{{ selectAll }}" style="margin-left:auto;padding:4px 9px;border:1px solid oklch(0.32 0.01 250);border-radius:5px;background:transparent;color:oklch(0.78 0.008 250);font-family:Archivo,sans-serif;font-size:11px;cursor:pointer">Select all</button>
+            <button onClick="{{ clearSel }}" style="padding:4px 9px;border:1px solid oklch(0.32 0.01 250);border-radius:5px;background:transparent;color:oklch(0.78 0.008 250);font-family:Archivo,sans-serif;font-size:11px;cursor:pointer">Clear</button>
+          </div>
+
+          <div style="display:{{ inspectorDisp }};margin-top:14px;padding:13px;border:1px dashed oklch(0.33 0.01 250);border-radius:7px;font-size:12px;line-height:1.55;color:oklch(0.66 0.008 250)">
+            Select crops to label them. Verifying a face crop enrols its embedding under an identity — that person is then recognised on live cameras immediately.
+          </div>
+
+          <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ false }}">
+            <div style="animation:slrise .16s ease">
+              <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:16px 0 7px">Assign identity</div>
+              <div style="display:flex;flex-direction:column;gap:1px;border:1px solid oklch(0.3 0.01 250);border-radius:6px;overflow:hidden;background:oklch(0.3 0.01 250)">
+                <sc-for list="{{ assignTargets }}" as="p" hint-placeholder-count="5">
+                  <div onClick="{{ p.pick }}" style="display:flex;align-items:center;gap:9px;padding:9px 11px;background:{{ p.bg }};cursor:pointer">
+                    <div style="width:26px;height:26px;flex:none;border-radius:4px;background-color:oklch(0.3 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 4px,transparent 4px 8px)"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.name }}</div>
+                      <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:{{ p.capFg }}">{{ p.samples }}/20 vectors · {{ p.cap }}</div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.75 0.12 200)">{{ p.tick }}</span>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:16px 0 7px">Or tag a custom class</div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <sc-for list="{{ customChips }}" as="c" hint-placeholder-count="4">
+                  <button onClick="{{ c.pick }}" style="display:flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid {{ c.bd }};border-radius:20px;background:{{ c.bg }};color:{{ c.fg }};font-family:Archivo,sans-serif;font-size:12px;cursor:pointer">
+                    <span style="width:8px;height:8px;border-radius:2px;background:{{ c.color }}"></span>{{ c.name }}
+                  </button>
+                </sc-for>
+              </div>
+
+              <div style="margin-top:16px;padding:11px;border:1px solid oklch(0.3 0.01 250);border-radius:7px;background:oklch(0.215 0.009 250)">
+                <div style="font-size:12px;font-weight:600">{{ assignSummary }}</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.65 0.008 250);margin-top:4px">{{ enrolledPreview }}</div>
+              </div>
+
+              <div style="display:flex;gap:7px;margin-top:12px">
+                <button onClick="{{ verifySel }}" style="flex:1;padding:9px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">Verify &amp; enrol</button>
+                <button onClick="{{ rejectSel }}" style="padding:9px 13px;border:1px solid oklch(0.45 0.12 30);border-radius:6px;background:transparent;color:oklch(0.75 0.14 30);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:600;cursor:pointer" style-hover="background:oklch(0.3 0.06 30)">Reject</button>
+              </div>
+            </div>
+          </sc-if>
+        </aside>
+        </sc-if>
+      </div>
+    </sc-if>
+  </main>
+
+  <!-- ============ TRAINING DATA DIALOG ============ -->
+  <sc-if value="{{ importOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;inset:0;background:oklch(0.12 0.01 250 / .72);display:flex;align-items:center;justify-content:center;z-index:40;padding:32px">
+      <div style="width:100%;max-width:880px;max-height:100%;display:flex;flex-direction:column;background:oklch(0.205 0.009 250);border:1px solid oklch(0.32 0.01 250);border-radius:10px;box-shadow:0 24px 70px oklch(0.1 0.01 250 / .6);overflow:hidden;animation:slrise .2s ease">
+        <div style="flex:none;display:flex;align-items:center;gap:14px;padding:15px 18px;border-bottom:1px solid oklch(0.28 0.01 250)">
+          <div style="font-size:14.5px;font-weight:700">Import labelled library</div>
+          <div style="display:flex;align-items:center;gap:7px;margin-left:6px">
+            <sc-for list="{{ importSteps }}" as="s" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:7px">
+                <span style="width:18px;height:18px;border-radius:50%;background:{{ s.dotBg }};color:{{ s.dotFg }};font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">{{ s.n }}</span>
+                <span style="font-size:12px;font-weight:600;color:{{ s.fg }}">{{ s.label }}</span>
+                <span style="width:18px;height:1px;background:{{ s.connBg }}"></span>
+              </div>
+            </sc-for>
+          </div>
+          <button onClick="{{ closeImport }}" style="margin-left:auto;width:26px;height:26px;border:1px solid oklch(0.3 0.01 250);border-radius:5px;background:transparent;color:oklch(0.7 0.008 250);cursor:pointer;font-size:12px" style-hover="border-color:oklch(0.5 0.03 250)">✕</button>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow:auto;padding:18px">
+          <sc-if value="{{ iStep1 }}" hint-placeholder-val="{{ true }}">
+            <div>
+              <div style="font-size:13px;font-weight:600;margin-bottom:3px">Point Siteloom at a folder</div>
+              <div style="font-size:12px;color:oklch(0.65 0.008 250);margin-bottom:16px">Scanning only registers files. Nothing is decoded until you index, so a 26k archive can be added in seconds.</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin-bottom:6px">Path</div>
+              <input value="/mnt/import/handover" style="width:100%;padding:10px 11px;background:oklch(0.23 0.01 250);border:1px solid oklch(0.3 0.01 250);border-radius:6px;color:oklch(0.93 0.005 250);font-family:'JetBrains Mono',monospace;font-size:12.5px;outline:none" style-focus="border-color:oklch(0.6 0.12 200)">
+              <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:16px 0 6px">Source kind</div>
+              <div style="display:flex;gap:7px">
+                <sc-for list="{{ kinds }}" as="k" hint-placeholder-count="3">
+                  <button onClick="{{ k.pick }}" style="flex:1;padding:9px;border:1px solid {{ k.bd }};border-radius:6px;background:{{ k.bg }};color:{{ k.fg }};font-family:Archivo,sans-serif;font-size:12px;font-weight:600;cursor:pointer">{{ k.label }}</button>
+                </sc-for>
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;margin-top:16px;padding:12px;border:1px solid oklch(0.3 0.01 250);border-radius:7px;background:oklch(0.215 0.009 250)">
+                <div style="flex:1">
+                  <div style="font-size:12.5px;font-weight:600">Identify while indexing</div>
+                  <div style="font-size:11.5px;color:oklch(0.65 0.008 250);margin-top:2px">Resolve faces against the live identity store as each item is processed. Slower, but proposals arrive labelled.</div>
+                </div>
+                <div onClick="{{ toggleIdentify }}" style="width:34px;height:19px;border-radius:12px;background:{{ iIdentifyBg }};padding:2px;cursor:pointer;display:flex;justify-content:{{ iIdentifyJustify }};flex:none"><div style="width:15px;height:15px;border-radius:50%;background:oklch(0.96 0.005 250)"></div></div>
+              </div>
+              <div style="display:flex;gap:10px;margin-top:10px">
+                <div style="flex:1;padding:11px;border:1px solid oklch(0.3 0.01 250);border-radius:7px;background:oklch(0.215 0.009 250)">
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:oklch(0.58 0.008 250)">Frames per video</div>
+                  <div style="font-size:13px;font-weight:500;margin-top:3px">5 evenly spaced</div>
+                </div>
+                <div style="flex:1;padding:11px;border:1px solid oklch(0.3 0.01 250);border-radius:7px;background:oklch(0.215 0.009 250)">
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:oklch(0.58 0.008 250)">Batch size</div>
+                  <div style="font-size:13px;font-weight:500;margin-top:3px">100 items per pass</div>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ iStep2 }}" hint-placeholder-val="{{ false }}">
+            <div>
+              <div style="font-size:13px;font-weight:600;margin-bottom:3px">Scan complete</div>
+              <div style="font-size:12px;color:oklch(0.65 0.008 250);margin-bottom:14px">/mnt/import/handover · 1,840 media files registered as pending.</div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:oklch(0.28 0.01 250);border:1px solid oklch(0.28 0.01 250);border-radius:7px;overflow:hidden">
+                <sc-for list="{{ scanFacts }}" as="f" hint-placeholder-count="4">
+                  <div style="background:oklch(0.215 0.009 250);padding:12px 13px">
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:oklch(0.58 0.008 250)">{{ f.k }}</div>
+                    <div style="font-size:17px;font-weight:700;margin-top:4px;color:{{ f.fg }}">{{ f.v }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:oklch(0.58 0.008 250);margin:16px 0 8px">Sample of what was found</div>
+              <div style="display:flex;flex-direction:column;gap:1px;border:1px solid oklch(0.3 0.01 250);border-radius:6px;overflow:hidden;background:oklch(0.3 0.01 250)">
+                <sc-for list="{{ scanSample }}" as="f" hint-placeholder-count="5">
+                  <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:oklch(0.215 0.009 250)">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9px;padding:2px 6px;border-radius:3px;background:oklch(0.28 0.01 250);color:oklch(0.75 0.008 250)">{{ f.kind }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.path }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.6 0.008 250)">{{ f.size }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ iStep3 }}" hint-placeholder-val="{{ false }}">
+            <div>
+              <div style="font-size:13px;font-weight:600;margin-bottom:3px">Indexing</div>
+              <div style="font-size:12px;color:oklch(0.65 0.008 250);margin-bottom:14px">Detection runs over each item and writes annotations. Interrupt any time — the next pass resumes where this one stopped.</div>
+              <div style="height:8px;border-radius:4px;background:oklch(0.29 0.01 250);overflow:hidden">
+                <div style="height:100%;width:34%;background:oklch(0.72 0.16 200)"></div>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:oklch(0.65 0.008 250);margin-top:6px">
+                <span>624 of 1,840 indexed</span><span>~11 min remaining</span>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:oklch(0.28 0.01 250);border:1px solid oklch(0.28 0.01 250);border-radius:7px;overflow:hidden;margin-top:16px">
+                <sc-for list="{{ indexFacts }}" as="f" hint-placeholder-count="4">
+                  <div style="background:oklch(0.215 0.009 250);padding:12px 13px">
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:oklch(0.58 0.008 250)">{{ f.k }}</div>
+                    <div style="font-size:17px;font-weight:700;margin-top:4px;color:{{ f.fg }}">{{ f.v }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="margin-top:14px;padding:12px;border:1px solid oklch(0.32 0.06 85);border-radius:7px;background:oklch(0.24 0.03 85);font-size:11.5px;line-height:1.5;color:oklch(0.86 0.05 85)">
+                9 items failed to decode. They stay in the failed queue rather than disappearing — retry them from the source card once indexing finishes.
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ iStep4 }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:36px 0;text-align:center">
+              <div style="width:44px;height:44px;border-radius:50%;background:oklch(0.35 0.1 145);margin:0 auto 14px;display:flex;align-items:center;justify-content:center;color:oklch(0.9 0.1 145);font-size:20px">✓</div>
+              <div style="font-size:16px;font-weight:700">Source added</div>
+              <div style="font-size:12.5px;color:oklch(0.66 0.008 250);margin-top:5px">Site handover pack · 1,840 items · 2,904 crops proposed. Indexing continues in the background.</div>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="flex:none;display:flex;align-items:center;gap:9px;padding:14px 18px;border-top:1px solid oklch(0.28 0.01 250);background:oklch(0.19 0.008 250)">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.62 0.008 250)">{{ iFooterNote }}</div>
+          <button onClick="{{ iBack }}" style="margin-left:auto;padding:8px 14px;border:1px solid oklch(0.32 0.01 250);border-radius:6px;background:transparent;color:oklch(0.78 0.008 250);font-family:Archivo,sans-serif;font-size:12.5px;cursor:pointer" style-hover="border-color:oklch(0.5 0.03 250)">{{ iBackLabel }}</button>
+          <button onClick="{{ iNext }}" style="padding:8px 16px;border:0;border-radius:6px;background:oklch(0.72 0.16 200);color:oklch(0.16 0.03 240);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:700;cursor:pointer" style-hover="background:oklch(0.79 0.14 200)">{{ iNextLabel }}</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ============ MOBILE OVERLAY ============ -->
+  <sc-if value="{{ mobileOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;inset:0;background:oklch(0.13 0.01 250 / .8);display:flex;align-items:center;justify-content:center;gap:24px;z-index:50;padding:28px">
+      <div data-screen-label="Mobile triage" style="width:390px;height:780px;max-height:100%;display:flex;flex-direction:column;background:oklch(0.19 0.008 250);border:1px solid oklch(0.34 0.01 250);border-radius:26px;overflow:hidden;box-shadow:0 30px 80px oklch(0.1 0.01 250 / .7)">
+        <div style="flex:none;padding:12px 16px 10px;border-bottom:1px solid oklch(0.27 0.01 250)">
+          <div style="display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10px;color:oklch(0.6 0.008 250);margin-bottom:10px">
+            <span>{{ clock }}</span><span>Harbour Point · LTE</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px">
+            <div style="font-size:19px;font-weight:700;letter-spacing:-0.3px">Events</div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 7px;border-radius:12px;background:oklch(0.32 0.09 30);color:oklch(0.85 0.11 30)">3 flagged</span>
+          </div>
+        </div>
+        <div style="flex:1;min-height:0;overflow:auto;padding:12px">
+          <sc-for list="{{ events }}" as="e" hint-placeholder-count="8">
+            <div onClick="{{ e.select }}" style="display:flex;gap:11px;padding:11px;margin-bottom:9px;border:1px solid {{ e.cardBd }};border-radius:10px;background:oklch(0.215 0.009 250);cursor:pointer;min-height:76px;align-items:center">
+              <div style="width:64px;height:52px;flex:none;border-radius:6px;background-color:oklch(0.27 0.01 250);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 5px,transparent 5px 10px)"></div>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:baseline;gap:7px">
+                  <div style="font-size:14px;font-weight:700">{{ e.cls }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:oklch(0.68 0.008 250)">{{ e.time }}</div>
+                </div>
+                <div style="font-size:12px;color:oklch(0.66 0.008 250);margin-top:2px">{{ e.camera }}</div>
+                <div style="font-size:12.5px;font-weight:500;color:{{ e.idColor }};margin-top:5px">{{ e.identity }}</div>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.05em;padding:3px 7px;border-radius:3px;background:{{ e.statusBg }};color:{{ e.statusFg }};flex:none">{{ e.status }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:none;display:flex;border-top:1px solid oklch(0.27 0.01 250);background:oklch(0.205 0.009 250)">
+          <sc-for list="{{ mobileTabs }}" as="t" hint-placeholder-count="4">
+            <button onClick="{{ t.go }}" style="flex:1;height:60px;border:0;background:transparent;color:{{ t.fg }};font-family:Archivo,sans-serif;font-size:11px;font-weight:600;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px">
+              <span style="width:16px;height:16px;border-radius:4px;background:{{ t.dot }}"></span>{{ t.label }}
+            </button>
+          </sc-for>
+        </div>
+      </div>
+      <button onClick="{{ toggleMobile }}" style="padding:9px 15px;border:1px solid oklch(0.36 0.01 250);border-radius:7px;background:oklch(0.22 0.01 250);color:oklch(0.88 0.005 250);font-family:Archivo,sans-serif;font-size:12.5px;font-weight:600;cursor:pointer;align-self:flex-start">Close</button>
+    </div>
+  </sc-if>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{}">
+const C = {
+  bg: 'oklch(0.17 0.008 250)', panel: 'oklch(0.205 0.009 250)', line: 'oklch(0.28 0.01 250)',
+  text: 'oklch(0.95 0.005 250)', mute: 'oklch(0.66 0.008 250)',
+  cyan: 'oklch(0.72 0.16 200)', amber: 'oklch(0.75 0.14 85)', red: 'oklch(0.68 0.16 30)', green: 'oklch(0.72 0.16 145)'
+};
+
+const STATUS = {
+  New:       { bg: 'oklch(0.3 0.06 200)', fg: 'oklch(0.85 0.1 200)', accent: C.cyan },
+  Reviewing: { bg: 'oklch(0.3 0.05 85)',  fg: 'oklch(0.87 0.1 85)',  accent: C.amber },
+  Flagged:   { bg: 'oklch(0.31 0.08 30)', fg: 'oklch(0.86 0.12 30)', accent: C.red },
+  Cleared:   { bg: 'oklch(0.27 0.02 250)',fg: 'oklch(0.72 0.01 250)',accent: 'oklch(0.38 0.01 250)' }
+};
+
+const EVENTS = [
+  { id:1, t:'08:42:11', min:522, cls:'Person', note:'Badge-in match, dock door 2', cam:'Loading Dock', zone:'Service yard', identity:'Marcus Okafor', idMeta:'Facilities · staff · badge 2214', conf:0.96, status:'Cleared' },
+  { id:2, t:'08:39:04', min:519, cls:'Vehicle', note:'Plate KJ-4471 · matched fleet register', cam:'North Gate', zone:'Perimeter', identity:'Ardent Freight', idMeta:'Vendor fleet · 6 prior visits', conf:0.91, status:'New' },
+  { id:3, t:'08:31:52', min:511, cls:'Person', note:'No badge event within 30s of entry', cam:'Lobby', zone:'Front of house', identity:'Unmatched', idMeta:'No enrolled match · 3 crops clustered', conf:0.74, status:'Flagged' },
+  { id:4, t:'08:20:17', min:500, cls:'Person', note:'Restricted zone, escort not detected', cam:'Server Room', zone:'Core', identity:'Diego Ruiz', idMeta:'HVAC contractor · escort required', conf:0.88, status:'Reviewing' },
+  { id:5, t:'07:58:40', min:478, cls:'Loitering', note:'Dwell 4m12s at west fence line', cam:'Perimeter West', zone:'Perimeter', identity:'Unmatched', idMeta:'No enrolled match', conf:0.69, status:'Flagged' },
+  { id:6, t:'07:44:03', min:464, cls:'Person', note:'Shift start, front entrance', cam:'Lobby', zone:'Front of house', identity:'Ana Lindqvist', idMeta:'Security lead · staff · badge 1102', conf:0.97, status:'Cleared' },
+  { id:7, t:'07:31:29', min:451, cls:'Package', note:'Left unattended 90s at south door', cam:'South Gate', zone:'Perimeter', identity:'—', idMeta:'Object event · no identity', conf:0.82, status:'New' },
+  { id:8, t:'07:12:55', min:432, cls:'Person', note:'Tailgate candidate behind badge read', cam:'North Gate', zone:'Perimeter', identity:'Unmatched', idMeta:'Candidate for new class', conf:0.71, status:'New' }
+];
+
+const IDENTITIES = [
+  { id:'p1', name:'Ana Lindqvist', role:'Staff', org:'Security · Harbour Point', samples:31, lastSeen:'Lobby 07:44' },
+  { id:'p2', name:'Marcus Okafor', role:'Staff', org:'Facilities · Harbour Point', samples:24, lastSeen:'Loading Dock 08:42' },
+  { id:'p3', name:'Diego Ruiz', role:'Contractor', org:'Meridian HVAC', samples:9, lastSeen:'Server Room 08:20' },
+  { id:'p4', name:'Priya Raman', role:'Staff', org:'Engineering · Harbour Point', samples:18, lastSeen:'Lobby yesterday' },
+  { id:'p5', name:'Tom Beck', role:'Vendor', org:'Ardent Freight', samples:6, lastSeen:'North Gate 08:39' },
+  { id:'p6', name:'Unknown cluster #4471', role:'Unenrolled', org:'3 appearances · 2 cameras', samples:3, lastSeen:'Perimeter W 07:58' }
+];
+
+const ROLE_TONE = {
+  Staff:      { bg:'oklch(0.28 0.04 200)', fg:'oklch(0.84 0.09 200)' },
+  Contractor: { bg:'oklch(0.29 0.05 85)',  fg:'oklch(0.86 0.09 85)' },
+  Vendor:     { bg:'oklch(0.27 0.02 250)', fg:'oklch(0.78 0.01 250)' },
+  Unenrolled: { bg:'oklch(0.3 0.07 30)',   fg:'oklch(0.85 0.11 30)' }
+};
+
+const CAMERAS = [
+  { name:'Lobby', zone:'Front of house', state:'live', res:'4K', clips:412, events:38 },
+  { name:'North Gate', zone:'Perimeter', state:'live', res:'4K', clips:388, events:51 },
+  { name:'South Gate', zone:'Perimeter', state:'live', res:'1080p', clips:301, events:22 },
+  { name:'Loading Dock', zone:'Service yard', state:'live', res:'4K', clips:509, events:64 },
+  { name:'Perimeter West', zone:'Perimeter', state:'live', res:'1080p', clips:277, events:19 },
+  { name:'Server Room', zone:'Core', state:'live', res:'1080p', clips:96, events:7 },
+  { name:'Stair B', zone:'Core', state:'degraded', res:'1080p', clips:143, events:11 },
+  { name:'Roof Access', zone:'Core', state:'offline', res:'1080p', clips:88, events:2 },
+  { name:'East Walk', zone:'Perimeter', state:'live', res:'4K', clips:190, events:14 }
+];
+
+const CLASSES = [
+  { name:'Person', desc:'Full-body detection, all cameras', samples:'12,480', thr:0.80, prec:'0.97', color:C.cyan, on:true },
+  { name:'Vehicle', desc:'Cars, vans, trucks + plate read', samples:'6,210', thr:0.75, prec:'0.94', color:'oklch(0.72 0.16 260)', on:true },
+  { name:'Package', desc:'Unattended object, dwell > 60s', samples:'1,940', thr:0.70, prec:'0.88', color:'oklch(0.72 0.16 145)', on:true },
+  { name:'Loitering', desc:'Behaviour · dwell in zone', samples:'612', thr:0.65, prec:'0.79', color:C.amber, on:true },
+  { name:'Tailgating', desc:'Behaviour · draft, 12 samples', samples:'12', thr:0.60, prec:'—', color:C.red, on:false },
+  { name:'PPE missing', desc:'Attribute · hi-vis, hard hat', samples:'840', thr:0.72, prec:'0.85', color:'oklch(0.72 0.16 320)', on:false }
+];
+
+// Mirrors siteloom/library/indexer.py: scan() registers pending items,
+// process() indexes them and writes Annotations; failed items are kept.
+const SOURCES = [
+  { id:'src1', name:'Family archive', path:'/mnt/photos/family', kind:'Directory', total:26418, pending:8210, indexed:17902, failed:306, last:'2h ago' },
+  { id:'src2', name:'Takeout 2019–2024', path:'/mnt/import/takeout', kind:'Google Takeout', total:11204, pending:0, indexed:11192, failed:12, last:'yesterday' },
+  { id:'src3', name:'Site handover pack', path:'/mnt/import/handover', kind:'Directory', total:1840, pending:1840, indexed:0, failed:0, last:'never' },
+  { id:'src4', name:'Contractor badge photos', path:'/mnt/import/badges', kind:'Directory', total:412, pending:0, indexed:398, failed:14, last:'4d ago' }
+];
+
+const PROPOSALS = ['Ana Lindqvist','Marcus Okafor','Diego Ruiz','Priya Raman','Tom Beck','Unknown #4471','Unknown #2210'];
+const LIB = Array.from({ length: 84 }, (_, i) => {
+  const cls = i % 11 === 0 ? 'vehicle' : i % 5 === 0 ? 'person' : 'face';
+  const st = i % 7 === 0 ? 'rejected' : i % 3 === 0 ? 'verified' : 'proposed';
+  return {
+    id: i,
+    name: cls === 'vehicle' ? (i % 2 ? 'Ardent Freight van' : 'Unknown plate') : PROPOSALS[i % PROPOSALS.length],
+    cls,
+    conf: 0.55 + ((i * 7) % 44) / 100,
+    state: st,
+    enrolled: st === 'verified' && i % 2 === 0,
+    src: SOURCES[i % 3].id,
+    file: 'IMG_' + (4820 + i * 3) + '.jpg'
+  };
+});
+
+const CROPS = Array.from({ length: 12 }, (_, i) => ({
+  id: i,
+  conf: (0.52 + (i % 5) * 0.045).toFixed(2),
+  meta: ['Lobby 08:31','N Gate 07:12','Perim W 07:58','Dock 06:40','Stair B 06:12','Lobby 05:58'][i % 6]
+}));
+
+class Component extends DCLogic {
+  state = {
+    screen: 'events',
+    variant: 'A',
+    selId: 3,
+    person: 'p3',
+    filters: { Flagged: true, Unmatched: false, People: false, Vehicles: false, Behaviour: false },
+    idFilter: 'All',
+    newClassOpen: false,
+    newThr: 60,
+    trainingOpen: false,
+    tStep: 1,
+    picked: { 0:true, 2:true, 4:true, 7:true, 9:true, 10:true },
+    tClass: 'Tailgating',
+    tIdentity: null,
+    quality: { 'motion blur': false, 'occluded': false, 'night IR': true },
+    mobileOpen: false,
+    classOn: CLASSES.map(c => c.on),
+    mediaTab: 'Cameras',
+    trigger: 'Sequence',
+    detailOpen: false,
+    w: typeof window !== 'undefined' ? window.innerWidth : 1440,
+    tSource: 'all', tFilter: 'Needs review', tSize: 'M', tGroup: 'name',
+    tSel: {}, tAssign: null, tClassAssign: null,
+    importOpen: false, iStep: 1, iKind: 'Directory', iIdentify: true
+  };
+
+  componentDidMount() {
+    this._onResize = () => this.setState({ w: window.innerWidth });
+    window.addEventListener('resize', this._onResize);
+  }
+  componentWillUnmount() { window.removeEventListener('resize', this._onResize); }
+
+  set = (patch) => this.setState(patch);
+
+  chip(active, tone) {
+    const t = tone || C.cyan;
+    return active
+      ? { bg: 'oklch(0.29 0.06 200)', bd: 'oklch(0.55 0.1 200)', fg: 'oklch(0.9 0.08 200)' }
+      : { bg: 'transparent', bd: 'oklch(0.31 0.01 250)', fg: 'oklch(0.74 0.008 250)' };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const navDef = [
+      { id:'events', code:'EV', label:'Events', badge:'12' },
+      { id:'media', code:'MD', label:'Media library', badge:'18' },
+      { id:'identities', code:'ID', label:'Identities', badge:'6' },
+      { id:'classes', code:'CL', label:'Classes', badge:'6' },
+      { id:'training', code:'TR', label:'Training data', badge:'48' }
+    ];
+    const nav = navDef.map(n => {
+      const active = s.screen === n.id;
+      return {
+        ...n,
+        go: () => this.set({ screen: n.id }),
+        bg: active ? 'oklch(0.29 0.05 200)' : 'transparent',
+        fg: active ? C.text : 'oklch(0.76 0.008 250)',
+        tagBg: active ? C.cyan : 'oklch(0.27 0.01 250)',
+        tagFg: active ? 'oklch(0.18 0.03 240)' : 'oklch(0.66 0.008 250)',
+        badgeFg: active ? 'oklch(0.85 0.08 200)' : 'oklch(0.55 0.008 250)'
+      };
+    });
+
+    const activeFilters = Object.keys(s.filters).filter(k => s.filters[k]);
+    let list = EVENTS.slice();
+    if (s.filters.Flagged) list = list.filter(e => e.status === 'Flagged' || e.status === 'New' || e.status === 'Reviewing');
+    if (s.filters.Unmatched) list = list.filter(e => e.identity === 'Unmatched');
+    if (s.filters.People) list = list.filter(e => e.cls === 'Person');
+    if (s.filters.Vehicles) list = list.filter(e => e.cls === 'Vehicle');
+    if (s.filters.Behaviour) list = list.filter(e => e.cls === 'Loitering');
+
+    // pane width = window − 236px sidebar − 372px detail rail; tiers keyed to the
+    // minimum each column set actually needs (tracks + gaps + padding).
+    const pane = s.w - 608;
+    const tier = pane >= 770 ? 'wide' : pane >= 600 ? 'mid' : 'narrow';
+    const narrow = tier === 'narrow';
+    const decorate = (e) => {
+      const st = STATUS[e.status];
+      const unmatched = e.identity === 'Unmatched';
+      const active = e.id === s.selId;
+      return {
+        ...e,
+        time: e.t, cls: e.cls, camera: e.cam, identity: e.identity,
+        identityShort: unmatched ? '?' : e.identity.split(' ').map(w => w[0]).join(''),
+        conf: e.conf.toFixed(2),
+        confPct: Math.round(e.conf * 100) + '%',
+        confColor: e.conf < 0.75 ? C.amber : C.cyan,
+        status: e.status, statusBg: st.bg, statusFg: st.fg, accent: st.accent,
+        pipBg: active ? 'oklch(0.33 0.03 250)' : 'oklch(0.245 0.01 250)',
+        rowBg: active ? 'oklch(0.26 0.02 210)' : 'transparent',
+        confInline: e.conf.toFixed(2) + (unmatched ? ' · unmatched' : ''),
+        cardBd: active ? 'oklch(0.6 0.1 200)' : C.line,
+        idColor: unmatched ? 'oklch(0.82 0.12 30)' : 'oklch(0.9 0.005 250)',
+        subline: narrow ? e.cam + ' · ' + e.note : e.note,
+        select: () => this.set({ selId: e.id, detailOpen: true })
+      };
+    };
+
+    const events = list.map(decorate);
+    const raw = EVENTS.find(e => e.id === s.selId) || EVENTS[0];
+    const sel = decorate(raw);
+
+    const selFacts = [
+      { k:'Camera', v: raw.cam }, { k:'Zone', v: raw.zone },
+      { k:'Confidence', v: raw.conf.toFixed(2) }, { k:'Class', v: raw.cls },
+      { k:'Duration', v: '8s clip' }, { k:'Event ID', v: 'ev-' + (4100 + raw.id) }
+    ];
+
+    const laneNames = ['Lobby','North Gate','Loading Dock','Perimeter West','Server Room','South Gate'];
+    const lanes = laneNames.map(name => {
+      const cam = CAMERAS.find(c => c.name === name);
+      return {
+        name, zone: cam ? cam.zone : '',
+        events: EVENTS.filter(e => e.cam === name).map(e => {
+          const d = decorate(e);
+          d.leftPct = Math.max(4, Math.min(96, ((e.min - 420) / 120) * 100)) + '%';
+          return d;
+        })
+      };
+    });
+
+    const filterDef = ['Flagged','Unmatched','People','Vehicles','Behaviour'];
+    const filters = filterDef.map(k => {
+      const c = this.chip(s.filters[k]);
+      return { label: k === 'Flagged' ? 'Needs review' : k, ...c,
+        toggle: () => this.setState(p => ({ filters: { ...p.filters, [k]: !p.filters[k] } })) };
+    });
+
+    const variants = [
+      { key:'A', label:'Triage' }, { key:'B', label:'Timeline' }, { key:'C', label:'Wall' }
+    ].map(v => ({
+      label: v.label,
+      pick: () => this.set({ variant: v.key }),
+      bg: s.variant === v.key ? C.cyan : 'transparent',
+      fg: s.variant === v.key ? 'oklch(0.18 0.03 240)' : 'oklch(0.74 0.008 250)'
+    }));
+
+    const idFilterDef = ['All','Staff','Contractor','Vendor','Unenrolled'];
+    const idFilters = idFilterDef.map(k => ({
+      label: k, ...this.chip(s.idFilter === k), toggle: () => this.set({ idFilter: k })
+    }));
+    const identities = IDENTITIES
+      .filter(p => s.idFilter === 'All' || p.role === s.idFilter)
+      .map(p => {
+        const tone = ROLE_TONE[p.role];
+        return { ...p, roleBg: tone.bg, roleFg: tone.fg,
+          bd: s.person === p.id ? 'oklch(0.6 0.1 200)' : C.line,
+          select: () => this.set({ person: p.id }) };
+      });
+    const selId = IDENTITIES.find(p => p.id === s.person) || IDENTITIES[0];
+    const selIdEvents = EVENTS.filter(e => e.identity === selId.name || e.identity === 'Unmatched')
+      .slice(0, 4)
+      .map(e => ({ time: e.t, camera: e.cam, cls: e.cls,
+        open: () => this.set({ screen:'events', selId: e.id }) }));
+
+    const cameras = CAMERAS.map(c => ({
+      ...c,
+      dot: c.state === 'live' ? C.green : c.state === 'degraded' ? C.amber : C.red
+    }));
+
+    const classes = CLASSES.map((c, i) => ({
+      ...c,
+      thr: c.thr.toFixed(2),
+      thrPct: Math.round(c.thr * 100) + '%',
+      precColor: c.prec === '—' ? 'oklch(0.55 0.008 250)' : parseFloat(c.prec) < 0.85 ? C.amber : 'oklch(0.85 0.008 250)',
+      swBg: s.classOn[i] ? C.cyan : 'oklch(0.32 0.01 250)',
+      swJustify: s.classOn[i] ? 'flex-end' : 'flex-start',
+      toggle: () => this.setState(p => { const n = p.classOn.slice(); n[i] = !n[i]; return { classOn: n }; })
+    }));
+
+    const mediaTabs = ['Cameras','Clips','Snapshots','Exports'].map(t => ({
+      label: t, ...this.chip(s.mediaTab === t), pick: () => this.set({ mediaTab: t })
+    }));
+    const triggerTypes = ['Instant','Sequence','Dwell'].map(t => ({
+      label: t, ...this.chip(s.trigger === t), pick: () => this.set({ trigger: t })
+    }));
+
+    const pickedIds = Object.keys(s.picked).filter(k => s.picked[k]);
+    const crops = CROPS.map(c => {
+      const on = !!s.picked[c.id];
+      return { ...c,
+        bd: on ? C.cyan : 'oklch(0.32 0.01 250)',
+        chkBg: on ? C.cyan : 'transparent',
+        chk: on ? '✓' : '',
+        toggle: () => this.setState(p => ({ picked: { ...p.picked, [c.id]: !p.picked[c.id] } })) };
+    });
+
+    const classChips = CLASSES.map(c => ({
+      name: c.name, color: c.color, ...this.chip(s.tClass === c.name),
+      pick: () => this.set({ tClass: c.name })
+    }));
+    const idOptions = IDENTITIES.slice(0, 4).map(p => ({
+      name: p.name, samples: p.samples,
+      bg: s.tIdentity === p.id ? 'oklch(0.28 0.05 200)' : 'oklch(0.215 0.009 250)',
+      tick: s.tIdentity === p.id ? '✓' : '',
+      pick: () => this.set({ tIdentity: s.tIdentity === p.id ? null : p.id })
+    }));
+    const qualityFlags = Object.keys(s.quality).map(k => ({
+      label: k, ...this.chip(s.quality[k]),
+      toggle: () => this.setState(p => ({ quality: { ...p.quality, [k]: !p.quality[k] } }))
+    }));
+
+    const step = s.tStep;
+    const steps = [
+      { n:'1', label:'Select' }, { n:'2', label:'Label' }, { n:'3', label:'Queue' }
+    ].map((x, i) => {
+      const done = step > i + 1, now = step === i + 1;
+      return { ...x,
+        dotBg: now ? C.cyan : done ? 'oklch(0.35 0.08 145)' : 'oklch(0.29 0.01 250)',
+        dotFg: now ? 'oklch(0.18 0.03 240)' : done ? 'oklch(0.88 0.1 145)' : 'oklch(0.6 0.008 250)',
+        fg: now ? C.text : 'oklch(0.6 0.008 250)',
+        connBg: i === 2 ? 'transparent' : 'oklch(0.32 0.01 250)' };
+    });
+
+    const runFacts = [
+      { k:'Samples added', v: pickedIds.length + ' crops' },
+      { k:'Target class', v: s.tClass },
+      { k:'Linked identity', v: s.tIdentity ? (IDENTITIES.find(p => p.id === s.tIdentity) || {}).name : 'none' },
+      { k:'Validation split', v: '20% held out' },
+      { k:'Compute', v: 'Site appliance · idle' },
+      { k:'Estimated time', v: '22 min' }
+    ];
+    const expected = [
+      { name:'Tailgating', pct:'62%', delta:'new class' },
+      { name:'Person', pct:'88%', delta:'+0.4 recall' },
+      { name:'Loitering', pct:'74%', delta:'+1.1 prec' }
+    ];
+
+    // ---- training data (library review) ----
+    const srcTabs = [{ id:'all', name:'All sources', total: SOURCES.reduce((a,b)=>a+b.total,0) }]
+      .concat(SOURCES).map(x => ({
+        id: x.id, name: x.name, count: x.total.toLocaleString(),
+        ...this.chip(s.tSource === x.id), pick: () => this.set({ tSource: x.id })
+      }));
+    const sourceRows = SOURCES.map(x => ({
+      ...x,
+      totalLabel: x.total.toLocaleString(),
+      pendingLabel: x.pending ? x.pending.toLocaleString() + ' pending' : 'all indexed',
+      pct: Math.round((x.indexed / x.total) * 100) + '%',
+      failedFg: x.failed ? C.amber : 'oklch(0.55 0.008 250)',
+      failedLabel: x.failed ? x.failed + ' failed' : 'no failures',
+      bd: s.tSource === x.id ? 'oklch(0.6 0.1 200)' : C.line,
+      pick: () => this.set({ tSource: x.id })
+    }));
+
+    const tFilters = ['Needs review','Verified','Rejected','Unenrolled','Faces','Vehicles','All']
+      .map(k => ({ label: k, ...this.chip(s.tFilter === k), pick: () => this.set({ tFilter: k }) }));
+
+    let lib = LIB.filter(c => s.tSource === 'all' || c.src === s.tSource);
+    if (s.tFilter === 'Needs review') lib = lib.filter(c => c.state === 'proposed');
+    else if (s.tFilter === 'Verified') lib = lib.filter(c => c.state === 'verified');
+    else if (s.tFilter === 'Rejected') lib = lib.filter(c => c.state === 'rejected');
+    else if (s.tFilter === 'Unenrolled') lib = lib.filter(c => !c.enrolled);
+    else if (s.tFilter === 'Faces') lib = lib.filter(c => c.cls === 'face');
+    else if (s.tFilter === 'Vehicles') lib = lib.filter(c => c.cls === 'vehicle');
+
+    const STATE_TONE = {
+      proposed: { bd:'oklch(0.34 0.01 250)', bg:'oklch(0.3 0.05 85)', fg:'oklch(0.87 0.09 85)', label:'proposed' },
+      verified: { bd:'oklch(0.45 0.09 145)', bg:'oklch(0.31 0.07 145)', fg:'oklch(0.86 0.1 145)', label:'verified' },
+      rejected: { bd:'oklch(0.36 0.06 30)', bg:'oklch(0.3 0.07 30)', fg:'oklch(0.84 0.1 30)', label:'rejected' }
+    };
+    const cropCols = s.tSize === 'S' ? 'repeat(auto-fill,minmax(78px,1fr))'
+      : s.tSize === 'L' ? 'repeat(auto-fill,minmax(156px,1fr))'
+      : 'repeat(auto-fill,minmax(112px,1fr))';
+    const sizeBtns = ['S','M','L'].map(k => ({
+      label: k, ...this.chip(s.tSize === k), pick: () => this.set({ tSize: k })
+    }));
+    const groupBtns = [{k:'name',l:'By proposed name'},{k:'flat',l:'Flat'}].map(g => ({
+      label: g.l, ...this.chip(s.tGroup === g.k), pick: () => this.set({ tGroup: g.k })
+    }));
+
+    const decorateCrop = (c) => {
+      const tone = STATE_TONE[c.state];
+      const on = !!s.tSel[c.id];
+      return {
+        ...c,
+        conf: c.conf.toFixed(2),
+        stateLabel: tone.label, stateBg: tone.bg, stateFg: tone.fg,
+        bd: on ? C.cyan : tone.bd,
+        chkBg: on ? C.cyan : 'oklch(0.18 0.01 250 / .7)',
+        chk: on ? '✓' : '',
+        enrolledDisp: c.enrolled ? 'block' : 'none',
+        toggle: () => this.setState(p => ({ tSel: { ...p.tSel, [c.id]: !p.tSel[c.id] } }))
+      };
+    };
+
+    let groups;
+    if (s.tGroup === 'name') {
+      const map = {};
+      lib.forEach(c => { (map[c.name] = map[c.name] || []).push(c); });
+      groups = Object.keys(map).map(name => ({
+        name,
+        meta: map[name].length + ' crops · ' + map[name].filter(c => c.state === 'verified').length + ' verified',
+        items: map[name].map(decorateCrop)
+      }));
+    } else {
+      groups = [{ name: 'All results', meta: lib.length + ' crops', items: lib.map(decorateCrop) }];
+    }
+
+    const selIds = Object.keys(s.tSel).filter(k => s.tSel[k]);
+    const selCrops = selIds.map(k => LIB[parseInt(k, 10)]).filter(Boolean);
+    const assignName = s.tAssign ? (IDENTITIES.find(p => p.id === s.tAssign) || {}).name : null;
+    const assignTargets = IDENTITIES.slice(0, 5).map(p => ({
+      name: p.name, samples: p.samples,
+      cap: p.samples >= 20 ? 'gallery full' : (20 - p.samples) + ' slots',
+      capFg: p.samples >= 20 ? C.amber : 'oklch(0.6 0.008 250)',
+      bg: s.tAssign === p.id ? 'oklch(0.28 0.05 200)' : 'oklch(0.215 0.009 250)',
+      tick: s.tAssign === p.id ? '✓' : '',
+      pick: () => this.set({ tAssign: s.tAssign === p.id ? null : p.id })
+    }));
+    const customChips = CLASSES.slice(2).map(c => ({
+      name: c.name, color: c.color, ...this.chip(s.tClassAssign === c.name),
+      pick: () => this.set({ tClassAssign: s.tClassAssign === c.name ? null : c.name })
+    }));
+
+    const importSteps = [
+      { n:'1', label:'Source' }, { n:'2', label:'Scan' }, { n:'3', label:'Index' }
+    ].map((x, i) => {
+      const done = s.iStep > i + 1, now = s.iStep === i + 1;
+      return { ...x,
+        dotBg: now ? C.cyan : done ? 'oklch(0.35 0.08 145)' : 'oklch(0.29 0.01 250)',
+        dotFg: now ? 'oklch(0.18 0.03 240)' : done ? 'oklch(0.88 0.1 145)' : 'oklch(0.6 0.008 250)',
+        fg: now ? C.text : 'oklch(0.6 0.008 250)',
+        connBg: i === 2 ? 'transparent' : 'oklch(0.32 0.01 250)' };
+    });
+    const kinds = ['Directory','Google Takeout','Immich export'].map(k => ({
+      label: k, ...this.chip(s.iKind === k), pick: () => this.set({ iKind: k })
+    }));
+
+    return {
+      nav, clock: '08:47:20',
+      screenTitle: { events:'Events', media:'Media library', identities:'Identities', classes:'Classes', training:'Training data' }[s.screen] || 'Events',
+      screenSub: { events:'live · last 2 hours', media:'18 cameras · 30-day retention',
+        identities:'6 enrolled · 1 unenrolled cluster', classes:'k-NN over appearance embeddings',
+        training:'4 sources · 39,874 items · 10,050 pending' }[s.screen] || '',
+      isEvents: s.screen === 'events', isMedia: s.screen === 'media',
+      isIdentities: s.screen === 'identities', isClasses: s.screen === 'classes',
+      isA: s.variant === 'A', isB: s.variant === 'B', isC: s.variant === 'C',
+      variants, filters, events, sel, selFacts, lanes,
+      gridCols: tier === 'wide' ? '78px minmax(180px,1fr) 132px 118px 74px 92px'
+        : tier === 'mid' ? '78px minmax(150px,1fr) 104px 100px 84px'
+        : '70px minmax(130px,1fr) 104px 84px',
+      camDisp: narrow ? 'none' : 'block',
+      confDisp: tier === 'wide' ? 'block' : 'none',
+      narrowConfDisp: tier === 'wide' ? 'none' : 'block',
+      asideVisible: !narrow || s.detailOpen,
+      asidePos: narrow ? 'absolute' : 'relative',
+      asideW: narrow ? '340px' : '372px',
+      asideShadow: narrow ? '-18px 0 44px oklch(0.11 0.01 250 / .55)' : 'none',
+      closeDisp: narrow ? 'flex' : 'none',
+      closeDetail: () => this.set({ detailOpen: false }),
+      eventCountLabel: events.length + ' of ' + EVENTS.length + ' events' + (activeFilters.length ? ' · ' + activeFilters.length + ' filters' : ''),
+      cameras, mediaTabs, identities, idFilters, selId, selIdEvents,
+      sampleSlots: Array.from({ length: 8 }, (_, i) => i),
+      classes, newClassOpen: s.newClassOpen, triggerTypes,
+      scopeChips: ['North Gate','South Gate','Lobby','+ add'],
+      newThr: (s.newThr / 100).toFixed(2), newThrNum: s.newThr,
+      setThr: (e) => this.set({ newThr: parseInt(e.target.value, 10) }),
+      toggleNewClass: () => this.setState(p => ({ newClassOpen: !p.newClassOpen })),
+      goIdentities: () => this.set({ screen: 'identities' }),
+      openTraining: () => this.set({ screen: 'training' }),
+      isTraining: s.screen === 'training',
+      srcTabs, sourceRows, tFilters, groups, sizeBtns, groupBtns, cropCols,
+      libCount: lib.length.toLocaleString() + ' crops',
+      selCount: selIds.length,
+      selCountLabel: selIds.length ? selIds.length + ' selected' : 'nothing selected',
+      hasSel: selIds.length > 0,
+      inspectorDisp: selIds.length ? 'none' : 'block',
+      assignTargets, customChips,
+      assignName: assignName || 'no identity chosen',
+      assignSummary: selIds.length + ' crops → ' + (assignName || s.tClassAssign || 'choose a label'),
+      enrolledPreview: selCrops.filter(c => c.cls === 'face').length + ' face vectors will be added',
+      clearSel: () => this.set({ tSel: {}, tAssign: null, tClassAssign: null }),
+      selectAll: () => this.setState(() => {
+        const next = {}; lib.forEach(c => { next[c.id] = true; }); return { tSel: next };
+      }),
+      verifySel: () => this.setState(p => {
+        selIds.forEach(k => { const c = LIB[parseInt(k, 10)]; if (c) { c.state = 'verified'; c.enrolled = true; } });
+        return { tSel: {}, tAssign: null };
+      }),
+      rejectSel: () => this.setState(() => {
+        selIds.forEach(k => { const c = LIB[parseInt(k, 10)]; if (c) { c.state = 'rejected'; c.enrolled = false; } });
+        return { tSel: {} };
+      }),
+      // Same pane-width arithmetic as Events: 236 sidebar + 262 sources rail
+      // + 326 inspector must leave the crop grid a workable width.
+      srcRailDisp: s.w >= 1344 ? 'block' : 'none',
+      srcTabsDisp: s.w >= 1344 ? 'none' : 'flex',
+      tAsideVisible: s.w >= 1082 || selIds.length > 0,
+      tAsidePos: s.w >= 1082 ? 'relative' : 'absolute',
+      tAsideShadow: s.w >= 1082 ? 'none' : '-18px 0 44px oklch(0.11 0.01 250 / .55)',
+      tCloseDisp: s.w >= 1082 ? 'none' : 'flex',
+      scanFacts: [
+        { k:'Added', v:'1,840', fg:C.text }, { k:'Changed', v:'0', fg:'oklch(0.7 0.008 250)' },
+        { k:'Skipped', v:'12', fg:'oklch(0.7 0.008 250)' }, { k:'Now pending', v:'1,840', fg:'oklch(0.85 0.1 200)' }
+      ],
+      scanSample: [
+        { kind:'IMG', path:'/mnt/import/handover/2024-03/gate-crew-01.jpg', size:'4.1 MB' },
+        { kind:'IMG', path:'/mnt/import/handover/2024-03/gate-crew-02.jpg', size:'3.8 MB' },
+        { kind:'VID', path:'/mnt/import/handover/walkthrough/dock-a.mp4', size:'182 MB' },
+        { kind:'IMG', path:'/mnt/import/handover/badges/ruiz-d.png', size:'820 KB' },
+        { kind:'IMG', path:'/mnt/import/handover/badges/beck-t.png', size:'774 KB' }
+      ],
+      indexFacts: [
+        { k:'Processed', v:'624', fg:C.text }, { k:'Crops found', v:'1,012', fg:'oklch(0.85 0.1 200)' },
+        { k:'Failed', v:'9', fg:C.amber }, { k:'Remaining', v:'1,216', fg:'oklch(0.7 0.008 250)' }
+      ],
+      importOpen: s.importOpen, importSteps, kinds,
+      iStep1: s.iStep === 1, iStep2: s.iStep === 2, iStep3: s.iStep === 3, iStep4: s.iStep === 4,
+      iIdentify: s.iIdentify ? 'on' : 'off',
+      iIdentifyBg: s.iIdentify ? C.cyan : 'oklch(0.32 0.01 250)',
+      iIdentifyJustify: s.iIdentify ? 'flex-end' : 'flex-start',
+      toggleIdentify: () => this.setState(p => ({ iIdentify: !p.iIdentify })),
+      openImport: () => this.set({ importOpen: true, iStep: 1 }),
+      closeImport: () => this.set({ importOpen: false, iStep: 1 }),
+      iBackLabel: s.iStep === 1 ? 'Cancel' : s.iStep === 4 ? 'Close' : 'Back',
+      iNextLabel: s.iStep === 1 ? 'Scan directory' : s.iStep === 2 ? 'Index 1,840 items'
+        : s.iStep === 3 ? 'Run in background' : 'Review new crops',
+      iFooterNote: s.iStep === 1 ? 'Nothing is decoded during scan'
+        : s.iStep === 2 ? '1,840 new · 0 changed · 12 skipped'
+        : s.iStep === 3 ? 'Indexing 100 items per pass · resumable'
+        : 'Source added',
+      iBack: () => s.iStep === 1 || s.iStep === 4
+        ? this.set({ importOpen: false, iStep: 1 })
+        : this.set({ iStep: s.iStep - 1 }),
+      iNext: () => s.iStep === 4
+        ? this.set({ importOpen: false, iStep: 1, screen: 'training', tFilter: 'Needs review' })
+        : this.set({ iStep: s.iStep + 1 }),
+      closeTraining: () => this.set({ trainingOpen: false }),
+      trainingOpen: s.trainingOpen,
+      tStep1: step === 1, tStep2: step === 2, tStep3: step === 3, tStep4: step === 4,
+      steps, crops, classChips, idOptions, qualityFlags, runFacts, expected,
+      selectedCount: pickedIds.length,
+      selectedCrops: pickedIds.map((k, i) => i),
+      tFooterNote: step === 1 ? pickedIds.length + ' of 12 crops selected'
+        : step === 2 ? 'Labelling ' + pickedIds.length + ' crops as ' + s.tClass
+        : step === 3 ? 'Queues after review' : 'run-2861 queued',
+      tBackLabel: step === 1 ? 'Cancel' : step === 4 ? 'Close' : 'Back',
+      tNextLabel: step === 1 ? 'Label ' + pickedIds.length + ' crops'
+        : step === 2 ? 'Review run' : step === 3 ? 'Queue training run' : 'View classes',
+      tBack: () => step === 1 || step === 4
+        ? this.set({ trainingOpen: false, tStep: 1 })
+        : this.set({ tStep: step - 1 }),
+      tNext: () => step === 4
+        ? this.set({ trainingOpen: false, tStep: 1, screen: 'classes' })
+        : this.set({ tStep: step + 1 }),
+      mobileOpen: s.mobileOpen,
+      deviceLabel: s.mobileOpen ? 'Desktop view' : 'Mobile view',
+      toggleMobile: () => this.setState(p => ({ mobileOpen: !p.mobileOpen })),
+      mobileTabs: [
+        { id:'events', label:'Events', on:true },
+        { id:'media', label:'Media', on:false },
+        { id:'identities', label:'People', on:false },
+        { id:'classes', label:'Classes', on:false }
+      ].map(t => ({ label: t.label, go: () => this.set({ screen: t.id }),
+        fg: t.on ? C.text : 'oklch(0.58 0.008 250)',
+        dot: t.on ? C.cyan : 'oklch(0.34 0.01 250)' }))
+    };
+  }
+}
+
+</script>
+</body>
+</html>
