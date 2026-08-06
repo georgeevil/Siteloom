@@ -84,6 +84,7 @@ class ProgressReporter:
         resume_command: str = "",
         console: Console | None = None,
         enabled: bool = True,
+        bar: bool = True,
     ):
         self.Session = session_factory
         self.kind = kind
@@ -91,9 +92,11 @@ class ProgressReporter:
         self.resume_command = resume_command
         self.enabled = enabled
         self.console = console or Console(stderr=True)
-        # A progress bar is only useful on a terminal; redirected output
-        # gets log lines instead so background runs are still traceable.
-        self.interactive = self.console.is_terminal and enabled
+        # `bar` hides the live bar; `enabled` switches the whole reporter
+        # off. They are separate because the heartbeat and the Ctrl-C
+        # handler are what make a run observable and resumable — a user
+        # who only wants a quieter terminal must not silently lose them.
+        self.interactive = self.console.is_terminal and enabled and bar
 
         self.counters: dict[str, int] = defaultdict(int)
         self.phase_timings: dict[str, float] = {}

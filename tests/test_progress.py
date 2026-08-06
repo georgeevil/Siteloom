@@ -109,6 +109,25 @@ def test_disabled_reporter_is_inert(Session):
         assert session.query(OperationRun).count() == 0
 
 
+def test_hiding_the_bar_keeps_the_run_tracked(Session):
+    """`-q` hides the bar and nothing else: a run nobody can see in
+    `siteloom jobs`, and that cannot be stopped cleanly, is worse than a
+    noisy terminal."""
+    p = ProgressReporter(
+        Session, "test-op", bar=False, console=Console(force_terminal=True, quiet=True)
+    )
+    with p as prog:
+        assert prog.interactive is False
+        with prog.phase("Working", total=3):
+            prog.advance(3)
+            prog.interrupt_requested = True
+            with pytest.raises(Interrupted):
+                prog.check_interrupt()
+    run = latest(Session)
+    assert run is not None and run.status == "interrupted"
+    assert run.current == 3
+
+
 # -- derived metrics --------------------------------------------------------
 
 

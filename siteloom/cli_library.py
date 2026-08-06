@@ -15,9 +15,15 @@ classes_app = typer.Typer(help="Manage custom sub-classes.")
 train_app = typer.Typer(help="Train face models from verified annotations.")
 jobs_app = typer.Typer(help="Inspect long-running operations.")
 
+# 128 + SIGINT, the shell convention: an interrupted run is neither a
+# success nor a crash, and wrapping scripts need to tell them apart.
+INTERRUPTED_EXIT = 130
+
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
 LOG_FILE_OPT = typer.Option(None, "--log-file", help="Also write logs to this file")
-QUIET_OPT = typer.Option(False, "--quiet", "-q", help="No progress bar (logs only)")
+QUIET_OPT = typer.Option(
+    False, "--quiet", "-q", help="No progress bar (log lines only; still tracked)"
+)
 
 
 def _setup(config_path, log_file: str | None = None, level: str = "INFO"):
@@ -108,12 +114,16 @@ def library_index(
     resume = f"siteloom library index --config {config}" + (
         " --all" if all_pending else ""
     )
+    # Assigned inside the block, read after it: the reporter swallows the
+    # Ctrl-C so the run can be recorded, which leaves this unset. `None`
+    # is how the summary below knows the work never finished.
+    result = None
     with ProgressReporter(
         Session,
         "library-index",
         target=f"source {source_id}" if source_id else "all sources",
         resume_command=resume,
-        enabled=not quiet,
+        bar=not quiet,
     ) as progress:
         result = indexer.process(
             source_id=source_id,
@@ -121,6 +131,9 @@ def library_index(
             identify=not no_identify and cfg.library.identify_on_index,
             progress=progress,
         )
+    if result is None:
+        # Interrupted; the reporter already printed the resume command.
+        raise typer.Exit(INTERRUPTED_EXIT)
     typer.echo(
         f"indexed {result.processed} items ({result.annotations} boxes), "
         f"{result.failed} failed, {result.remaining} still pending"
@@ -192,12 +205,13 @@ def takeout_import(
     from siteloom.progress import ProgressReporter
 
     resume = f'siteloom takeout import "{path}" --config {config}'
+    stats = timings = None
     with ProgressReporter(
         Session,
         "takeout-import",
         target=str(path),
         resume_command=resume,
-        enabled=not quiet,
+        bar=not quiet,
     ) as progress:
         importer = TakeoutImporter(
             indexer,
@@ -212,6 +226,8 @@ def takeout_import(
         )
         timings = progress.summary_lines()
 
+    if stats is None:
+        raise typer.Exit(INTERRUPTED_EXIT)
     _print_import_summary(stats, no_auto_verify, timings)
 
 
@@ -712,12 +728,13 @@ def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
     embedder = FaceEmbedder(
         projection_path=cfg.identity.face_projection_path or None
     )
+    stats = None
     try:
         with ProgressReporter(
             Session,
             "face-enroll",
             resume_command=f"siteloom train enroll --config {config}",
-            enabled=not quiet,
+            bar=not quiet,
         ) as progress:
             with Session() as session:
                 with progress.phase("Enrolling verified faces"):
@@ -727,6 +744,8 @@ def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
     finally:
         if owns_vectors:
             vectors.close()
+    if stats is None:
+        raise typer.Exit(INTERRUPTED_EXIT)
     typer.echo(
         f"enrolled {stats.enrolled} embeddings across {stats.identities} people "
         f"({stats.skipped_cap} skipped: per-person cap reached or unusable crop)"
