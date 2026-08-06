@@ -279,8 +279,10 @@
         <span class="sl-tb-sub">{% block subtitle %}{{ site_name }}{% endblock %}</span>
       </div>
       <div class="sl-tb-right">
-        <input class="sl-search" type="search"
-               placeholder="Search events, people, plates" aria-label="Search">
+        <form method="get" action="/search">
+          <input class="sl-search" type="search" name="q"
+                 placeholder="Search events, people, plates" aria-label="Search">
+        </form>
         <span class="sl-clock" id="sl-clock">--:--:--</span>
       </div>
     </header>

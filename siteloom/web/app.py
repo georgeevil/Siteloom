@@ -434,6 +434,95 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             },
         )
 
+    @app.get("/search", response_class=HTMLResponse)
+    def search(request: Request, q: str = ""):
+        """One box over events, people and plates — the top bar's promise.
+
+        Substring match per entity, ranked by recency. SQLite LIKE is
+        case-insensitive for ASCII and these tables are PoC-sized;
+        FTS5 is the V1 upgrade path once an archive gets big enough to
+        feel it, and it slots in behind this same route.
+        """
+        term = q.strip()
+        results: dict = {"identities": [], "events": [], "library": []}
+        if term:
+            like = f"%{term}%"
+            with Session() as session:
+                results["identities"] = (
+                    session.scalars(
+                        select(Identity)
+                        .filter(
+                            or_(
+                                Identity.label.like(like),
+                                Identity.plate.like(like),
+                            )
+                        )
+                        .order_by(Identity.last_seen.desc())
+                        .limit(20)
+                    )
+                    .unique()
+                    .all()
+                )
+                event_q = (
+                    select(Event)
+                    .options(
+                        selectinload(Event.camera),
+                        selectinload(Event.identities).selectinload(
+                            EventIdentity.identity
+                        ),
+                    )
+                    .join(Camera, Event.camera_id == Camera.id)
+                    .filter(
+                        or_(
+                            Event.class_name.like(like),
+                            Camera.name.like(like),
+                            # Events surface by whom they matched, too —
+                            # searching a name should find the visits.
+                            Event.id.in_(
+                                select(EventIdentity.event_id)
+                                .join(
+                                    Identity,
+                                    EventIdentity.identity_id == Identity.id,
+                                )
+                                .where(
+                                    or_(
+                                        Identity.label.like(like),
+                                        Identity.plate.like(like),
+                                    )
+                                )
+                            ),
+                        )
+                        if not term.isdigit()
+                        else Event.id == int(term)
+                    )
+                    .order_by(Event.last_seen.desc())
+                    .limit(20)
+                )
+                results["events"] = session.scalars(event_q).unique().all()
+                from siteloom.store import LibraryItem
+
+                results["library"] = (
+                    session.scalars(
+                        select(LibraryItem)
+                        .filter(LibraryItem.path.like(like))
+                        .order_by(LibraryItem.id.desc())
+                        .limit(20)
+                    )
+                    .unique()
+                    .all()
+                )
+        total = sum(len(v) for v in results.values())
+        return templates.TemplateResponse(
+            request,
+            "search.html",
+            {
+                "site_name": config.site_name or config.site_id,
+                "q": term,
+                "results": results,
+                "total": total,
+            },
+        )
+
     @app.get("/events/{event_id}/rail", response_class=HTMLResponse)
     def event_rail(request: Request, event_id: int, back: str = "/"):
         """The triage detail rail on its own, for in-place swapping."""
