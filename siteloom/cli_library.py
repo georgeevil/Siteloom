@@ -151,22 +151,36 @@ def takeout_import(
     path: Path = typer.Argument(..., help="Google Photos Takeout directory"),
     config: Path = CONFIG_OPT,
     limit: int = typer.Option(None, help="Max media files to consider"),
+    batch_size: int = typer.Option(200, help="Commit every N items (resumable)"),
+    include_derivatives: bool = typer.Option(
+        False,
+        help="Also import Google's '-edited' copies (near-duplicates of the original)",
+    ),
     no_auto_verify: bool = typer.Option(
         False,
         help="Do not auto-verify unambiguous (1 face + 1 name) assignments",
     ),
 ):
-    """Import a Takeout tree: people tags, face detection, name proposals."""
+    """Import a Takeout tree: people tags, face detection, name proposals.
+
+    Resumable — rerun the same command to continue where it stopped.
+    """
     _cfg, _Session, indexer = _setup(config)
     from siteloom.library.takeout import TakeoutImporter
 
     importer = TakeoutImporter(
         indexer, auto_verify_unambiguous=not no_auto_verify
     )
-    stats = importer.import_tree(path, limit=limit)
+    stats = importer.import_tree(
+        path,
+        limit=limit,
+        batch_size=batch_size,
+        include_derivatives=include_derivatives,
+    )
     typer.echo(
         f"""Takeout import complete
   media files seen      {stats.items_seen}
+  edited copies skipped {stats.skipped_derivative}
   sidecars matched      {stats.sidecars_matched}
   people tags imported  {stats.people_tags} ({len(stats.people)} distinct people)
   faces detected        {stats.faces_detected}

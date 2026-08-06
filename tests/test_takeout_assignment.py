@@ -229,6 +229,34 @@ def test_untagged_faces_left_unassigned(importer, takeout_dir):
         assert session.query(Annotation).count() == 0
 
 
+def test_edited_derivatives_skipped_by_default(importer, takeout_dir):
+    """Google exports '-edited' copies without sidecars. They depict the
+    same moment as the original, so importing both would seed the gallery
+    with near-duplicates and inflate per-person coverage."""
+    make_photo(takeout_dir / "solo.jpg", ["Ann"])
+    write_sidecar(
+        takeout_dir / "solo.jpg.supplemental-metadata.json", "solo.jpg", ["Ann"]
+    )
+    make_photo(takeout_dir / "solo-edited.jpg", ["Ann"])
+
+    stats = importer.import_tree(takeout_dir)
+    assert stats.skipped_derivative == 1
+    assert stats.unambiguous == 1
+    with importer.Session() as session:
+        assert session.query(Annotation).count() == 1
+
+
+def test_derivatives_can_be_included(importer, takeout_dir):
+    make_photo(takeout_dir / "solo.jpg", ["Ann"])
+    write_sidecar(
+        takeout_dir / "solo.jpg.supplemental-metadata.json", "solo.jpg", ["Ann"]
+    )
+    make_photo(takeout_dir / "solo-edited.jpg", ["Ann"])
+
+    stats = importer.import_tree(takeout_dir, include_derivatives=True)
+    assert stats.skipped_derivative == 0
+
+
 def test_import_is_idempotent(importer, takeout_dir):
     make_photo(takeout_dir / "solo.jpg", ["Ann"])
     write_sidecar(

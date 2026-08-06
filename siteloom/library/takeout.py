@@ -45,7 +45,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from siteloom.adapters.file import IMAGE_EXTS, VIDEO_EXTS
-from siteloom.store import Annotation, ItemTag, LibraryItem
+from siteloom.store import Annotation, ItemTag, LibraryItem  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,20 @@ class ImportStats:
     unambiguous: int = 0
     matched: int = 0
     unresolved: int = 0
+    skipped_derivative: int = 0
     people: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+
+
+# Google Photos exports edited copies as "<name>-edited.jpg" with no
+# sidecar of their own. They depict the same moment as the original, so
+# importing both would seed the gallery with near-duplicates — which
+# inflates per-person coverage counts and biases a fine-tune toward
+# whichever photos happened to be edited.
+DERIVATIVE_MARKERS = ("-edited", "-EDITED", "-edit")
+
+
+def is_derivative(path: Path) -> bool:
+    return any(marker in path.stem for marker in DERIVATIVE_MARKERS)
 
 
 def _now() -> datetime:
@@ -182,8 +195,20 @@ class TakeoutImporter:
         return self._face
 
     def import_tree(
-        self, root: str | Path, limit: int | None = None, name: str = ""
+        self,
+        root: str | Path,
+        limit: int | None = None,
+        name: str = "",
+        batch_size: int = 200,
+        include_derivatives: bool = False,
     ) -> ImportStats:
+        """Register items + people tags, then run the two assignment passes.
+
+        Resumable at item granularity: items that already carry face
+        annotations are skipped, and work is committed every
+        `batch_size` items. A 30k-photo archive can therefore be
+        interrupted and resumed without losing progress.
+        """
         root = Path(root).expanduser().resolve()
         source = self.indexer.add_source(root, name=name or root.name, kind="takeout")
         stats = ImportStats()
@@ -193,15 +218,24 @@ class TakeoutImporter:
         for file in sorted(root.rglob("*")):
             if file.suffix.lower() not in IMAGE_EXTS | VIDEO_EXTS:
                 continue
+            if not include_derivatives and is_derivative(file):
+                stats.skipped_derivative += 1
+                continue
             media_files.append(file)
             if file.parent not in sidecar_indexes:
                 sidecar_indexes[file.parent] = index_sidecars(file.parent)
             if limit is not None and len(media_files) >= limit:
                 break
 
+        log.info(
+            "registering %d media files (%d edited derivatives skipped)",
+            len(media_files),
+            stats.skipped_derivative,
+        )
+
         # -- register items + people tags ---------------------------------
         with self.Session() as session:
-            for media in media_files:
+            for i, media in enumerate(media_files, 1):
                 stats.items_seen += 1
                 sidecar = find_sidecar(media, sidecar_indexes[media.parent])
                 item = session.scalar(select(LibraryItem).filter_by(path=str(media)))
@@ -224,9 +258,7 @@ class TakeoutImporter:
                 stats.sidecars_matched += 1
                 if sidecar.taken_at:
                     item.taken_at = sidecar.taken_at
-                existing = {
-                    t.value for t in item.tags if t.kind == "person"
-                }
+                existing = {t.value for t in item.tags if t.kind == "person"}
                 for person in sidecar.people:
                     stats.people[person] += 1
                     if person not in existing:
@@ -234,20 +266,25 @@ class TakeoutImporter:
                             ItemTag(item_id=item.id, kind="person", value=person)
                         )
                         stats.people_tags += 1
+                if i % (batch_size * 10) == 0:
+                    session.commit()
+                    log.info("registered %d/%d", i, len(media_files))
             session.commit()
 
-        # -- pass 1: unambiguous -----------------------------------------
-        gallery = self._pass_one(stats)
-        # -- pass 2: constrained matching --------------------------------
-        self._pass_two(gallery, stats)
+        # -- pass 1: detect every face once, name the certain ones --------
+        gallery = self._pass_one(stats, batch_size)
+        # -- pass 2: constrained matching over the saved crops ------------
+        self._pass_two(gallery, stats, batch_size)
         return stats
 
     # ------------------------------------------------------------------
 
-    def _tagged_items(self, session: Session) -> list[LibraryItem]:
+    def _tagged_item_ids(self, session: Session) -> list[int]:
+        """Ids only — holding 23k ORM objects across a long run is what
+        makes large imports fall over."""
         return list(
             session.scalars(
-                select(LibraryItem)
+                select(LibraryItem.id)
                 .join(ItemTag, ItemTag.item_id == LibraryItem.id)
                 .filter(ItemTag.kind == "person")
                 .distinct()
@@ -306,94 +343,199 @@ class TakeoutImporter:
         session.add(annotation)
         return annotation
 
-    def _pass_one(self, stats: ImportStats) -> dict[str, list[np.ndarray]]:
-        """One face + one name = certain. Seeds the matching gallery."""
+    def _pass_one(
+        self, stats: ImportStats, batch_size: int = 200
+    ) -> dict[str, list[np.ndarray]]:
+        """Detect every face once and name the certain ones.
+
+        Faces on ambiguous photos are persisted here too (with no
+        proposed_name), so pass 2 never has to decode a full photo again —
+        it works from the small saved face crops instead.
+        """
         gallery: dict[str, list[np.ndarray]] = defaultdict(list)
         with self.Session() as session:
-            for item in self._tagged_items(session):
-                names = [t.value for t in item.tags if t.kind == "person"]
-                if len(names) != 1:
+            item_ids = self._tagged_item_ids(session)
+            log.info("pass 1: %d tagged items", len(item_ids))
+            done = 0
+            for item_id in item_ids:
+                item = session.get(LibraryItem, item_id)
+                if item is None:
                     continue
+                names = [t.value for t in item.tags if t.kind == "person"]
                 if any(a.class_name == "face" for a in item.annotations):
-                    continue  # already imported
+                    # Already processed — rebuild the gallery from prior
+                    # certain assignments so a resumed run matches as well
+                    # as a fresh one.
+                    for a in item.annotations:
+                        if (
+                            a.class_name == "face"
+                            and a.proposal_basis == "unambiguous"
+                            and a.proposed_name
+                            and a.crop_path
+                        ):
+                            vector = self._embed_crop(a.crop_path)
+                            if vector is not None:
+                                gallery[a.proposed_name].append(vector)
+                    continue
+
                 faces = self._detect_faces(item)
                 stats.faces_detected += len(faces)
-                if len(faces) != 1:
-                    continue
-                face, embedding, image = faces[0]
-                self._face_annotation(
-                    session,
-                    item,
-                    face,
-                    image,
-                    0,
-                    name=names[0],
-                    basis="unambiguous",
-                    verified=self.auto_verify_unambiguous,
-                    similarity=1.0,
-                )
-                gallery[names[0]].append(embedding)
-                stats.unambiguous += 1
+                certain = len(faces) == 1 and len(names) == 1
+                for fi, (face, embedding, image) in enumerate(faces):
+                    self._face_annotation(
+                        session,
+                        item,
+                        face,
+                        image,
+                        fi,
+                        name=names[0] if certain else None,
+                        basis="unambiguous" if certain else None,
+                        verified=certain and self.auto_verify_unambiguous,
+                    )
+                    if certain:
+                        gallery[names[0]].append(embedding)
+                        stats.unambiguous += 1
+                done += 1
+                if done % batch_size == 0:
+                    session.commit()
+                    log.info(
+                        "pass 1: %d/%d items, %d faces, %d certain",
+                        done,
+                        len(item_ids),
+                        stats.faces_detected,
+                        stats.unambiguous,
+                    )
             session.commit()
         log.info(
-            "pass 1: %d unambiguous faces across %d people",
+            "pass 1 done: %d unambiguous faces across %d people",
             stats.unambiguous,
             len(gallery),
         )
         return gallery
 
+    def _embed_crop(self, crop_path: str) -> np.ndarray | None:
+        """Embed an already-saved face crop (no full-photo decode)."""
+        crop = cv2.imread(crop_path)
+        if crop is None:
+            return None
+        faces = self.face.detect(crop)
+        if faces:
+            return self.face.embed_face(crop, max(faces, key=lambda f: f[-1]))
+        # The crop is already tightly bound to a face; embed it directly
+        # rather than losing the sample to a failed re-detection.
+        try:
+            resized = cv2.resize(crop, (112, 112))
+            feature = (
+                self.face._recognizer.feature(resized).flatten().astype(np.float32)
+            )
+            return self.face._finish(feature)
+        except cv2.error:
+            return None
+
     def _pass_two(
-        self, gallery: dict[str, list[np.ndarray]], stats: ImportStats
+        self,
+        gallery: dict[str, list[np.ndarray]],
+        stats: ImportStats,
+        batch_size: int = 200,
     ) -> None:
-        """Multi-face / multi-name photos, matched against the gallery but
-        restricted to the names tagged on that photo."""
+        """Name the faces pass 1 left blank, matching against the gallery
+        but restricted to the names tagged on that same photo."""
         threshold = self.config.identity.identifiers["face"].threshold
         with self.Session() as session:
-            for item in self._tagged_items(session):
-                names = [t.value for t in item.tags if t.kind == "person"]
-                if any(a.class_name == "face" for a in item.annotations):
-                    continue  # handled in pass 1 or a previous run
-                faces = self._detect_faces(item)
-                stats.faces_detected += len(faces)
-                if not faces:
+            pending = list(
+                session.scalars(
+                    select(Annotation.item_id)
+                    .filter(
+                        Annotation.class_name == "face",
+                        Annotation.proposed_name.is_(None),
+                        Annotation.rejected.is_(False),
+                    )
+                    .distinct()
+                ).all()
+            )
+            log.info("pass 2: %d items with unnamed faces", len(pending))
+            done = 0
+            for item_id in pending:
+                item = session.get(LibraryItem, item_id)
+                if item is None:
                     continue
-                candidates = {n: gallery[n] for n in names if gallery.get(n)}
-                # Greedy best-first assignment: each name is used once.
+                names = [t.value for t in item.tags if t.kind == "person"]
+                faces = [
+                    a
+                    for a in item.annotations
+                    if a.class_name == "face"
+                    and a.proposed_name is None
+                    and not a.rejected
+                ]
+                if not faces or not names:
+                    stats.unresolved += len(faces)
+                    continue
+                # Names already fixed on this photo can't be reused.
+                used_names = {
+                    a.proposed_name
+                    for a in item.annotations
+                    if a.class_name == "face" and a.proposed_name
+                }
+                embeddings = {
+                    a.id: self._embed_crop(a.crop_path) for a in faces if a.crop_path
+                }
+                candidates = {
+                    n: gallery[n]
+                    for n in names
+                    if n not in used_names and gallery.get(n)
+                }
+
                 scores = []
-                for fi, (_face, embedding, _img) in enumerate(faces):
+                for annotation in faces:
+                    embedding = embeddings.get(annotation.id)
+                    if embedding is None:
+                        continue
                     for name, vectors in candidates.items():
                         best = max(float(embedding @ v) for v in vectors)
-                        scores.append((best, fi, name))
+                        scores.append((best, annotation.id, name))
                 scores.sort(reverse=True)
-                assigned_face: dict[int, tuple[str, float]] = {}
-                used_names: set[str] = set()
-                for score, fi, name in scores:
-                    if score < threshold or fi in assigned_face or name in used_names:
+
+                assigned: dict[int, tuple[str, float]] = {}
+                for score, annotation_id, name in scores:
+                    if score < threshold or annotation_id in assigned:
                         continue
-                    assigned_face[fi] = (name, score)
+                    if name in used_names:
+                        continue
+                    assigned[annotation_id] = (name, score)
                     used_names.add(name)
 
-                for fi, (face, embedding, image) in enumerate(faces):
-                    name, score = assigned_face.get(fi, (None, 0.0))
-                    # A single unmatched face with a single unused name is
-                    # a safe proposal even without a gallery hit.
+                for annotation in faces:
+                    name, score = assigned.get(annotation.id, (None, 0.0))
                     basis = "matched" if name else None
                     if name is None:
                         remaining = [n for n in names if n not in used_names]
+                        # One face, one name still free: safe even with no
+                        # gallery evidence.
                         if len(faces) == 1 and len(remaining) == 1:
                             name, basis = remaining[0], "single-candidate"
-                    self._face_annotation(
-                        session, item, face, image, fi, name, basis, verified=False,
-                        similarity=score,
-                    )
+                            used_names.add(name)
                     if name:
+                        annotation.proposed_name = name
+                        annotation.proposal_basis = basis
                         stats.matched += 1
-                        gallery[name].append(embedding)
+                        embedding = embeddings.get(annotation.id)
+                        if embedding is not None:
+                            gallery[name].append(embedding)
                     else:
                         stats.unresolved += 1
+                done += 1
+                if done % batch_size == 0:
+                    session.commit()
+                    log.info(
+                        "pass 2: %d/%d items, %d named, %d unresolved",
+                        done,
+                        len(pending),
+                        stats.matched,
+                        stats.unresolved,
+                    )
             session.commit()
         log.info(
-            "pass 2: %d proposals, %d faces left unassigned",
+            "pass 2 done: %d proposals, %d faces left unassigned",
             stats.matched,
             stats.unresolved,
         )

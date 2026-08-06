@@ -226,3 +226,7 @@ identity_db/
 training/
 *.npy
 .DS_Store
+
+# Local deployment configs (absolute paths, per-machine)
+site.yaml
+archive.yaml
