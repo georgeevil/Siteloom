@@ -100,7 +100,16 @@
       background: oklch(0.29 0.05 200); color: var(--accent);
       font-size: 10px; font-weight: 700;
     }
-    .sl-op-name { font-size: 12px; font-weight: 600; }
+    .sl-op-name {
+      font-size: 12px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sl-logout {
+      border: 1px solid var(--control-border); background: transparent;
+      color: var(--muted); border-radius: 5px; padding: 3px 7px;
+      font-family: var(--font-mono); font-size: 10px; cursor: pointer;
+    }
+    .sl-logout:hover { color: var(--text); border-color: oklch(0.5 0.03 250); }
     .sl-op-role { font-size: 10px; color: var(--muted); }
 
     /* Main column */
@@ -243,11 +252,24 @@
       {% endfor %}
     </nav>
     <div class="sl-side-footer">
+      {% set user = request.state.user if request else none %}
+      {% if user %}
+      <div class="sl-avatar">{{ user.username[:2] | upper }}</div>
+      <div style="min-width:0">
+        <div class="sl-op-name">{{ user.username }}</div>
+        <div class="sl-op-role">{{ user.role }}</div>
+      </div>
+      <form method="post" action="/logout" style="margin-left:auto">
+        <button type="submit" class="sl-logout" title="Sign out">&#8594;&#93;</button>
+      </form>
+      {% else %}
+      {# Open mode (no users yet): a placeholder, not a fictional person. #}
       <div class="sl-avatar">OP</div>
       <div>
         <div class="sl-op-name">Operator</div>
-        <div class="sl-op-role">On duty</div>
+        <div class="sl-op-role">open access</div>
       </div>
+      {% endif %}
     </div>
   </aside>
   <div class="sl-main">

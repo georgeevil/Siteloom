@@ -26,6 +26,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
+from siteloom.web import auth
 from siteloom.store import (
     Camera,
     Detection,
@@ -33,6 +34,8 @@ from siteloom.store import (
     EventIdentity,
     Identity,
     NoiseEvent,
+    User,
+    WebSession,
     get_session,
     init_db,
     make_engine,
@@ -200,6 +203,108 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     init_db(engine)
     Session = get_session(engine)
     media_root = Path(config.storage.media_dir).resolve()
+
+    @app.middleware("http")
+    async def auth_and_audit(request: Request, call_next):
+        """One gate for the whole console (see web/auth.py).
+
+        Also the one audit writer: every mutating request that reaches a
+        handler leaves a row, so a new POST route cannot forget to audit.
+        """
+        path = request.url.path
+        with Session() as session:
+            enabled = auth.auth_enabled(session)
+            user = auth.resolve_user(
+                session, request.cookies.get(auth.SESSION_COOKIE)
+            )
+        request.state.user = user
+        request.state.auth_enabled = enabled
+
+        exempt = path in auth.PUBLIC_PATHS or path.startswith(auth.EXEMPT_PREFIXES)
+        if enabled and not exempt:
+            if user is None:
+                if request.method in ("GET", "HEAD"):
+                    return RedirectResponse(f"/login?next={path}", status_code=303)
+                return JSONResponse({"detail": "login required"}, status_code=401)
+            if not auth.has_role(user, auth.required_role(request.method, path)):
+                return JSONResponse({"detail": "insufficient role"}, status_code=403)
+
+        response = await call_next(request)
+
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not exempt:
+            if response.status_code < 400:
+                with Session() as session:
+                    auth.record_audit(
+                        session, user, request.method, path, response.status_code
+                    )
+                    session.commit()
+        return response
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request, next: str = "/"):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "site_name": config.site_name or config.site_id,
+                "next": _safe_next(next, 0) if next != "/" else "/",
+                "error": None,
+            },
+        )
+
+    @app.post("/login", response_class=HTMLResponse)
+    def login_submit(
+        request: Request,
+        username: str = Form(...),
+        password: str = Form(...),
+        next: str = Form("/"),
+    ):
+        with Session() as session:
+            user = session.scalar(
+                select(User).filter_by(username=username.strip())
+            )
+            if (
+                user is None
+                or user.disabled
+                or not auth.verify_password(password, user.password_hash)
+            ):
+                # One message for both failures — do not confirm usernames.
+                return templates.TemplateResponse(
+                    request,
+                    "login.html",
+                    {
+                        "site_name": config.site_name or config.site_id,
+                        "next": next,
+                        "error": "Wrong username or password.",
+                    },
+                    status_code=401,
+                )
+            token = auth.create_session(session, user)
+            auth.record_audit(session, user, "POST", "/login", 303)
+            session.commit()
+        target = next if next.startswith("/") and not next.startswith("//") else "/"
+        response = RedirectResponse(target, status_code=303)
+        response.set_cookie(
+            auth.SESSION_COOKIE,
+            token,
+            httponly=True,
+            samesite="lax",
+            max_age=int(auth.SESSION_TTL.total_seconds()),
+        )
+        return response
+
+    @app.post("/logout")
+    def logout(request: Request):
+        token = request.cookies.get(auth.SESSION_COOKIE)
+        if token:
+            with Session() as session:
+                row = session.get(WebSession, token)
+                if row is not None:
+                    session.delete(row)
+                    session.commit()
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(auth.SESSION_COOKIE)
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     def index(
