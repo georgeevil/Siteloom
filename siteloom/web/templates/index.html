@@ -34,6 +34,11 @@
     <div class="meta">
       <span class="badge">{{ e.class_name }}</span>
       {% if e.guest_window %}<span class="badge guest">guest</span>{% endif %}
+      {% if e.missed_identity %}<span class="badge missed">missed</span>{% endif %}
+      {% set confirmed = e.identities | selectattr('verdict', 'equalto', 'confirmed') | list | length %}
+      {% set wrong = e.identities | selectattr('verdict', 'equalto', 'wrong') | list | length %}
+      {% if confirmed %}<span class="badge ok">&#10003;{{ confirmed }}</span>{% endif %}
+      {% if wrong %}<span class="badge bad">&#10007;{{ wrong }}</span>{% endif %}
       {% if e.track_id is not none %}<span class="muted">track {{ e.track_id }}</span>{% endif %}<br>
       {{ e.camera.name if e.camera else e.camera_id }}<br>
       <span class="muted">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} · {{ e.detection_count }} detections</span>

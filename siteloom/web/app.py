@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
@@ -60,7 +60,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         with Session() as session:
             q = (
                 select(Event)
-                .options(selectinload(Event.camera))
+                .options(
+                    selectinload(Event.camera),
+                    selectinload(Event.identities),
+                )
                 .order_by(Event.last_seen.desc())
             )
             if camera:
@@ -225,6 +228,45 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "merge_candidates": merge_candidates,
             },
         )
+
+    @app.post("/events/{event_id}/identity/{link_id}/verdict")
+    def set_identity_verdict(event_id: int, link_id: int, verdict: str = Form(...)):
+        """Record a human verdict on one identity claim (CLD-16).
+
+        Persists the judgment only — a wrong verdict must not touch the
+        vector store; resolver-side learning from verdicts is separate
+        work."""
+        if verdict not in ("confirmed", "wrong", "clear"):
+            raise HTTPException(400, "verdict must be confirmed, wrong, or clear")
+        with Session() as session:
+            link = session.get(EventIdentity, link_id)
+            if link is None or link.event_id != event_id:
+                raise HTTPException(404)
+            if verdict == "clear":
+                link.verdict = None
+                link.verdict_at = None
+            else:
+                link.verdict = verdict
+                link.verdict_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.commit()
+        return RedirectResponse(f"/events/{event_id}", status_code=303)
+
+    @app.post("/events/{event_id}/missed")
+    def set_missed_identity(event_id: int, missed: str = Form(...)):
+        """Mark/unmark an event as a missed identification: an
+        identifiable subject was there, the system claimed nothing."""
+        with Session() as session:
+            event = session.get(Event, event_id)
+            if event is None:
+                raise HTTPException(404)
+            event.missed_identity = missed == "1"
+            event.missed_at = (
+                datetime.now(timezone.utc).replace(tzinfo=None)
+                if event.missed_identity
+                else None
+            )
+            session.commit()
+        return RedirectResponse(f"/events/{event_id}", status_code=303)
 
     @app.post("/identities/{identity_id}/label")
     def label_identity(identity_id: int, label: str = Form("")):
