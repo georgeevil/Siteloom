@@ -8,6 +8,7 @@ those workflows build on.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,8 @@ from siteloom.store import (
     make_engine,
 )
 from siteloom.store.models import status_clause, unmatched_clause
+
+log = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -163,7 +166,7 @@ def _rail_context(session, event_id: int) -> dict | None:
         .unique()
         .all()
     )
-    links = (
+    rows = (
         session.scalars(
             select(EventIdentity)
             .options(selectinload(EventIdentity.identity))
@@ -172,6 +175,8 @@ def _rail_context(session, event_id: int) -> dict | None:
         .unique()
         .all()
     )
+    links = [r for r in rows if r.identity_id is not None]
+    misses = [r for r in rows if r.identity_id is None]
     zones: list[str] = []
     for d in detections:
         for zone in json.loads(d.zones):
@@ -182,6 +187,7 @@ def _rail_context(session, event_id: int) -> dict | None:
         "camera": session.get(Camera, event.camera_id),
         "detections": detections,
         "identity_links": links,
+        "misses": misses,
         "zones": zones,
         "status": event.review_status,
     }
@@ -287,6 +293,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             "index.html",
             {
                 "chip_urls": chip_urls,
+                "identifier_keys": list(config.identity.identifiers.keys()),
                 "row_urls": {e.id: _triage_url(state, selected=e.id) for e in events},
                 "back_url": _triage_url(state, selected=selected, page=page),
                 "clear_url": _triage_url({}),
@@ -335,6 +342,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 {
                     "site_name": config.site_name or config.site_id,
                     "rail": rail,
+                    "identifier_keys": list(config.identity.identifiers.keys()),
                     "back_url": _safe_next(back, event_id),
                 },
             )
@@ -359,7 +367,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 session.scalars(
                     select(EventIdentity)
                     .options(selectinload(EventIdentity.identity))
-                    .filter_by(event_id=event_id)
+                    .filter(
+                        EventIdentity.event_id == event_id,
+                        EventIdentity.identity_id.is_not(None),
+                    )
                 )
                 .unique()
                 .all()
@@ -499,14 +510,17 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def set_identity_verdict(event_id: int, link_id: int, verdict: str = Form(...)):
         """Record a human verdict on one identity claim (CLD-16).
 
-        Persists the judgment only — a wrong verdict must not touch the
-        vector store; resolver-side learning from verdicts is separate
-        work."""
+        A wrong verdict must not touch the vector store — resolver-side
+        learning from embeddings is separate work — but it does revert a
+        plate this very match taught the identity: plate matches win
+        outright (PRD §6.4), so a mis-learned plate would poison every
+        future sighting of that number. That is correction, not learning,
+        and it is scoped to exactly the evidence being repudiated."""
         if verdict not in ("confirmed", "wrong", "clear"):
             raise HTTPException(400, "verdict must be confirmed, wrong, or clear")
         with Session() as session:
             link = session.get(EventIdentity, link_id)
-            if link is None or link.event_id != event_id:
+            if link is None or link.event_id != event_id or link.identity_id is None:
                 raise HTTPException(404)
             if verdict == "clear":
                 link.verdict = None
@@ -514,23 +528,65 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             else:
                 link.verdict = verdict
                 link.verdict_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            if verdict == "wrong" and link.learned_plate:
+                identity = session.get(Identity, link.identity_id)
+                if identity is not None and identity.plate:
+                    log.info(
+                        "reverting plate %s learned on event %s from identity %s",
+                        identity.plate,
+                        event_id,
+                        identity.id,
+                    )
+                    identity.plate = None
             session.commit()
         return RedirectResponse(f"/events/{event_id}", status_code=303)
 
     @app.post("/events/{event_id}/missed")
-    def set_missed_identity(event_id: int, missed: str = Form(...)):
-        """Mark/unmark an event as a missed identification: an
-        identifiable subject was there, the system claimed nothing."""
+    def set_missed_identity(
+        event_id: int,
+        missed: str = Form(...),
+        identifier: str = Form("face"),
+    ):
+        """Mark/unmark a missed identification, attributed to an identifier.
+
+        A miss is a null-identity EventIdentity row (verdict="missed",
+        identifier_key set) so per-identifier recall is computable
+        (CLD-17) — "the face identifier missed the person" and "plate OCR
+        missed the car" are different failures on the same event.
+        `Event.missed_identity` mirrors "any miss rows exist" and this
+        endpoint is its single writer.
+        """
         with Session() as session:
             event = session.get(Event, event_id)
             if event is None:
                 raise HTTPException(404)
-            event.missed_identity = missed == "1"
-            event.missed_at = (
-                datetime.now(timezone.utc).replace(tzinfo=None)
-                if event.missed_identity
-                else None
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            misses = (
+                session.query(EventIdentity)
+                .filter_by(event_id=event_id, identity_id=None)
+                .all()
             )
+            if missed == "1":
+                if not any(m.identifier_key == identifier for m in misses):
+                    session.add(
+                        EventIdentity(
+                            event_id=event_id,
+                            identity_id=None,
+                            identifier_key=identifier,
+                            verdict="missed",
+                            verdict_at=now,
+                        )
+                    )
+                event.missed_identity = True
+                event.missed_at = event.missed_at or now
+            else:
+                # Retracting the mark removes the miss rows — the same
+                # semantics "clear" has for verdicts: an operator taking
+                # back their own judgment, not deleting system evidence.
+                for m in misses:
+                    session.delete(m)
+                event.missed_identity = False
+                event.missed_at = None
             session.commit()
         return RedirectResponse(f"/events/{event_id}", status_code=303)
 

@@ -143,3 +143,8 @@ def test_ingest_with_identity_pipeline(sample_video, tmp_path):
     # One event (single track) -> one link, hit-counted per frame.
     assert len(links) == 1
     assert links[0].hit_count == 10
+    # Match provenance is persisted at ingest — it cannot be
+    # reconstructed afterwards (CLD-17's plate-vs-visual split).
+    assert links[0].identifier_key == "person"
+    assert links[0].matched_by == "visual"
+    assert links[0].learned_plate is False

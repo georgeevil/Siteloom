@@ -104,6 +104,7 @@ def test_plate_beats_visual_similarity(resolver, session):
     assert not second.is_new
     assert second.identity.id == first.identity.id
     assert second.similarity == 1.0
+    assert second.matched_by == "plate"
 
 
 def test_visual_match_learns_plate(resolver, session):
@@ -121,6 +122,8 @@ def test_visual_match_learns_plate(resolver, session):
     )
     assert second.identity.id == first.identity.id
     assert second.identity.plate == "XYZ789"
+    assert second.matched_by == "visual"
+    assert second.learned_plate is True
 
 
 def test_registry_dynamic_class():

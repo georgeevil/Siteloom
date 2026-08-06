@@ -37,6 +37,10 @@ class Resolution:
     # An existing identity, previously plate-less, just gained a plate
     # from OCR on this pass (PRD §6.4's "visual match learns its plate").
     learned_plate: bool = False
+    # How the match was made: "plate" or "visual"; None for a new
+    # identity. Persisted onto EventIdentity so plate-vs-visual accuracy
+    # is a query, not a webhook-log archaeology exercise (CLD-17).
+    matched_by: str | None = None
 
 
 class IdentityResolver:
@@ -60,10 +64,13 @@ class IdentityResolver:
         arr = np.asarray(vector, dtype=np.float32) if vector is not None else None
 
         identity, similarity = self._match_plate(session, identifier_key, plate)
+        matched_by = "plate" if identity is not None else None
         if identity is None and arr is not None:
             identity, similarity = self._match_vector(
                 session, identifier_key, arr, threshold
             )
+            if identity is not None:
+                matched_by = "visual"
 
         is_new = identity is None
         if is_new:
@@ -94,6 +101,7 @@ class IdentityResolver:
             similarity=similarity,
             is_new=is_new,
             learned_plate=learned_plate,
+            matched_by=matched_by,
         )
 
     def _match_plate(
