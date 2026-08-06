@@ -9,6 +9,7 @@ from pathlib import Path
 
 import typer
 
+from siteloom.cli_users import users_app
 from siteloom.cli_library import (
     classes_app,
     jobs_app,
@@ -23,6 +24,7 @@ app.add_typer(takeout_app, name="takeout")
 app.add_typer(classes_app, name="classes")
 app.add_typer(train_app, name="train")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(users_app, name="users")
 
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
 

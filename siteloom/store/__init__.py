@@ -13,7 +13,10 @@ from siteloom.store.models import (
     LibraryItem,
     LibrarySource,
     NoiseEvent,
+    AuditLog,
     OperationRun,
+    User,
+    WebSession,
     TrainingRun,
 )
 
@@ -30,7 +33,10 @@ __all__ = [
     "LibraryItem",
     "LibrarySource",
     "NoiseEvent",
+    "AuditLog",
     "OperationRun",
+    "User",
+    "WebSession",
     "TrainingRun",
     "Detection",
     "make_engine",

@@ -79,6 +79,13 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 - `health.py` holds every environmental check as a function returning a `Check`, never raising: a diagnostic that dies on the first problem hides the other four. `CHECKS` backs `siteloom doctor`; the cheap `LIVE_CHECKS` subset backs `/readyz` and must never open the vector store the serving process already holds.
 - **A dead run must not look healthy**: `OperationRun.is_stale` checks the recorded pid on the recording host first (immediate) and falls back to a cold heartbeat (120 s) elsewhere or after pid reuse; `eta_s` returns None once stale. `jobs reap` closes dead rows out as `abandoned` while preserving position and resume command.
 
+### Auth & audit (`siteloom/web/auth.py`, `siteloom users`)
+
+- **Auth turns on when the first `User` row exists** — an empty table is the original open single-operator mode, and everything must keep working in it (tests run mostly in open mode). Never make a feature require login to function.
+- Roles are a strict ladder, view < edit < admin — "look / judge / reconfigure". Enforcement and auditing live in **one middleware** in `create_app`, not per-route decorators, so a new POST route is gated and audited by default. `/api/v1/` keeps its own x-api-key scheme (CompreFace clients) and `/healthz`,`/readyz`,`/login` stay public — a probe that needs a cookie gets the service killed.
+- The audit row's `username` is denormalized on purpose: it must still say who acted after the account is renamed or deleted. Denied requests are not audited — nothing happened.
+- User management is CLI-only (`siteloom users add|list|passwd|disable`) by design: there is no web path to create the first account.
+
 ### Audio, backfill, guests
 
 - `modules/audio.py`: loud-duration episodes only (dBFS RMS threshold + min duration + release gap) — classification/transcription intentionally absent (NFR5). `detect_episodes` is a pure function; test changes there.

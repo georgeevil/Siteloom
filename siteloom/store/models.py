@@ -446,6 +446,60 @@ class CustomClass(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class User(Base):
+    """An operator account (CLD auth milestone).
+
+    Roles are a strict ladder — view < edit < admin — because the PoC
+    needs "who may look, who may judge, who may reconfigure", not a
+    permission matrix. Authentication is enabled by the existence of any
+    User row: an empty table means the single-operator open mode the PoC
+    started with, so nothing breaks before the first `siteloom users add`.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, unique=True, index=True)
+    # "scrypt$<salt-hex>$<hash-hex>" — see web/auth.py; never a raw secret.
+    password_hash: Mapped[str] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String, default="view")  # view|edit|admin
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class WebSession(Base):
+    """A logged-in browser session; the cookie holds only the token."""
+
+    __tablename__ = "web_sessions"
+
+    token: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    user: Mapped[User] = relationship()
+
+
+class AuditLog(Base):
+    """Who changed what, when — one row per mutating web request.
+
+    Written by middleware rather than per-endpoint calls so a new POST
+    route cannot forget to audit. `username` is denormalized on purpose:
+    the row must still say who acted after the account is renamed or
+    deleted. "(open)" records mutations made before auth was enabled.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    username: Mapped[str] = mapped_column(String, index=True)
+    method: Mapped[str] = mapped_column(String)
+    path: Mapped[str] = mapped_column(String, index=True)
+    status_code: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class OperationRun(Base):
     """A long-running operator task: archive import, library indexing.
 
