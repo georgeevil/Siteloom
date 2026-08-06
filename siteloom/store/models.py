@@ -190,6 +190,9 @@ class LibraryItem(Base):
     # pending -> indexed | failed | skipped
     status: Mapped[str] = mapped_column(String, default="pending", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Processing attempts, so a file that fails every time is
+    # distinguishable from one that has not been tried since it failed.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
     mtime: Mapped[datetime] = mapped_column(DateTime)
     # Capture time from sidecar metadata (Takeout photoTakenTime) when
     # available — more trustworthy than mtime for archives.

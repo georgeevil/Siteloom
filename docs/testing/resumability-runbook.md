@@ -14,7 +14,8 @@ transaction over the whole job."* Three things have to hold:
    reporting as healthy.
 
 Findings from the first pass through this runbook are in
-[Results](#results-2026-08-06) at the bottom. F1–F6 are fixed; F7–F10 are open.
+[Results](#results-2026-08-06) at the bottom. F1–F6 and F8 are fixed; F7, F9
+and F10 are open.
 Day-to-day operation of a running deployment — `doctor`, health endpoints,
 service units — is in [operations.md](../operations.md).
 
@@ -194,8 +195,8 @@ contention — neither is observable on a 900-image corpus.
 ## Results (2026-08-06)
 
 Scenario A executed end to end on a 300-image synthetic corpus (Apple M-series,
-`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1–F6 are fixed and
-re-verified against real signals; F7–F10 are open.
+`device: mps`, ~10 items/s). Scenarios B–E not yet run. F1–F6 and F8 are fixed
+and re-verified against real runs; F7, F9 and F10 are open.
 
 **What works.** Interrupt handling is sound at the layer it claims to cover.
 SIGINT at 195/300 finished the in-flight item, committed, recorded
@@ -313,11 +314,21 @@ previously-unresolvable crop. Correct, but the cost grows with each interrupt
 on an archive where most faces are untagged. Wants a "pass 2 considered this"
 marker.
 
-### F8 — `failed` items are never retried
+### F8 — `failed` items are never retried *(fixed)*
 
-`indexer.process` marks a decode failure `status="failed"`, and nothing moves it
-back to `pending`; `remaining` counts only `pending`. A resumed run reports
-`0 still pending` while items remain unprocessed. Wants `--retry-failed`.
+`indexer.process` marks a decode failure `status="failed"`, and nothing moved it
+back to `pending`; `remaining` counted only `pending`. A resumed run reported
+`0 still pending` while items remained unprocessed.
+
+**Fixed**: `ProcessResult` reports `failed_total` separately from `remaining`,
+and the CLI prints the retry command whenever failures are outstanding.
+`--retry-failed` re-queues them — opt-in, because a corrupt file fails
+identically every pass and retrying it on every run over a 26k archive is pure
+cost. A new `attempts` column records how many times each file has been tried,
+and `library status` lists the worst offenders with their error. Counts are now
+scoped to the run's `--source-id`, so a per-source run stops reporting the whole
+library's backlog. Verified on three corrupted files: two repaired ones indexed
+on retry, the third stayed `failed` at `x2` attempts.
 
 ### F9 — `backfill` and `run` are not jobs at all
 

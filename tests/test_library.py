@@ -154,6 +154,60 @@ def test_failed_item_is_recorded_not_dropped(indexer, photo_dir):
     assert "could not decode" in failed[0].error
 
 
+def test_failed_items_are_not_pending_and_are_reported(indexer, photo_dir):
+    """A failed item is nobody's work in progress: nothing picks it up
+    again, so a run that only reports `remaining` claims it finished
+    while files are still unprocessed."""
+    source = indexer.add_source(photo_dir)
+    indexer.scan(source.id)
+    (photo_dir / "a.jpg").write_bytes(b"not a real jpeg")
+    result = indexer.process(limit=10)
+    assert result.failed == 1
+    assert result.remaining == 0  # nothing pending...
+    assert result.failed_total == 1  # ...but not nothing left
+
+    # A second ordinary run does not touch it.
+    again = indexer.process(limit=10)
+    assert again.processed == 0
+    assert again.failed_total == 1
+
+
+def test_retry_failed_requeues_and_can_succeed(indexer, photo_dir):
+    source = indexer.add_source(photo_dir)
+    indexer.scan(source.id)
+    broken = photo_dir / "a.jpg"
+    good = broken.read_bytes()
+    broken.write_bytes(b"not a real jpeg")
+    indexer.process(limit=10)
+
+    # The transient case: whatever broke the file is fixed.
+    broken.write_bytes(good)
+    result = indexer.process(limit=10, retry_failed=True)
+    assert result.retried == 1
+    assert result.processed == 1
+    assert result.failed_total == 0
+    with indexer.Session() as session:
+        item = session.query(LibraryItem).filter_by(path=str(broken)).one()
+        assert item.status == "indexed"
+        assert item.error is None
+        assert item.attempts == 2  # both tries counted
+
+
+def test_retry_failed_keeps_hopeless_items_failed(indexer, photo_dir):
+    """A corrupt file fails identically every time; retrying must not
+    quietly lose it or count it as done."""
+    source = indexer.add_source(photo_dir)
+    indexer.scan(source.id)
+    (photo_dir / "a.jpg").write_bytes(b"not a real jpeg")
+    indexer.process(limit=10)
+    result = indexer.process(limit=10, retry_failed=True)
+    assert result.retried == 1 and result.failed == 1
+    assert result.failed_total == 1
+    with indexer.Session() as session:
+        item = session.query(LibraryItem).filter_by(status="failed").one()
+        assert item.attempts == 2
+
+
 def test_reindex_preserves_human_annotations(indexer, photo_dir):
     source = indexer.add_source(photo_dir)
     indexer.scan(source.id)

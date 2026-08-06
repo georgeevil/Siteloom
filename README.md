@@ -119,8 +119,10 @@ and interruptible rather than opaque:
   terminal; periodic log lines when output is redirected, so background runs
   aren't silent either. `--log-file` adds a rotating file log.
 - **Ctrl-C is safe** — the current batch finishes, work is committed, the run
-  is recorded as interrupted, and the exact resume command is printed.
-  Everything is resumable; rerunning skips what's done.
+  is recorded as interrupted, and the exact resume command is printed (rebuilt
+  from the flags you actually passed). Everything is resumable; rerunning skips
+  what's done. Files that failed are reported separately from what's pending,
+  and `library index --retry-failed` re-queues them.
 - **Watch from anywhere** — every batch heartbeats to the database, so a run
   started in one terminal is visible from another and from the browser. A run
   whose process died shows as `stale` with its last position, rather than

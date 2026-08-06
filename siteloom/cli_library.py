@@ -171,6 +171,9 @@ def library_index(
     limit: int = typer.Option(None, help="Max items this run (default: config)"),
     all_pending: bool = typer.Option(False, "--all", help="Process everything pending"),
     no_identify: bool = typer.Option(False, help="Skip identification (faster pass)"),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Re-queue items that failed on an earlier run"
+    ),
     log_file: str = LOG_FILE_OPT,
     quiet: bool = QUIET_OPT,
 ):
@@ -196,16 +199,25 @@ def library_index(
             limit=batch,
             identify=not no_identify and cfg.library.identify_on_index,
             progress=progress,
+            retry_failed=retry_failed,
         )
     if result is None:
         # Interrupted; the reporter already printed the resume command.
         raise typer.Exit(INTERRUPTED_EXIT)
+    retried = f"retried {result.retried}, " if result.retried else ""
     typer.echo(
-        f"indexed {result.processed} items ({result.annotations} boxes), "
+        f"{retried}indexed {result.processed} items ({result.annotations} boxes), "
         f"{result.failed} failed, {result.remaining} still pending"
     )
     if result.remaining:
         typer.echo(f"continue with: {resume}")
+    # Failed items are not pending: nothing picks them up again, so a run
+    # that stops mentioning them reads as "all done" when it isn't.
+    if result.failed_total and not retry_failed:
+        typer.echo(
+            f"{result.failed_total} item(s) failed earlier and will not be "
+            f"retried automatically; retry with: {resume} --retry-failed"
+        )
 
 
 @library_app.command("status")
@@ -229,6 +241,15 @@ def library_status(config: Path = CONFIG_OPT):
                 f"#{source.id} {source.name} [{source.kind}] "
                 + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
             )
+            for item in session.scalars(
+                select(LibraryItem)
+                .filter_by(source_id=source.id, status="failed")
+                .order_by(LibraryItem.attempts.desc())
+                .limit(5)
+            ).all():
+                typer.echo(
+                    f"    failed x{item.attempts}: {Path(item.path).name} — {item.error}"
+                )
         total = session.scalar(select(func.count()).select_from(Annotation)) or 0
         verified = (
             session.scalar(
