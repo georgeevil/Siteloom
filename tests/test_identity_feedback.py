@@ -204,6 +204,15 @@ def test_old_databases_are_rebuilt_for_null_identity_rows(tmp_path):
              verdict VARCHAR,
              verdict_at DATETIME)"""
     )
+    # The real pre-change schema carried these named indexes; a rename
+    # keeps their names, which is exactly the collision that bit in the
+    # field the first time this migration ran.
+    con.execute(
+        "CREATE INDEX ix_event_identities_event_id ON event_identities (event_id)"
+    )
+    con.execute(
+        "CREATE INDEX ix_event_identities_identity_id ON event_identities (identity_id)"
+    )
     con.execute(
         "INSERT INTO event_identities (id, event_id, identity_id, similarity,"
         " hit_count, verdict) VALUES (7, 1, 3, 0.9, 2, 'confirmed')"
@@ -226,6 +235,49 @@ def test_old_databases_are_rebuilt_for_null_identity_rows(tmp_path):
         assert old.learned_plate is False  # backfilled, not NULL
         s.add(EventIdentity(event_id=1, identity_id=None, verdict="missed"))
         s.commit()  # would raise IntegrityError without the rebuild
+
+
+def test_interrupted_rebuild_is_completed_not_lost(tmp_path):
+    """pysqlite autocommits DDL, so the rebuild is not atomic. A crash
+    between rename and copy leaves the data in event_identities_old —
+    the next init_db must finish the job, and the recovered table must
+    end up with its declared indexes."""
+    db = tmp_path / "interrupted.db"
+    con = sqlite3.connect(db)
+    # The state an interrupted run leaves behind: renamed old table with
+    # the data (and the stale-named index), new table created empty.
+    con.execute(
+        """CREATE TABLE event_identities_old (
+             id INTEGER PRIMARY KEY,
+             event_id INTEGER NOT NULL,
+             identity_id INTEGER NOT NULL,
+             similarity FLOAT,
+             hit_count INTEGER,
+             verdict VARCHAR,
+             verdict_at DATETIME)"""
+    )
+    con.execute(
+        "CREATE INDEX ix_event_identities_identity_id"
+        " ON event_identities_old (identity_id)"
+    )
+    con.execute(
+        "INSERT INTO event_identities_old (id, event_id, identity_id,"
+        " similarity, hit_count) VALUES (7, 1, 3, 0.9, 2)"
+    )
+    con.commit()
+    con.close()
+
+    engine = make_engine(f"sqlite:///{db}")
+    init_db(engine)
+
+    inspector = inspect(engine)
+    assert "event_identities_old" not in inspector.get_table_names()
+    index_names = {i["name"] for i in inspector.get_indexes("event_identities")}
+    assert "ix_event_identities_identity_id" in index_names
+    Session = get_session(engine)
+    with Session() as s:
+        row = s.get(EventIdentity, 7)
+        assert (row.event_id, row.identity_id) == (1, 3)
 
 
 def test_rebuild_does_not_run_twice(tmp_path):
