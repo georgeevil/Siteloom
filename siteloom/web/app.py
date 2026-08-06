@@ -11,14 +11,24 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.store import Camera, Detection, Event, get_session, init_db, make_engine
+from siteloom.store import (
+    Camera,
+    Detection,
+    Event,
+    EventIdentity,
+    Identity,
+    NoiseEvent,
+    get_session,
+    init_db,
+    make_engine,
+)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -101,6 +111,15 @@ def create_app(config: SiteConfig) -> FastAPI:
                 .all()
             )
             camera = session.get(Camera, event.camera_id)
+            identity_links = (
+                session.scalars(
+                    select(EventIdentity)
+                    .options(selectinload(EventIdentity.identity))
+                    .filter_by(event_id=event_id)
+                )
+                .unique()
+                .all()
+            )
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -116,7 +135,93 @@ def create_app(config: SiteConfig) -> FastAPI:
                     }
                     for d in detections
                 ],
+                "identity_links": identity_links,
             },
+        )
+
+    @app.get("/identities", response_class=HTMLResponse)
+    def identities(
+        request: Request,
+        identifier: str | None = None,
+        unlabeled: bool = False,
+    ):
+        with Session() as session:
+            q = select(Identity).order_by(Identity.last_seen.desc())
+            if identifier:
+                q = q.filter(Identity.identifier_key == identifier)
+            if unlabeled:
+                q = q.filter(Identity.label.is_(None))
+            rows = session.scalars(q.limit(200)).unique().all()
+            identifier_keys = sorted(
+                {k for (k,) in session.execute(select(Identity.identifier_key).distinct())}
+            )
+        return templates.TemplateResponse(
+            request,
+            "identities.html",
+            {
+                "site_name": config.site_name or config.site_id,
+                "identities": rows,
+                "identifier_keys": identifier_keys,
+                "filters": {"identifier": identifier or "", "unlabeled": unlabeled},
+            },
+        )
+
+    @app.get("/identities/{identity_id}", response_class=HTMLResponse)
+    def identity_detail(request: Request, identity_id: int):
+        with Session() as session:
+            identity = session.get(Identity, identity_id)
+            if identity is None:
+                raise HTTPException(404)
+            links = (
+                session.scalars(
+                    select(EventIdentity)
+                    .options(
+                        selectinload(EventIdentity.event).selectinload(Event.camera)
+                    )
+                    .filter_by(identity_id=identity_id)
+                    .order_by(EventIdentity.id.desc())
+                    .limit(100)
+                )
+                .unique()
+                .all()
+            )
+        return templates.TemplateResponse(
+            request,
+            "identity.html",
+            {
+                "site_name": config.site_name or config.site_id,
+                "identity": identity,
+                "links": links,
+            },
+        )
+
+    @app.post("/identities/{identity_id}/label")
+    def label_identity(identity_id: int, label: str = Form("")):
+        """Label-and-learn (PRD §6.3): name an unknown identity. All past
+        and future matches inherit the label instantly — embeddings are
+        already grouped under this identity in the vector store."""
+        with Session() as session:
+            identity = session.get(Identity, identity_id)
+            if identity is None:
+                raise HTTPException(404)
+            identity.label = label.strip() or None
+            session.commit()
+        return RedirectResponse(f"/identities/{identity_id}", status_code=303)
+
+    @app.get("/noise", response_class=HTMLResponse)
+    def noise(request: Request):
+        with Session() as session:
+            rows = (
+                session.scalars(
+                    select(NoiseEvent).order_by(NoiseEvent.start.desc()).limit(200)
+                )
+                .unique()
+                .all()
+            )
+        return templates.TemplateResponse(
+            request,
+            "noise.html",
+            {"site_name": config.site_name or config.site_id, "noise_events": rows},
         )
 
     @app.get("/media/{path:path}")

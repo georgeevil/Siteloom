@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -18,8 +18,21 @@ from siteloom.adapters import ADAPTERS
 from siteloom.adapters.base import CameraAdapter, Frame
 from siteloom.config import CameraConfig, SiteConfig
 from siteloom.dispatch import Job, JobDispatcher, LocalBackend
+from siteloom.guests import GuestWindows
+from siteloom.identity import IdentityResolver, VectorStore
+from siteloom.modules.audio import AudioModule
 from siteloom.modules.detection import DetectionModule
-from siteloom.store import Camera, Detection, Event, get_session, init_db, make_engine
+from siteloom.modules.identity import IdentityModule
+from siteloom.store import (
+    Camera,
+    Detection,
+    Event,
+    EventIdentity,
+    NoiseEvent,
+    get_session,
+    init_db,
+    make_engine,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +43,12 @@ def build_dispatcher(config: SiteConfig) -> JobDispatcher:
     else:  # pragma: no cover — future backends
         raise ValueError(f"unknown backend {config.backend.kind!r}")
     dispatcher.register("detection", DetectionModule(config.detection))
+    if config.identity.enabled:
+        dispatcher.register(
+            "identity", IdentityModule(config.identity, device=config.detection.device)
+        )
+    if config.audio.enabled:
+        dispatcher.register("audio", AudioModule(config.audio))
     return dispatcher
 
 
@@ -50,6 +69,14 @@ class IngestService:
         self.media_dir = Path(config.storage.media_dir)
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self._sync_cameras()
+
+        self.resolver: IdentityResolver | None = None
+        if config.identity.enabled:
+            self.resolver = IdentityResolver(
+                config.identity, VectorStore(config.identity.vector_db_path)
+            )
+        with self.Session() as session:
+            self._guest_windows = GuestWindows(session, config.guests)
 
     def _sync_cameras(self) -> None:
         with self.Session() as session:
@@ -88,9 +115,47 @@ class IngestService:
                     processed += 1
                     if max_frames is not None and processed >= max_frames:
                         return processed
+                if cam.adapter == "file":
+                    self._process_audio(cam, stream.id)
         finally:
             adapter.close()
         return processed
+
+    def _process_audio(self, cam: CameraConfig, media_path: str) -> None:
+        """Loud-duration tracking over a file's audio stream (PRD §6.5).
+
+        Live-stream audio arrives with the Celery/Ray backends; the file
+        path covers backfill and NVR exports today.
+        """
+        if "audio" not in cam.modules or not self.config.audio.enabled:
+            return
+        from siteloom.adapters.file import IMAGE_EXTS
+
+        if Path(media_path).suffix.lower() in IMAGE_EXTS:
+            return
+        base = datetime.fromtimestamp(Path(media_path).stat().st_mtime)
+        result = self.dispatcher.submit_and_wait(
+            Job(module="audio", payload={"media_path": media_path})
+        )
+        if not result.ok:
+            log.error("audio job failed on %s: %s", cam.id, result.error)
+            return
+        episodes = result.result["episodes"]
+        if not episodes:
+            return
+        with self.Session() as session:
+            for ep in episodes:
+                session.add(
+                    NoiseEvent(
+                        camera_id=cam.id,
+                        start=base + timedelta(seconds=ep["start_s"]),
+                        end=base + timedelta(seconds=ep["end_s"]),
+                        peak_db=ep["peak_db"],
+                        mean_db=ep["mean_db"],
+                    )
+                )
+            session.commit()
+        log.info("camera %s: %d noise episode(s) recorded", cam.id, len(episodes))
 
     def _process_frame(self, cam: CameraConfig, frame: Frame) -> None:
         if "detection" not in cam.modules:
@@ -142,7 +207,70 @@ class IngestService:
                 if det["confidence"] > event.best_confidence and crop_path:
                     event.best_confidence = det["confidence"]
                     event.best_crop_path = crop_path
+                self._identify(session, cam, event, det, ts, crop_path)
             session.commit()
+
+    def _identify(
+        self,
+        session,
+        cam: CameraConfig,
+        event: Event,
+        det: dict,
+        ts: datetime,
+        crop_path: str | None,
+    ) -> None:
+        """Second-pass identification on a detection crop (PRD §6.3/6.4).
+
+        The crop goes through the dispatcher like any other job — the
+        IdentityModule computes embeddings (edge work), the resolver
+        matches/creates identities against the stores (central work).
+        """
+        if self.resolver is None or not det.get("crop_jpeg"):
+            return
+        if "identity" not in cam.modules:
+            return  # per-camera module selection (NFR3)
+        result = self.dispatcher.submit_and_wait(
+            Job(
+                module="identity",
+                payload={
+                    "crop_jpeg": det["crop_jpeg"],
+                    "class_name": det["class_name"],
+                },
+            )
+        )
+        if not result.ok:
+            log.error("identity job failed on %s: %s", cam.id, result.error)
+            return
+        registry = self.config.identity.identifiers
+        for emb in result.result["embeddings"]:
+            ident_cfg = registry.get(emb["identifier"])
+            resolution = self.resolver.resolve(
+                session,
+                identifier_key=emb["identifier"],
+                class_name=det["class_name"],
+                vector=emb["vector"],
+                plate=emb["plate"],
+                timestamp=ts,
+                crop_path=crop_path,
+                threshold=ident_cfg.threshold if ident_cfg else None,
+                max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
+            )
+            link = (
+                session.query(EventIdentity)
+                .filter_by(event_id=event.id, identity_id=resolution.identity.id)
+                .first()
+            )
+            if link is None:
+                session.add(
+                    EventIdentity(
+                        event_id=event.id,
+                        identity_id=resolution.identity.id,
+                        similarity=resolution.similarity,
+                    )
+                )
+            else:
+                link.hit_count += 1
+                link.similarity = max(link.similarity, resolution.similarity)
 
     def _find_or_create_event(
         self, session, camera_id: str, det: dict, ts: datetime
@@ -166,6 +294,7 @@ class IngestService:
                 class_name=det["class_name"],
                 first_seen=ts,
                 last_seen=ts,
+                guest_window=self._guest_windows.contains(ts),
             )
             session.add(event)
             session.flush()  # assign event.id for the Detection FK

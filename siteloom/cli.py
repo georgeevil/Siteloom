@@ -53,6 +53,54 @@ def serve(
 
 
 @app.command()
+def backfill(
+    path: Path = typer.Argument(..., help="Directory or file of photos/videos"),
+    config: Path = CONFIG_OPT,
+    camera_id: str = typer.Option(
+        "backfill", help="Camera id recorded on backfilled events"
+    ),
+    sample_fps: float = typer.Option(2.0, help="Frames/second sampled from videos"),
+):
+    """Backfill existing photos/video into the identity database (PRD §6.6).
+
+    Runs the exact live pipeline (detection -> identity -> store) over a
+    media archive; events carry the source file's mtime as timestamp.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    from siteloom.config import CameraConfig, load_config
+    from siteloom.ingest import IngestService
+
+    cfg = load_config(config)
+    cam = CameraConfig(
+        id=camera_id,
+        name=f"Backfill: {path}",
+        adapter="file",
+        source=str(path),
+        sample_fps=sample_fps,
+        modules=["detection", "identity", "audio"],
+    )
+    cfg.cameras = [cam]
+    service = IngestService(cfg)
+    count = service.run_camera(cam)
+    typer.echo(f"backfill complete: {count} frames processed from {path}")
+
+
+@app.command()
+def sync_bookings(config: Path = CONFIG_OPT):
+    """Sync guest bookings from the configured iCal feed (PRD §6.7)."""
+    from siteloom.config import load_config
+    from siteloom.guests import sync_bookings as _sync
+    from siteloom.store import get_session, init_db, make_engine
+
+    cfg = load_config(config)
+    engine = make_engine(cfg.storage.db_url)
+    init_db(engine)
+    with get_session(engine)() as session:
+        count = _sync(session, cfg.guests)
+    typer.echo(f"synced {count} booking(s)")
+
+
+@app.command()
 def cameras(config: Path = CONFIG_OPT):
     """List streams visible to each configured adapter (e.g. UniFi camera ids)."""
     from siteloom.config import load_config

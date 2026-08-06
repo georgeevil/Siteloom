@@ -222,3 +222,4 @@ siteloom.db
 media/
 samples/
 *.pt
+identity_db/

@@ -15,6 +15,8 @@ Siteloom: a multi-site video & audio intelligence platform (PoC for Kai Apartmen
 - `uv run siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
 - `uv run siteloom init-db --config ...` — create tables (run/serve also do this implicitly)
 
+Backfill a media archive: `uv run siteloom backfill <path> --config ...`; sync guest bookings: `uv run siteloom sync-bookings`. Plate OCR is optional: `uv sync --extra plates` (without it the vehicle path degrades to visual re-ID with a logged warning).
+
 ## Architecture
 
 Four independently swappable layers (PRD §5); the invariants that keep them swappable matter more than the file layout:
@@ -25,6 +27,21 @@ Four independently swappable layers (PRD §5); the invariants that keep them swa
 4. **Store** (`siteloom/store/`) — SQLAlchemy on SQLite (Postgres-ready). An `Event` = one track id's visit on one camera; `Detection` rows hang off it. Crops are JPEGs under `media_dir`, path stored on the row.
 
 `siteloom/ingest.py` is the application-layer wiring (adapter → sampler → dispatcher → store); `siteloom/web/` is the FastAPI/Jinja2 operator UI; `siteloom/config.py` holds the pydantic config models — per-camera zones/masks/modules are YAML config, never code (NFR3).
+
+### Identity layer (`siteloom/identity/`)
+
+The compute/state split is deliberate and must be preserved: `modules/identity.py` (IdentityModule) only computes embeddings — serializable, runs at the edge later (NFR2); `identity/resolver.py` (IdentityResolver) owns all identity state — vector search, thresholding, Identity-row creation, plate-first matching — and stays central. Never move DB or vector-store writes into a processing module.
+
+- **Vector DB**: Qdrant in embedded mode (`QdrantClient(path=...)` in `identity/vectors.py`) — a local directory, no server; the same client speaks to remote Qdrant for V1 multi-site. One collection per identifier key, created on demand.
+- **Per-class algorithms** (`identity/embedders.py`): face ID uses a dedicated pipeline (YuNet detect → align → SFace 128-d, OpenCV built-ins, models auto-downloaded to `~/.cache/siteloom/models`); everything else uses a shared ResNet-18 appearance embedding (512-d). Each identifier carries its own cosine threshold in config because the similarity distributions differ wildly (face ≈0.36, generic ≈0.8+). The registry (`identity/registry.py`) maps detection class → identifiers and **auto-adds a generic identifier for any unseen class** when `identity.auto_add_classes` is on — adding a class to `detection.classes` is the only step needed to re-identify it.
+- **Plates** (`identity/plates.py`): plate OCR and visual re-ID write to the *same* vehicle Identity row (PRD §6.4); a plate match beats visual similarity, and a visual match can learn its plate later.
+- **Label-and-learn** (PRD §6.3): identities start unlabeled ("unknown-…" bucket in `/identities`); labeling via the web UI renames all past and future matches — never require pre-enrollment.
+
+### Audio, backfill, guests
+
+- `modules/audio.py`: loud-duration episodes only (dBFS RMS threshold + min duration + release gap) — classification/transcription intentionally absent (NFR5). `detect_episodes` is a pure function; test changes there.
+- Backfill (`siteloom backfill`) builds a synthetic file-adapter CameraConfig and runs `IngestService.run_camera` — it must always reuse the live pipeline (PRD §6.6).
+- `guests.py`: iCal → Booking rows; `GuestWindows.contains()` stamps `Event.guest_window` at ingest to suppress unknown-vehicle alarms during arrival windows (the PRD §12 success metric).
 
 ## Constraints to preserve
 

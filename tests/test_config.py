@@ -27,7 +27,7 @@ def test_zone_needs_three_points():
 
 def test_camera_defaults():
     cam = CameraConfig(id="c1", source="rtsp://x")
-    assert cam.modules == ["detection"]
+    assert cam.modules == ["detection", "identity"]
     assert cam.sample_fps == 2.0
     assert cam.require_zone is False
 

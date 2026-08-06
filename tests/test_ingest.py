@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import pytest
 
-from siteloom.config import CameraConfig, SiteConfig, StorageConfig
+from siteloom.config import (
+    CameraConfig,
+    IdentityConfig,
+    SiteConfig,
+    StorageConfig,
+)
 from siteloom.dispatch import LocalBackend
 from siteloom.ingest import IngestService
-from siteloom.store import Detection, Event
+from siteloom.store import Detection, Event, EventIdentity, Identity
 
 
 class StubDetector:
@@ -29,15 +34,37 @@ class StubDetector:
         }
 
 
+class StubIdentity:
+    """Returns a constant person embedding, so every frame resolves to
+    the same identity."""
+
+    def process(self, job):
+        return {
+            "embeddings": [
+                {
+                    "identifier": "person",
+                    "algo": "generic",
+                    "vector": [1.0, 0.0, 0.0, 0.0],
+                    "plate": None,
+                }
+            ]
+        }
+
+
 @pytest.fixture
 def service(sample_video, tmp_path):
     config = SiteConfig(
         site_id="test-site",
         cameras=[
             CameraConfig(
-                id="cam1", adapter="file", source=str(sample_video), sample_fps=5.0
+                id="cam1",
+                adapter="file",
+                source=str(sample_video),
+                sample_fps=5.0,
+                modules=["detection"],
             )
         ],
+        identity=IdentityConfig(enabled=False),
         storage=StorageConfig(
             db_url=f"sqlite:///{tmp_path}/test.db", media_dir=str(tmp_path / "media")
         ),
@@ -76,3 +103,43 @@ def test_ingest_skips_module_not_configured(service, sample_video):
     service.run_camera(cam)
     with service.Session() as session:
         assert session.query(Detection).count() == 0
+
+
+def test_ingest_with_identity_pipeline(sample_video, tmp_path):
+    """Full chain with stubs: detection -> identity job -> resolver ->
+    Identity + EventIdentity rows and vectors in the local Qdrant."""
+    config = SiteConfig(
+        site_id="test-site",
+        cameras=[
+            CameraConfig(
+                id="cam1",
+                adapter="file",
+                source=str(sample_video),
+                sample_fps=5.0,
+                modules=["detection", "identity"],
+            )
+        ],
+        identity=IdentityConfig(vector_db_path=str(tmp_path / "vectors")),
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/test.db", media_dir=str(tmp_path / "media")
+        ),
+    )
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", StubDetector())
+    dispatcher.register("identity", StubIdentity())
+    service = IngestService(config, dispatcher=dispatcher)
+    service.run_camera(config.cameras[0])
+
+    with service.Session() as session:
+        identities = session.query(Identity).all()
+        links = session.query(EventIdentity).all()
+
+    # Constant embedding -> one identity, re-matched every frame.
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.identifier_key == "person"
+    assert identity.label is None  # unknown until labeled
+    assert identity.appearance_count == 10
+    # One event (single track) -> one link, hit-counted per frame.
+    assert len(links) == 1
+    assert links[0].hit_count == 10

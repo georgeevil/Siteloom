@@ -46,6 +46,18 @@
       font-size: 0.72rem; font-weight: 600; text-transform: capitalize;
       background: light-dark(#e8f0fe, #1e3a5f); color: light-dark(#0a63c9, #9cc7ff);
     }
+    .badge.guest {
+      background: light-dark(#e6f6ea, #17402a); color: light-dark(#1c7c3c, #7fd89d);
+      text-transform: none;
+    }
+    .badge.unknown {
+      background: light-dark(#fdeeee, #4a1f22); color: light-dark(#b3261e, #ff9d96);
+      text-transform: none;
+    }
+    .badge.plate {
+      background: light-dark(#fff4dd, #4a3a14); color: light-dark(#8a6410, #ffd47e);
+      text-transform: none; font-family: ui-monospace, monospace;
+    }
     .muted { opacity: 0.55; }
     .pager { margin-top: 1.2rem; display: flex; gap: 1rem; font-size: 0.9rem; }
     table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
@@ -59,7 +71,12 @@
 <body>
   <header>
     <h1><a href="/">Siteloom</a></h1>
-    <span class="site">{{ site_name }}</span>
+    <nav style="display:flex; gap:0.9rem; font-size:0.9rem;">
+      <a href="/">Events</a>
+      <a href="/identities">Identities</a>
+      <a href="/noise">Noise</a>
+    </nav>
+    <span class="site" style="margin-left:auto;">{{ site_name }}</span>
   </header>
   <main>{% block content %}{% endblock %}</main>
 </body>

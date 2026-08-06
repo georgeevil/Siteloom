@@ -33,6 +33,7 @@
     {% endif %}
     <div class="meta">
       <span class="badge">{{ e.class_name }}</span>
+      {% if e.guest_window %}<span class="badge guest">guest</span>{% endif %}
       {% if e.track_id is not none %}<span class="muted">track {{ e.track_id }}</span>{% endif %}<br>
       {{ e.camera.name if e.camera else e.camera_id }}<br>
       <span class="muted">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} · {{ e.detection_count }} detections</span>

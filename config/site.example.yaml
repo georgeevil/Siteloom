@@ -23,6 +23,27 @@ storage:
   db_url: sqlite:///siteloom.db
   media_dir: media
 
+identity:
+  enabled: true
+  vector_db_path: identity_db   # Qdrant embedded mode — a directory, no server
+  auto_add_classes: true        # unseen classes get a generic identifier on the fly
+  # identifiers:                # per-class algorithms; defaults shown
+  #   face:    {algo: face,    applies_to: [person], threshold: 0.36}
+  #   person:  {algo: generic, applies_to: [person], threshold: 0.80}
+  #   vehicle: {algo: generic, applies_to: [car, truck, bus, motorcycle],
+  #             threshold: 0.82, plate_ocr: true}
+
+audio:
+  enabled: true
+  threshold_db: -25.0   # dBFS, calibrate per microphone
+  min_duration_s: 30
+  release_s: 5
+
+guests:
+  ical: ""              # booking iCal URL or .ics path (Kai Apartments sync)
+  arrival_pre_hours: 2
+  arrival_post_hours: 4
+
 cameras:
   # A local video file — useful for development/testing without live
   # cameras, and the seed of the backfill path (PRD §6.6).
@@ -31,7 +52,7 @@ cameras:
     adapter: file
     source: ./samples/sample.mp4
     sample_fps: 2.0
-    modules: [detection]
+    modules: [detection, identity, audio]
 
   # A UniFi Protect camera. `source` is the Protect camera id
   # (see `siteloom cameras` to list them).
