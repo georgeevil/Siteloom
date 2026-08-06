@@ -53,6 +53,77 @@ directory, no server); labels, plates, and sighting stats live in **SQLite**.
 Identities start in an "unknown" bucket and are named after the fact in the
 web UI (label-and-learn) — no pre-enrollment required.
 
+## Media library, labeling, and training
+
+Siteloom also indexes local directories of photos and short videos, sharing
+the identity store with live cameras — a face enrolled from a photo archive
+is recognized on a camera immediately.
+
+**Indexing is two-phase and resumable**, so an archive too large to process
+in one sitting can be done in chunks:
+
+```bash
+uv run siteloom library add ~/Pictures/archive     # register a source
+uv run siteloom library scan                       # cheap: register files as pending
+uv run siteloom library index --limit 200          # expensive: detect + identify 200
+uv run siteloom library index --all                # ...come back and finish later
+uv run siteloom library status
+```
+
+**Labeling** lives at `/library/<id>`: draw and correct bounding boxes on a
+canvas, set class and custom sub-class, assign identity, add whole-image
+tags, and verify or reject each box. Keyboard-driven (`V` verify, `X`
+reject, `N`/`P` next/prev, `Cmd+S` save). Re-indexing never discards human
+work — only unverified machine boxes are regenerated.
+
+**Class definition** lives at `/classes`: toggle which detection classes are
+tracked, set per-identifier similarity thresholds, and define custom
+sub-classes. Changes are written back to your site YAML, so operators
+refine classes without editing files.
+
+### Google Photos Takeout
+
+Takeout sidecars (`*.supplemental-metadata.json`) carry a `people` array —
+Google Photos' own face grouping. Those names are per *photo*, never per
+face box, so the importer assigns them in two passes:
+
+1. **Unambiguous** — one detected face, one person tag. Logically certain;
+   auto-verified and used to seed a gallery.
+2. **Constrained matching** — for group photos, each face is matched against
+   that gallery *restricted to the names tagged on that same photo*.
+   Closed-set matching over a handful of candidates is far easier than
+   open-set recognition, so this recovers most of an archive. Always
+   proposals; always requires review.
+
+```bash
+uv run siteloom takeout inspect "~/Takeout/Google Photos"   # dry run, no writes
+uv run siteloom takeout import  "~/Takeout/Google Photos"
+```
+
+Review at `/training`: per-person coverage, confirm/reject/rename in bulk.
+**Only what you verify becomes training data** — a model trained on its own
+proposals would score well and mean nothing.
+
+### Training
+
+```bash
+uv run siteloom train status            # verified samples per person
+uv run siteloom train face              # fine-tune the face embedding
+uv run siteloom train detector          # train a YOLO face detector
+```
+
+`train face` learns a linear projection over SFace features with a
+proxy-centroid loss, so *your* people separate better. It is adopted only if
+held-out AUC improves on a validation split that can actually be scored —
+if there aren't enough samples per person to form same-person validation
+pairs, it reports that and keeps the base embeddings rather than pretending
+to have improved. Once adopted, the projection is picked up automatically
+everywhere embeddings are computed.
+
+`train detector` improves face **detection** on your own imagery (recall on
+small, angled, blurred faces). It does nothing for identification — who a
+face belongs to remains the embedding pipeline's job.
+
 ## Quickstart
 
 Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/).
@@ -82,8 +153,15 @@ site YAML and use each camera's Protect id as its `source`.
 
 - **Events** — one card per tracked object visit, with crops, class, camera,
   and time filters; guest-window badges on events during expected arrivals.
+- **Library** — indexed local media, filterable by source, status, person
+  tag, and "needs review"; click through to the box editor.
 - **Identities** — the label-and-learn surface: browse unknowns, name them,
-  see every sighting; plates shown on vehicle identities.
+  see every sighting; plates shown on vehicle identities. Merge two
+  identities that are the same person, or split a cluster that absorbed two.
+- **Classes** — tracked detection classes, identifier thresholds, custom
+  sub-class definition.
+- **Training** — face proposals with per-person coverage, bulk
+  confirm/reject/rename, and a history of training runs.
 - **Noise** — sustained loud episodes (dBFS threshold + minimum duration).
 
 ## Audio & privacy posture
@@ -101,11 +179,17 @@ siteloom/
   adapters/    # UniFi Protect, generic RTSP, file/archive
   dispatch/    # JobDispatcher interface + LocalBackend
   modules/     # detection (YOLO+ByteTrack), identity (embeddings), audio
-  identity/    # vector store (Qdrant local), embedders, registry, resolver, plates
-  store/       # SQLAlchemy models: events, detections, identities, noise, bookings
+  identity/    # vector store (Qdrant local), embedders, registry, resolver,
+               # plates, custom-class k-NN
+  library/     # resumable local-directory indexing, Takeout importer
+  training/    # verified-sample collection, face fine-tune, YOLO export
+  store/       # SQLAlchemy: events, identities, library items, annotations,
+               # custom classes, noise, bookings, training runs
   ingest.py    # adapter -> sampler -> dispatcher -> stores
-  web/         # FastAPI + Jinja2 operator UI
+  web/         # FastAPI + Jinja2 operator UI (events, library, labeling,
+               # classes, training review)
   cli.py       # init-db | run | serve | cameras | backfill | sync-bookings
+               # library | takeout | classes | train
 ```
 
 ## Roadmap

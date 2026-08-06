@@ -57,7 +57,11 @@ class IdentifierRegistry:
         if embedder is None:
             from siteloom.identity.embedders import build_embedder
 
-            embedder = build_embedder(algo, device=self._device)
+            embedder = build_embedder(
+                algo,
+                device=self._device,
+                projection_path=self.cfg.face_projection_path or None,
+            )
             self._embedders[algo] = embedder
         return embedder
 

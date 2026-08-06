@@ -56,32 +56,74 @@ class FaceEmbedder:
 
     Runs on CPU (ONNX); fast enough for crop-sized inputs. Swappable for
     InsightFace/ArcFace later behind the same `embed()` shape.
+
+    Detection and embedding are exposed separately as well as combined,
+    because the Takeout importer and training exporter need face *boxes*
+    on full photos, not just one embedding per person crop.
+
+    If a fine-tuned projection head exists (see siteloom/training/face.py)
+    it is applied to the raw SFace feature, so training improvements take
+    effect everywhere embeddings are computed with no call-site changes.
     """
 
     dim = 128
+    # A face smaller than this in either dimension is not worth embedding.
+    MIN_FACE_PX = 32
 
-    def __init__(self) -> None:
+    def __init__(self, projection_path: str | Path | None = None) -> None:
         det_path = _download(YUNET_URL, min_bytes=100_000)
         rec_path = _download(SFACE_URL, min_bytes=10_000_000)
         self._detector = cv2.FaceDetectorYN.create(
             str(det_path), "", (320, 320), score_threshold=0.7
         )
         self._recognizer = cv2.FaceRecognizerSF.create(str(rec_path), "")
+        self._projection = _load_projection(projection_path)
+        if self._projection is not None:
+            self.dim = self._projection.shape[1]
 
-    def embed(self, bgr: np.ndarray) -> np.ndarray | None:
+    def detect(self, bgr: np.ndarray) -> list[np.ndarray]:
+        """All faces in an image. Each row is YuNet's 15-value format:
+        [x, y, w, h, 5x landmark xy..., score]."""
         h, w = bgr.shape[:2]
-        if h < 40 or w < 40:
-            return None  # too small to carry a usable face
+        if h < self.MIN_FACE_PX or w < self.MIN_FACE_PX:
+            return []
         self._detector.setInputSize((w, h))
         _, faces = self._detector.detect(bgr)
         if faces is None or len(faces) == 0:
-            return None
-        # Best-scoring face in the crop (a person crop should hold one).
-        face = faces[np.argmax(faces[:, -1])]
+            return []
+        return [face for face in faces]
+
+    def embed_face(self, bgr: np.ndarray, face: np.ndarray) -> np.ndarray | None:
+        """Embed one already-detected face using its landmarks to align."""
         aligned = self._recognizer.alignCrop(bgr, face)
         feature = self._recognizer.feature(aligned).flatten().astype(np.float32)
+        return self._finish(feature)
+
+    def embed(self, bgr: np.ndarray) -> np.ndarray | None:
+        """Best face in the image, embedded — the ProcessingModule path."""
+        faces = self.detect(bgr)
+        if not faces:
+            return None
+        best = max(faces, key=lambda f: f[-1])
+        return self.embed_face(bgr, best)
+
+    def _finish(self, feature: np.ndarray) -> np.ndarray | None:
+        if self._projection is not None:
+            feature = feature @ self._projection
         norm = np.linalg.norm(feature)
-        return feature / norm if norm > 0 else None
+        return (feature / norm).astype(np.float32) if norm > 0 else None
+
+
+def _load_projection(path: str | Path | None) -> np.ndarray | None:
+    """Load a fine-tuned projection matrix if one has been trained."""
+    if path is None:
+        return None
+    path = Path(path)
+    if not path.exists():
+        return None
+    matrix = np.load(path).astype(np.float32)
+    log.info("using fine-tuned face projection %s %s", path, matrix.shape)
+    return matrix
 
 
 class GenericEmbedder:
@@ -132,9 +174,9 @@ def _resolve_device(torch, requested: str) -> str:
     return requested
 
 
-def build_embedder(algo: str, device: str = "mps"):
+def build_embedder(algo: str, device: str = "mps", projection_path=None):
     if algo == "face":
-        return FaceEmbedder()
+        return FaceEmbedder(projection_path=projection_path)
     if algo == "generic":
         return GenericEmbedder(device=device)
     raise ValueError(f"unknown embedding algo {algo!r}")

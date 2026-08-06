@@ -17,6 +17,8 @@ Siteloom: a multi-site video & audio intelligence platform (PoC for Kai Apartmen
 
 Backfill a media archive: `uv run siteloom backfill <path> --config ...`; sync guest bookings: `uv run siteloom sync-bookings`. Plate OCR is optional: `uv sync --extra plates` (without it the vehicle path degrades to visual re-ID with a logged warning).
 
+Library/training sub-apps: `siteloom library add|scan|index|status`, `siteloom takeout inspect|import`, `siteloom classes list|add|rebuild`, `siteloom train status|face|export-detector|detector`. Face models (YuNet/SFace ONNX) auto-download to `~/.cache/siteloom/models`.
+
 ## Architecture
 
 Four independently swappable layers (PRD §5); the invariants that keep them swappable matter more than the file layout:
@@ -36,6 +38,16 @@ The compute/state split is deliberate and must be preserved: `modules/identity.p
 - **Per-class algorithms** (`identity/embedders.py`): face ID uses a dedicated pipeline (YuNet detect → align → SFace 128-d, OpenCV built-ins, models auto-downloaded to `~/.cache/siteloom/models`); everything else uses a shared ResNet-18 appearance embedding (512-d). Each identifier carries its own cosine threshold in config because the similarity distributions differ wildly (face ≈0.36, generic ≈0.8+). The registry (`identity/registry.py`) maps detection class → identifiers and **auto-adds a generic identifier for any unseen class** when `identity.auto_add_classes` is on — adding a class to `detection.classes` is the only step needed to re-identify it.
 - **Plates** (`identity/plates.py`): plate OCR and visual re-ID write to the *same* vehicle Identity row (PRD §6.4); a plate match beats visual similarity, and a visual match can learn its plate later.
 - **Label-and-learn** (PRD §6.3): identities start unlabeled ("unknown-…" bucket in `/identities`); labeling via the web UI renames all past and future matches — never require pre-enrollment.
+
+### Library, labeling, training (`siteloom/library/`, `siteloom/training/`)
+
+- **Two-phase indexing is the whole point of `library/indexer.py`**: `scan()` is cheap and registers rows as `pending`; `process(limit=N)` is expensive and bounded. Never collapse them — partial/resumable indexing over huge archives depends on the split. Re-indexing deletes only unverified `source="auto"` annotations; human work must always survive.
+- **`Annotation` is one table for four jobs** (detection review, identity labeling, custom-class labeling, face training data). `source` records provenance (`auto`/`human`/`import`), `verified` records human sign-off, `rejected` keeps negatives rather than deleting them. Boxes are stored **normalized 0..1** so they survive thumbnailing.
+- **Only verified, non-rejected annotations are training data** (`training/dataset.py`). The Takeout importer's proposals live in `proposed_name`/`proposal_basis`, deliberately separate from `identity_id`, so guesses never leak into the identity store or a training export.
+- **Takeout two-pass assignment** (`library/takeout.py`): Google's `people` tags are per-photo, not per-face. Pass 1 handles 1-face-1-name (certain, auto-verified, seeds a gallery); pass 2 matches remaining faces against that gallery *restricted to names tagged on the same photo*. Sidecar matching is by the JSON `title` field first, filename heuristics second — Takeout's naming is genuinely inconsistent (truncation, `(1)` counters that migrate into the JSON name, legacy `.json` suffixes).
+- **Never adopt a model without a valid evaluation** (`training/face.py`). `EvalMetrics.valid` is False when a split can't produce both same- and different-person pairs; an invalid score is not a zero score. `split_by_person` enforces a 2-sample validation floor per person so same-person pairs exist. Fine-tuning is only adopted on a genuine held-out improvement — evaluating on train can never justify it.
+- **Custom sub-classes are k-NN, not a model** (`identity/classes.py`): examples are labeled crops embedded with the existing generic embedder, stored in the `class-examples` collection. Adding an example improves the class immediately; there is no training run. Rebuild after the embedder changes, or stale vectors from an old embedding space silently degrade voting.
+- YOLO face-detector training improves **detection only**; identification stays with the embedding pipeline. Say so plainly rather than implying otherwise.
 
 ### Audio, backfill, guests
 

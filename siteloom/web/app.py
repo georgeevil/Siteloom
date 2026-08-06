@@ -168,6 +168,8 @@ def create_app(config: SiteConfig) -> FastAPI:
 
     @app.get("/identities/{identity_id}", response_class=HTMLResponse)
     def identity_detail(request: Request, identity_id: int):
+        from siteloom.store import Annotation
+
         with Session() as session:
             identity = session.get(Identity, identity_id)
             if identity is None:
@@ -185,6 +187,27 @@ def create_app(config: SiteConfig) -> FastAPI:
                 .unique()
                 .all()
             )
+            # Library crops attributed to this identity — the material a
+            # split operates on.
+            annotations = (
+                session.scalars(
+                    select(Annotation)
+                    .filter_by(identity_id=identity_id)
+                    .order_by(Annotation.id)
+                    .limit(60)
+                )
+                .unique()
+                .all()
+            )
+            merge_candidates = session.scalars(
+                select(Identity)
+                .filter(
+                    Identity.identifier_key == identity.identifier_key,
+                    Identity.id != identity_id,
+                )
+                .order_by(Identity.label.is_(None), Identity.label, Identity.id)
+                .limit(200)
+            ).all()
         return templates.TemplateResponse(
             request,
             "identity.html",
@@ -192,6 +215,8 @@ def create_app(config: SiteConfig) -> FastAPI:
                 "site_name": config.site_name or config.site_id,
                 "identity": identity,
                 "links": links,
+                "annotations": annotations,
+                "merge_candidates": merge_candidates,
             },
         )
 
@@ -223,6 +248,10 @@ def create_app(config: SiteConfig) -> FastAPI:
             "noise.html",
             {"site_name": config.site_name or config.site_id, "noise_events": rows},
         )
+
+    from siteloom.web import library_routes
+
+    library_routes.register(app, templates, Session, config)
 
     @app.get("/media/{path:path}")
     def media(path: str):

@@ -223,3 +223,6 @@ media/
 samples/
 *.pt
 identity_db/
+training/
+*.npy
+.DS_Store

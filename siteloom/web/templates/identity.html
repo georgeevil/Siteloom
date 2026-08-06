@@ -24,6 +24,46 @@
 <div class="strip"><img src="/media/{{ identity.best_crop_path }}" alt=""></div>
 {% endif %}
 
+<details style="margin:0.8rem 0;">
+  <summary style="cursor:pointer; font-size:0.85rem;">Merge or split this identity</summary>
+  <div style="display:flex; gap:1.2rem; flex-wrap:wrap; margin-top:0.7rem;">
+    <form method="post" action="/identities/{{ identity.id }}/merge" class="filters" style="margin:0;">
+      <span class="muted" style="align-self:center; font-size:0.8rem;">Merge into</span>
+      <select name="target_id" required>
+        <option value="">choose identity…</option>
+        {% for other in merge_candidates %}
+          <option value="{{ other.id }}">{{ other.display_name }} ({{ other.appearance_count }}×)</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Merge</button>
+      <span class="muted" style="align-self:center; font-size:0.75rem;">
+        this identity's embeddings and sightings move to the target, then it is deleted
+      </span>
+    </form>
+    {% if annotations %}
+    <form method="post" action="/identities/{{ identity.id }}/split" style="margin:0;">
+      <div class="muted" style="font-size:0.8rem; margin-bottom:0.35rem;">
+        Split off the wrong faces (this cluster absorbed someone else):
+      </div>
+      <div class="strip" style="margin:0.3rem 0;">
+        {% for a in annotations %}
+          {% if a.crop_path %}
+          <label style="display:inline-block; text-align:center; cursor:pointer;">
+            <img src="/media/{{ a.crop_path }}" style="height:80px; display:block;">
+            <input type="checkbox" name="ann" value="{{ a.id }}" class="splitbox">
+          </label>
+          {% endif %}
+        {% endfor %}
+      </div>
+      <input type="hidden" name="annotation_ids" id="split-ids">
+      <button type="submit" onclick="document.getElementById('split-ids').value=[...document.querySelectorAll('.splitbox:checked')].map(c=>c.value).join(',')">
+        Split selected into a new identity
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</details>
+
 <h3 style="font-size:0.95rem;">Sightings</h3>
 {% if links %}
 <table>
