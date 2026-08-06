@@ -253,12 +253,24 @@ class FrigateConsumer:
                     EventIdentity(
                         event_id=event.id,
                         identity_id=resolution.identity.id,
+                        identifier_key=emb["identifier"],
                         similarity=resolution.similarity,
+                        matched_by=resolution.matched_by,
+                        learned_plate=resolution.learned_plate,
                     )
                 )
             else:
                 link.hit_count += 1
                 link.similarity = max(link.similarity, resolution.similarity)
+                # Record the strongest evidence seen across frames: plate
+                # outranks visual, and a link whose first frame *created*
+                # the identity (no match, so None) picks up the first
+                # re-match's mode.
+                if resolution.matched_by == "plate":
+                    link.matched_by = "plate"
+                elif link.matched_by is None:
+                    link.matched_by = resolution.matched_by
+                link.learned_plate = link.learned_plate or resolution.learned_plate
             session.commit()
             self.stats.identities += 1
 

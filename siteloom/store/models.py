@@ -157,25 +157,60 @@ class Identity(Base):
 
 
 class EventIdentity(Base):
-    """Links an Event to the identities recognized during it."""
+    """One identity claim (or recorded miss) on an event.
+
+    Two shapes share this table, distinguished by `identity_id`:
+
+    * A match: `identity_id` set, `verdict` None/"confirmed"/"wrong".
+    * A recorded miss (CLD-16's null-identity verdict rows): `identity_id`
+      NULL, `verdict` = "missed", `identifier_key` naming which algorithm
+      should have claimed something. Kept here rather than as a bare flag
+      on Event so a miss is attributable — per-identifier recall (CLD-17)
+      is not computable from "something was missed".
+
+    `Event.missed_identity` is maintained as a denormalized mirror of
+    "this event has missed rows" so one-table accuracy queries and the
+    triage status SQL stay simple; `set_missed` in the web layer is the
+    single writer keeping them in step.
+    """
 
     __tablename__ = "event_identities"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
-    identity_id: Mapped[int] = mapped_column(ForeignKey("identities.id"), index=True)
+    identity_id: Mapped[int | None] = mapped_column(
+        ForeignKey("identities.id"), nullable=True, index=True
+    )
+    # Which identification algorithm produced (or should have produced)
+    # this row. Set at ingest for matches, by the operator for misses.
+    identifier_key: Mapped[str | None] = mapped_column(String, nullable=True)
     similarity: Mapped[float] = mapped_column(Float, default=0.0)
     hit_count: Mapped[int] = mapped_column(Integer, default=1)
+    # How the match was made: "plate" (OCR, wins outright per PRD §6.4) or
+    # "visual" (cosine similarity). The resolver knows this at match time
+    # and it cannot be reconstructed afterwards, so it is persisted here —
+    # CLD-17's plate-vs-visual split reads straight off this column.
+    matched_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    # True when this match is the one that taught the identity its plate
+    # ("visual match learns its plate later"). If the operator then marks
+    # this claim wrong, the learned plate is reverted — see the verdict
+    # endpoint — because a mis-learned plate poisons every future
+    # plate-first match for that number.
+    learned_plate: Mapped[bool] = mapped_column(Boolean, default=False)
     # Human review of this identity claim (CLD-16): None = unreviewed,
-    # "confirmed" or "wrong". A wrong verdict is persisted, never deleted
-    # (the Annotation provenance philosophy — negatives are data), and it
-    # must not mutate the vector store here; resolver-side learning from
-    # verdicts is separate work.
+    # "confirmed" or "wrong" ("missed" on null-identity rows). A wrong
+    # verdict is persisted, never deleted (the Annotation provenance
+    # philosophy — negatives are data), and it must not mutate the vector
+    # store here; resolver-side learning from verdicts is separate work.
     verdict: Mapped[str | None] = mapped_column(String, nullable=True)
     verdict_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="identities")
-    identity: Mapped[Identity] = relationship(back_populates="events")
+    identity: Mapped[Identity | None] = relationship(back_populates="events")
+
+    @property
+    def is_miss(self) -> bool:
+        return self.identity_id is None
 
 
 #: Review states an Event can be in, in triage order (worst first).
@@ -208,9 +243,19 @@ def status_clause(status: str):
 
 
 def unmatched_clause():
-    """Events the identity layer never linked to anyone."""
+    """Events the identity layer never linked to anyone.
+
+    Only real matches count — a recorded miss (null-identity row) is an
+    operator saying nothing was matched, so it must not make the event
+    look matched.
+    """
     return not_(
-        select(EventIdentity.id).where(EventIdentity.event_id == Event.id).exists()
+        select(EventIdentity.id)
+        .where(
+            EventIdentity.event_id == Event.id,
+            EventIdentity.identity_id.is_not(None),
+        )
+        .exists()
     )
 
 

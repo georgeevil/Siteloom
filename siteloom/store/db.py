@@ -28,7 +28,60 @@ def make_engine(db_url: str) -> Engine:
 
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    _relax_event_identity_nullability(engine)
     _ensure_columns(engine)
+
+
+def _relax_event_identity_nullability(engine: Engine) -> None:
+    """Rebuild event_identities if identity_id is still NOT NULL.
+
+    Recorded misses are rows with a NULL identity_id (CLD-16's
+    null-identity verdict rows), which the original schema forbade.
+    SQLite cannot alter a column's nullability in place, so this is the
+    one deliberate exception to the additive-only rule in
+    `_ensure_columns`: a guarded, single-purpose rename-copy-swap. Runs
+    before `_ensure_columns` so the rebuilt table already carries every
+    current column and the additive pass has nothing left to do.
+    """
+    inspector = inspect(engine)
+    if "event_identities" not in inspector.get_table_names():
+        return
+    old_cols = {c["name"]: c for c in inspector.get_columns("event_identities")}
+    col = old_cols.get("identity_id")
+    if col is None or col["nullable"]:
+        return
+    if engine.dialect.name != "sqlite":
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE event_identities ALTER COLUMN identity_id DROP NOT NULL")
+            )
+        return
+
+    table = Base.metadata.tables["event_identities"]
+    new_names = [c.name for c in table.columns]
+    # Copy every column both schemas share; columns new to this release
+    # get an explicit value because NOT NULL + no server default would
+    # otherwise reject the insert.
+    select_parts = []
+    insert_names = []
+    for name in new_names:
+        if name in old_cols:
+            insert_names.append(name)
+            select_parts.append(name)
+        elif not table.columns[name].nullable:
+            insert_names.append(name)
+            select_parts.append("0")
+    log.info("migrating: rebuilding event_identities for nullable identity_id")
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE event_identities RENAME TO event_identities_old"))
+        table.create(conn)
+        conn.execute(
+            text(
+                f"INSERT INTO event_identities ({', '.join(insert_names)}) "
+                f"SELECT {', '.join(select_parts)} FROM event_identities_old"
+            )
+        )
+        conn.execute(text("DROP TABLE event_identities_old"))
 
 
 def _ensure_columns(engine: Engine) -> None:

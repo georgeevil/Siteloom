@@ -178,6 +178,17 @@
     border: 1px dashed var(--control-border);
   }
   .inline-form { display: inline; }
+  .miss-form { display: flex; gap: 6px; align-items: center; }
+  .miss-form select {
+    padding: 4px 7px; border-radius: 6px; font: inherit; font-size: 11px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .rail-miss {
+    margin: 0 0 8px; padding: 8px 10px; border-radius: 6px; font-size: 11.5px;
+    border: 1px solid oklch(0.42 0.08 85); color: var(--amber);
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .rail-miss .mono { font-size: 10px; opacity: .8; }
   .rail-actions { display: flex; gap: 8px; }
   .rail-actions form { flex: 1; }
   .btn-primary {
@@ -269,7 +280,7 @@
       </div>
       {% for e in events %}
       {% set st = e.review_status %}
-      {% set link = e.identities | first %}
+      {% set link = e.identities | selectattr('identity_id') | first %}
       <a class="row rs-{{ st }}{% if selected == e.id %} sel{% endif %}"
          href="{{ row_urls[e.id] }}" data-event="{{ e.id }}">
         <div class="r-time">{{ e.first_seen.strftime('%H:%M:%S') }}</div>
