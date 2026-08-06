@@ -49,6 +49,14 @@ The compute/state split is deliberate and must be preserved: `modules/identity.p
 - **Custom sub-classes are k-NN, not a model** (`identity/classes.py`): examples are labeled crops embedded with the existing generic embedder, stored in the `class-examples` collection. Adding an example improves the class immediately; there is no training run. Rebuild after the embedder changes, or stale vectors from an old embedding space silently degrade voting.
 - YOLO face-detector training improves **detection only**; identification stays with the embedding pipeline. Say so plainly rather than implying otherwise.
 
+### Integrations (`siteloom/integrations/`, `siteloom/web/recognition_api.py`)
+
+- The Frigate consumer (`integrations/frigate.py`) implements the Double Take pattern: MQTT `frigate/events` → snapshot from **Frigate's API, never the camera** → identity pipeline → store + republish + webhooks. Dedupe is `Event.external_id` = the Frigate event id; `update` messages are rate-limited per event. Keep `handle_message` free of network/broker coupling — it takes raw bytes and an injectable snapshot fetcher, which is what makes it testable.
+- The recognition API is **shape-compatible with CompreFace v1** (recognize/subjects/faces, `x-api-key`) so Double Take can point at it. A "subject" = a labeled face Identity; unknown-bucket identities must never appear as subjects.
+- **A label without vectors is a name the system cannot see**: confirming a face proposal must enroll its embedding (`identity/enroll.py`) — the review endpoint does this inline, `siteloom train enroll` sweeps backlogs. If recognition returns empty subjects for a known person, unenrolled identities are the first suspect.
+- Embedded Qdrant is **one client per path per machine**: reuse an already-open VectorStore (see `train enroll`), never open a second in-process; across processes, stop the server first. VectorStore methods are lock-serialized because FastAPI serves from a threadpool.
+- MQTT/webhook publishing must degrade to a log line when the broker/endpoint is down — never let telemetry break ingestion (NFR1). Publish identity results once per event+identity pairing, not per frame.
+
 ### Long-running operations (`siteloom/progress.py`)
 
 Any operation that can run for minutes must go through `ProgressReporter` — it is the single place that provides all three things such a job needs. Wrap the work in `with ProgressReporter(...) as p:` and each stage in `with p.phase(name, total=n):`, calling `p.advance(**counters)` per item and `p.check_interrupt()` right after each commit.

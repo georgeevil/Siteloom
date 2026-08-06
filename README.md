@@ -193,6 +193,30 @@ site YAML and use each camera's Protect id as its `source`.
   confirm/reject/rename, and a history of training runs.
 - **Noise** — sustained loud episodes (dBFS threshold + minimum duration).
 
+## Integrations: Frigate · MQTT · Double Take · CompreFace
+
+Siteloom slots into the self-hosted NVR ecosystem from either side — see
+[docs/integrations.md](docs/integrations.md) for the full wiring:
+
+- **`siteloom frigate`** consumes an existing Frigate install's MQTT
+  events, fetches the triggering snapshot from Frigate's API, and runs
+  face/vehicle recognition on it — the Double Take + CompreFace role,
+  with results stored in Siteloom, republished on `siteloom/identity`,
+  and fired to webhooks.
+- **CompreFace-compatible REST API** (`/api/v1/recognition/...`) on the
+  web server, so Double Take or any CompreFace client can use Siteloom
+  as its recognizer — recognize, subjects, and face enrollment, with
+  `x-api-key` auth.
+- **MQTT publishing** from Siteloom's own camera ingest
+  (`siteloom/events`, `siteloom/identity`) for Home Assistant-style
+  automations, and **webhooks** on `identity.match` /
+  `identity.unknown` / `identity.new_plate`.
+
+All of it shares the one identity collection: a face verified from your
+photo archive is recognized on a Frigate camera and through the REST API
+alike. `siteloom train enroll` sweeps verified review decisions into
+that collection (confirmations in the UI enroll automatically).
+
 ## Audio & privacy posture
 
 Audio ships with **loud-duration tracking only** — decibel level sustained

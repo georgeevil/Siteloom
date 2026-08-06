@@ -34,6 +34,9 @@ class Resolution:
     identity: Identity
     similarity: float
     is_new: bool
+    # An existing identity, previously plate-less, just gained a plate
+    # from OCR on this pass (PRD §6.4's "visual match learns its plate").
+    learned_plate: bool = False
 
 
 class IdentityResolver:
@@ -77,6 +80,7 @@ class IdentityResolver:
         # Update stats + evidence.
         identity.last_seen = max(identity.last_seen, timestamp)
         identity.appearance_count += 1
+        learned_plate = bool(plate and not identity.plate and not is_new)
         if plate and not identity.plate:
             identity.plate = plate  # visual match just learned its plate
         if crop_path and not identity.best_crop_path:
@@ -85,7 +89,12 @@ class IdentityResolver:
             self.vectors.add(identifier_key, arr, identity.id)
             identity.vector_count += 1
 
-        return Resolution(identity=identity, similarity=similarity, is_new=is_new)
+        return Resolution(
+            identity=identity,
+            similarity=similarity,
+            is_new=is_new,
+            learned_plate=learned_plate,
+        )
 
     def _match_plate(
         self, session: Session, identifier_key: str, plate: str | None

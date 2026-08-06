@@ -624,17 +624,39 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             ),
         )
 
+    # Enrollment resources, built lazily: the embedder and vector store
+    # are only loaded once someone actually confirms a proposal.
+    _enroll_state: dict = {}
+
+    def _enroll_resources():
+        if not _enroll_state:
+            from siteloom.identity import VectorStore
+            from siteloom.identity.embedders import FaceEmbedder
+
+            _enroll_state["vectors"] = VectorStore(config.identity.vector_db_path)
+            _enroll_state["embedder"] = FaceEmbedder(
+                projection_path=config.identity.face_projection_path or None
+            )
+        return _enroll_state["vectors"], _enroll_state["embedder"]
+
     @app.post("/api/training/review")
     async def review_proposals(request: Request):
         """Bulk confirm / reject / rename face proposals.
 
-        Confirming also enrolls the face into the identity store, so a
-        person verified here is recognized on live cameras immediately —
-        that is the whole point of doing this against a photo archive.
+        Confirming also enrolls the face's embedding into the identity
+        store, so a person verified here is recognized on live cameras,
+        by the Frigate consumer, and via the recognition API immediately
+        — a label without vectors is a name the system cannot see.
         """
+        from siteloom.identity.enroll import enroll_annotation, identity_for_label
+
         body = await request.json()
         decisions = body.get("decisions", [])
-        confirmed = rejected = 0
+        confirmed = rejected = enrolled = 0
+        max_vectors = 20
+        face_cfg = config.identity.identifiers.get("face")
+        if face_cfg:
+            max_vectors = face_cfg.max_vectors_per_identity
         with Session() as session:
             for decision in decisions:
                 annotation = session.get(Annotation, int(decision["id"]))
@@ -648,8 +670,14 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     annotation.proposed_name = name
                     annotation.verified = True
                     annotation.rejected = False
-                    annotation.identity_id = _identity_for_name(session, name).id
+                    annotation.enrolled = False  # (re)enroll under this name
+                    annotation.identity_id = identity_for_label(session, name).id
                     confirmed += 1
+                    vectors, embedder = _enroll_resources()
+                    if enroll_annotation(
+                        session, annotation, vectors, embedder, max_vectors
+                    ):
+                        enrolled += 1
                 elif action == "reject":
                     annotation.rejected = True
                     annotation.verified = False
@@ -659,24 +687,13 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     annotation.rejected = False
             session.commit()
         return JSONResponse(
-            {"ok": True, "confirmed": confirmed, "rejected": rejected}
+            {
+                "ok": True,
+                "confirmed": confirmed,
+                "rejected": rejected,
+                "enrolled": enrolled,
+            }
         )
-
-    def _identity_for_name(session, name: str) -> Identity:
-        identity = session.scalar(
-            select(Identity).filter_by(identifier_key="face", label=name)
-        )
-        if identity is None:
-            identity = Identity(
-                identifier_key="face",
-                class_name="person",
-                label=name,
-                first_seen=_now(),
-                last_seen=_now(),
-            )
-            session.add(identity)
-            session.flush()
-        return identity
 
 
 def _persist_config(config) -> str | None:

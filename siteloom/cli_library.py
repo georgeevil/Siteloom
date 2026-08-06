@@ -683,6 +683,56 @@ def train_status(config: Path = CONFIG_OPT):
         typer.echo(f"  {mark} {n:4d}  {person}")
 
 
+@train_app.command("enroll")
+def train_enroll(config: Path = CONFIG_OPT, quiet: bool = QUIET_OPT):
+    """Enroll verified faces into the recognition collection.
+
+    Sweeps every verified, not-yet-enrolled face annotation and adds its
+    embedding under the labeled identity. Run once after upgrading (or
+    after bulk-verifying) so confirmed people are recognizable live and
+    via the CompreFace-compatible API. Idempotent.
+    """
+    cfg, Session, indexer = _setup(config)
+    from siteloom.identity import VectorStore
+    from siteloom.identity.embedders import FaceEmbedder
+    from siteloom.identity.enroll import enroll_verified
+    from siteloom.progress import ProgressReporter
+
+    face_cfg = cfg.identity.identifiers.get("face")
+    max_vectors = face_cfg.max_vectors_per_identity if face_cfg else 20
+    # Embedded Qdrant allows ONE client per path per machine — reuse the
+    # store the shared bootstrap already opened rather than opening a
+    # second one and deadlocking ourselves.
+    if indexer.resolver is not None:
+        vectors = indexer.resolver.vectors
+        owns_vectors = False
+    else:
+        vectors = VectorStore(cfg.identity.vector_db_path)
+        owns_vectors = True
+    embedder = FaceEmbedder(
+        projection_path=cfg.identity.face_projection_path or None
+    )
+    try:
+        with ProgressReporter(
+            Session,
+            "face-enroll",
+            resume_command=f"siteloom train enroll --config {config}",
+            enabled=not quiet,
+        ) as progress:
+            with Session() as session:
+                with progress.phase("Enrolling verified faces"):
+                    stats = enroll_verified(
+                        session, vectors, embedder, max_vectors, progress=progress
+                    )
+    finally:
+        if owns_vectors:
+            vectors.close()
+    typer.echo(
+        f"enrolled {stats.enrolled} embeddings across {stats.identities} people "
+        f"({stats.skipped_cap} skipped: per-person cap reached or unusable crop)"
+    )
+
+
 @train_app.command("face")
 def train_face(
     config: Path = CONFIG_OPT,

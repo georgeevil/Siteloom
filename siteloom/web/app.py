@@ -33,7 +33,7 @@ from siteloom.store import (
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
-def create_app(config: SiteConfig) -> FastAPI:
+def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     app = FastAPI(title="Siteloom")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     engine = make_engine(config.storage.db_url)
@@ -252,6 +252,14 @@ def create_app(config: SiteConfig) -> FastAPI:
     from siteloom.web import library_routes
 
     library_routes.register(app, templates, Session, config)
+
+    if config.integrations.recognition_api.enabled:
+        from siteloom.web import recognition_api
+
+        service = recognition_service or recognition_api.RecognitionService(
+            config, Session
+        )
+        recognition_api.register(app, config, service)
 
     @app.get("/media/{path:path}")
     def media(path: str):

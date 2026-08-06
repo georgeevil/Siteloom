@@ -38,6 +38,9 @@ class Event(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id"), index=True)
     track_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Id of the originating event in an external system (Frigate event id)
+    # — the dedupe key when consuming other NVRs' event streams.
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     class_name: Mapped[str] = mapped_column(String, index=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime, index=True)
     last_seen: Mapped[datetime] = mapped_column(DateTime, index=True)
@@ -271,6 +274,9 @@ class Annotation(Base):
     # Explicitly rejected by a reviewer — kept as a negative example
     # rather than deleted, so the same bad proposal isn't re-suggested.
     rejected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # This annotation's embedding has been added to the identity's vector
+    # collection — the idempotency marker for enrollment sweeps.
+    enrolled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
 

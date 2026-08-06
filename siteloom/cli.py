@@ -114,6 +114,60 @@ def sync_bookings(config: Path = CONFIG_OPT):
 
 
 @app.command()
+def frigate(config: Path = CONFIG_OPT):
+    """Consume Frigate events over MQTT and run recognition on them.
+
+    Frigate keeps doing RTSP ingest + object detection; Siteloom plays
+    the Double Take + CompreFace role: snapshot -> face/vehicle identity
+    against the shared collection, results to siteloom/identity on MQTT
+    and to configured webhooks.
+    """
+    from siteloom.config import load_config
+    from siteloom.identity import IdentityResolver, VectorStore
+    from siteloom.ingest import build_dispatcher
+    from siteloom.integrations import MqttPublisher, WebhookNotifier
+    from siteloom.integrations.frigate import FrigateConsumer
+    from siteloom.progress import setup_logging
+    from siteloom.store import get_session, init_db, make_engine
+
+    setup_logging()
+    cfg = load_config(config)
+    if not cfg.integrations.frigate.enabled:
+        typer.echo(
+            "frigate integration is disabled — set integrations.frigate.enabled: "
+            "true (and integrations.mqtt) in your config",
+            err=True,
+        )
+        raise typer.Exit(1)
+    engine = make_engine(cfg.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    dispatcher = build_dispatcher(cfg)
+    resolver = None
+    if cfg.identity.enabled:
+        resolver = IdentityResolver(
+            cfg.identity, VectorStore(cfg.identity.vector_db_path)
+        )
+    consumer = FrigateConsumer(
+        cfg,
+        Session,
+        dispatcher,
+        resolver,
+        publisher=MqttPublisher(cfg.integrations.mqtt),
+        notifier=WebhookNotifier(cfg.integrations.webhooks),
+    )
+    try:
+        consumer.run()
+    except KeyboardInterrupt:
+        stats = consumer.stats
+        typer.echo(
+            f"\nstopped: {stats.received} received, {stats.processed} processed, "
+            f"{stats.identities} identities, {stats.skipped} skipped "
+            f"({stats.by_reason}), {stats.errors} errors"
+        )
+
+
+@app.command()
 def cameras(config: Path = CONFIG_OPT):
     """List streams visible to each configured adapter (e.g. UniFi camera ids)."""
     from siteloom.config import load_config

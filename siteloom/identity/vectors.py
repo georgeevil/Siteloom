@@ -12,13 +12,32 @@ what lets new classes appear at runtime without a schema migration.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 
 import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
+
+
+def _locked(method):
+    """Serialize access to the embedded engine.
+
+    Qdrant local mode is not thread-safe; a FastAPI threadpool (the
+    recognition API) or any future worker threads would corrupt it.
+    Combined with force_disable_check_same_thread below, a single lock
+    makes cross-thread use safe — contention is irrelevant at PoC scale.
+    """
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 @dataclass
@@ -39,8 +58,12 @@ class LabeledHit:
 class VectorStore:
     def __init__(self, path: str | Path):
         Path(path).mkdir(parents=True, exist_ok=True)
-        self._client = QdrantClient(path=str(path))
+        self._lock = threading.RLock()
+        self._client = QdrantClient(
+            path=str(path), force_disable_check_same_thread=True
+        )
 
+    @_locked
     def ensure_collection(self, name: str, dim: int) -> None:
         if not self._client.collection_exists(name):
             self._client.create_collection(
@@ -48,6 +71,7 @@ class VectorStore:
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
 
+    @_locked
     def add(self, collection: str, vector: np.ndarray, identity_id: int) -> None:
         self.ensure_collection(collection, dim=int(vector.shape[0]))
         self._client.upsert(
@@ -61,6 +85,7 @@ class VectorStore:
             ],
         )
 
+    @_locked
     def search(self, collection: str, vector: np.ndarray, limit: int = 5) -> list[Hit]:
         if not self._client.collection_exists(collection):
             return []
@@ -74,6 +99,7 @@ class VectorStore:
             for p in res.points
         ]
 
+    @_locked
     def best_match(self, collection: str, vector: np.ndarray) -> Hit | None:
         """Best identity by max similarity over its stored embeddings."""
         hits = self.search(collection, vector, limit=5)
@@ -81,6 +107,7 @@ class VectorStore:
 
     # -- payload-keyed API (custom classes) --------------------------------
 
+    @_locked
     def add_labeled(
         self, collection: str, vector: np.ndarray, payload: dict
     ) -> None:
@@ -96,6 +123,7 @@ class VectorStore:
             ],
         )
 
+    @_locked
     def search_labeled(
         self, collection: str, vector: np.ndarray, limit: int = 5
     ) -> list[LabeledHit]:
@@ -111,10 +139,12 @@ class VectorStore:
             for p in res.points
         ]
 
+    @_locked
     def drop(self, collection: str) -> None:
         if self._client.collection_exists(collection):
             self._client.delete_collection(collection)
 
+    @_locked
     def delete_identity(self, collection: str, identity_id: int) -> None:
         """Remove every vector belonging to an identity — used when
         identities are merged or split."""
@@ -133,6 +163,7 @@ class VectorStore:
             ),
         )
 
+    @_locked
     def reassign_identity(self, collection: str, old_id: int, new_id: int) -> int:
         """Move all of one identity's vectors to another (merge)."""
         if not self._client.collection_exists(collection):
@@ -157,5 +188,6 @@ class VectorStore:
         )
         return len(points)
 
+    @_locked
     def close(self) -> None:
         self._client.close()

@@ -191,6 +191,74 @@ class TrainingConfig(BaseModel):
     detector_imgsz: int = 640
 
 
+class MqttConfig(BaseModel):
+    """MQTT connection, used both to publish Siteloom events and to
+    consume other systems' (Frigate's) event streams."""
+
+    enabled: bool = False
+    host: str = "localhost"
+    port: int = 1883
+    username: str = ""
+    password: str = ""
+    client_id: str = "siteloom"
+    # Root for published topics: <base_topic>/events, <base_topic>/identity.
+    base_topic: str = "siteloom"
+
+
+class FrigateConfig(BaseModel):
+    """Consume an existing Frigate install's events.
+
+    Frigate keeps doing what it is good at (RTSP ingest, motion gating,
+    first-pass object detection); Siteloom takes over the recognition
+    layer — the role Double Take + CompreFace play in that stack.
+    """
+
+    enabled: bool = False
+    # Frigate's HTTP API, used to fetch event snapshots.
+    api_url: str = "http://localhost:5000"
+    mqtt_topic: str = "frigate/events"
+    # Only these Frigate labels are processed (empty = all).
+    labels: list[str] = ["person", "car", "truck", "motorcycle", "bus"]
+    # Only these cameras (empty = all).
+    cameras: list[str] = []
+    min_score: float = 0.6
+    # Frigate fires "update" events as a tracked object improves; process
+    # at most one snapshot per event this many seconds apart.
+    update_interval_s: float = 10.0
+
+
+class WebhookConfig(BaseModel):
+    url: str
+    # Which occurrences fire this hook: identity.match, identity.unknown,
+    # identity.new_plate, noise.episode.
+    events: list[str] = ["identity.match", "identity.unknown"]
+    # Optional bearer token sent as Authorization: Bearer <token>.
+    token: str = ""
+
+
+class RecognitionApiConfig(BaseModel):
+    """CompreFace-compatible face recognition REST API.
+
+    Lets tools that already speak CompreFace (Double Take most notably)
+    use Siteloom as their recognizer — same face collection the cameras
+    and the photo backfill share.
+    """
+
+    enabled: bool = True
+    # If set, requests must carry it in the x-api-key header (the header
+    # CompreFace clients already send).
+    api_key: str = ""
+    # Minimum face-detector confidence for a box to be reported.
+    det_prob_threshold: float = 0.7
+
+
+class IntegrationsConfig(BaseModel):
+    mqtt: MqttConfig = MqttConfig()
+    frigate: FrigateConfig = FrigateConfig()
+    recognition_api: RecognitionApiConfig = RecognitionApiConfig()
+    webhooks: list[WebhookConfig] = []
+
+
 class StorageConfig(BaseModel):
     db_url: str = "sqlite:///siteloom.db"
     # Directory where detection crops / annotated frames are written.
@@ -211,6 +279,7 @@ class SiteConfig(BaseModel):
     guests: GuestConfig = GuestConfig()
     library: LibraryConfig = LibraryConfig()
     training: TrainingConfig = TrainingConfig()
+    integrations: IntegrationsConfig = IntegrationsConfig()
     storage: StorageConfig = StorageConfig()
 
 
