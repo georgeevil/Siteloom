@@ -1,0 +1,215 @@
+- generic [active] [ref=f9e1]:
+  - complementary [ref=f9e2]:
+    - generic [ref=f9e3]:
+      - generic [ref=f9e14]: Siteloom
+      - generic [ref=f9e15]: poc
+    - button "Harbour Point" [ref=f9e16]
+    - navigation [ref=f9e19]:
+      - link "EV Events" [ref=f9e20] [cursor=pointer]:
+        - /url: /
+        - generic [ref=f9e21]: EV
+        - generic [ref=f9e22]: Events
+      - link "MD Media library" [ref=f9e23] [cursor=pointer]:
+        - /url: /library
+        - generic [ref=f9e24]: MD
+        - generic [ref=f9e25]: Media library
+      - link "ID Identities" [ref=f9e26] [cursor=pointer]:
+        - /url: /identities
+        - generic [ref=f9e27]: ID
+        - generic [ref=f9e28]: Identities
+      - link "CL Classes" [ref=f9e29] [cursor=pointer]:
+        - /url: /classes
+        - generic [ref=f9e30]: CL
+        - generic [ref=f9e31]: Classes
+      - link "TR Training data" [ref=f9e32] [cursor=pointer]:
+        - /url: /training
+        - generic [ref=f9e33]: TR
+        - generic [ref=f9e34]: Training data
+      - link "JB Jobs" [ref=f9e35] [cursor=pointer]:
+        - /url: /jobs
+        - generic [ref=f9e36]: JB
+        - generic [ref=f9e37]: Jobs
+      - link "NO Noise" [ref=f9e38] [cursor=pointer]:
+        - /url: /noise
+        - generic [ref=f9e39]: "NO"
+        - generic [ref=f9e40]: Noise
+    - generic [ref=f9e41]:
+      - generic [ref=f9e42]: OP
+      - generic [ref=f9e43]:
+        - generic [ref=f9e44]: Operator
+        - generic [ref=f9e45]: On duty
+  - generic [ref=f9e46]:
+    - banner [ref=f9e47]:
+      - generic [ref=f9e48]:
+        - heading "Events" [level=1] [ref=f9e49]
+        - generic [ref=f9e50]: triage · Harbour Point
+      - generic [ref=f9e51]:
+        - searchbox "Search" [ref=f9e52]
+        - generic [ref=f9e53]: 14:47:09
+    - main [ref=f9e54]:
+      - generic [ref=f9e55]:
+        - link "Needs review" [ref=f9e56] [cursor=pointer]:
+          - /url: /?needs_review=1
+        - link "Unmatched" [ref=f9e57] [cursor=pointer]:
+          - /url: /?unmatched=1
+        - link "People" [ref=f9e59] [cursor=pointer]:
+          - /url: /?kind=people
+        - link "Vehicles" [ref=f9e60] [cursor=pointer]:
+          - /url: /?kind=vehicles
+        - link "Other" [ref=f9e61] [cursor=pointer]:
+          - /url: /?kind=other
+        - group [ref=f9e62]:
+          - generic "More filters" [ref=f9e63] [cursor=pointer]
+          - option "All cameras" [selected]
+          - option "North Gate"
+          - option "Lobby"
+          - option "Server Room"
+          - option "Perimeter West"
+          - option "South Gate"
+          - option "All classes" [selected]
+          - option "car"
+          - option "dog"
+          - option "person"
+        - generic [ref=f9e64]: 8 of 8 events
+      - generic [ref=f9e65]:
+        - generic [ref=f9e66]:
+          - generic [ref=f9e67]:
+            - generic [ref=f9e68]: Time
+            - generic [ref=f9e69]: Detection
+            - generic [ref=f9e70]: Camera
+            - generic [ref=f9e71]: Identity
+            - generic [ref=f9e72]: Conf
+            - generic [ref=f9e73]: Status
+          - link "08:47:55 car 8 det · guest Lobby unknown-vehicle-4 0.95 cleared" [ref=f9e74] [cursor=pointer]:
+            - /url: /?selected=7
+            - generic [ref=f9e75]: 08:47:55
+            - generic [ref=f9e78]:
+              - generic [ref=f9e79]: car
+              - generic [ref=f9e80]: 8 det · guest
+            - generic [ref=f9e81]: Lobby
+            - generic [ref=f9e82]: unknown-vehicle-4
+            - generic [ref=f9e83]: "0.95"
+            - generic [ref=f9e87]: cleared
+          - link "08:38:55 car 14 det North Gate Ardent Freight 0.91 new" [ref=f9e89] [cursor=pointer]:
+            - /url: /?selected=1
+            - generic [ref=f9e90]: 08:38:55
+            - generic [ref=f9e93]:
+              - generic [ref=f9e94]: car
+              - generic [ref=f9e95]: 14 det
+            - generic [ref=f9e96]: North Gate
+            - generic [ref=f9e97]: Ardent Freight
+            - generic [ref=f9e98]: "0.91"
+            - generic [ref=f9e102]: new
+          - link "08:31:55 person 9 det Lobby unmatched 0.74 flagged" [ref=f9e104] [cursor=pointer]:
+            - /url: /?selected=2
+            - generic [ref=f9e105]: 08:31:55
+            - generic [ref=f9e108]:
+              - generic [ref=f9e109]: person
+              - generic [ref=f9e110]: 9 det
+            - generic [ref=f9e111]: Lobby
+            - generic [ref=f9e112]: unmatched
+            - generic [ref=f9e113]: "0.74"
+            - generic [ref=f9e117]: flagged
+          - link "08:20:55 person 21 det Server Room Diego Ruiz 0.88 reviewing" [ref=f9e119] [cursor=pointer]:
+            - /url: /?selected=3
+            - generic [ref=f9e120]: 08:20:55
+            - generic [ref=f9e123]:
+              - generic [ref=f9e124]: person
+              - generic [ref=f9e125]: 21 det
+            - generic [ref=f9e126]: Server Room
+            - generic [ref=f9e127]: Diego Ruiz
+            - generic [ref=f9e128]: "0.88"
+            - generic [ref=f9e132]: reviewing
+          - link "07:58:55 person 6 det Perimeter West unmatched 0.69 flagged" [ref=f9e134] [cursor=pointer]:
+            - /url: /?selected=4
+            - generic [ref=f9e135]: 07:58:55
+            - generic [ref=f9e138]:
+              - generic [ref=f9e139]: person
+              - generic [ref=f9e140]: 6 det
+            - generic [ref=f9e141]: Perimeter West
+            - generic [ref=f9e142]: unmatched
+            - generic [ref=f9e143]: "0.69"
+            - generic [ref=f9e147]: flagged
+          - link "07:42:55 dog 3 det South Gate unmatched 0.55 new" [ref=f9e149] [cursor=pointer]:
+            - /url: /?selected=8
+            - generic [ref=f9e150]: 07:42:55
+            - generic [ref=f9e153]:
+              - generic [ref=f9e154]: dog
+              - generic [ref=f9e155]: 3 det
+            - generic [ref=f9e156]: South Gate
+            - generic [ref=f9e157]: unmatched
+            - generic [ref=f9e158]: "0.55"
+            - generic [ref=f9e162]: new
+          - link "07:29:55 person 4 det South Gate unmatched 0.82 new" [ref=f9e164] [cursor=pointer]:
+            - /url: /?selected=5
+            - generic [ref=f9e165]: 07:29:55
+            - generic [ref=f9e168]:
+              - generic [ref=f9e169]: person
+              - generic [ref=f9e170]: 4 det
+            - generic [ref=f9e171]: South Gate
+            - generic [ref=f9e172]: unmatched
+            - generic [ref=f9e173]: "0.82"
+            - generic [ref=f9e177]: new
+          - link "07:12:55 person 11 det North Gate unknown-face-3 0.71 flagged" [ref=f9e179] [cursor=pointer]:
+            - /url: /?selected=6
+            - generic [ref=f9e180]: 07:12:55
+            - generic [ref=f9e183]:
+              - generic [ref=f9e184]: person
+              - generic [ref=f9e185]: 11 det
+            - generic [ref=f9e186]: North Gate
+            - generic [ref=f9e187]: unknown-face-3
+            - generic [ref=f9e188]: "0.71"
+            - generic [ref=f9e192]: flagged
+        - complementary [ref=f9e195]:
+          - generic [ref=f9e196]:
+            - generic [ref=f9e197]:
+              - generic [ref=f9e198]:
+                - generic [ref=f9e200]: Server Room
+                - generic [ref=f9e201]: 08:20:55
+              - link "✕" [ref=f9e202] [cursor=pointer]:
+                - /url: /
+            - generic [ref=f9e203]:
+              - heading "person" [level=2] [ref=f9e204]
+              - generic [ref=f9e205]: reviewing
+            - paragraph [ref=f9e206]: 21 detections over 8s in Front of house.
+            - generic [ref=f9e207]:
+              - generic [ref=f9e208]:
+                - term [ref=f9e209]: Event
+                - definition [ref=f9e210]: "#3"
+              - generic [ref=f9e211]:
+                - term [ref=f9e212]: Track
+                - definition [ref=f9e213]: "68"
+              - generic [ref=f9e214]:
+                - term [ref=f9e215]: Camera
+                - definition [ref=f9e216]: Server Room
+              - generic [ref=f9e217]:
+                - term [ref=f9e218]: Confidence
+                - definition [ref=f9e219]: "0.88"
+              - generic [ref=f9e220]:
+                - term [ref=f9e221]: First seen
+                - definition [ref=f9e222]: 2026-08-06 08:20:55
+              - generic [ref=f9e223]:
+                - term [ref=f9e224]: Last seen
+                - definition [ref=f9e225]: 2026-08-06 08:21:03
+              - generic [ref=f9e226]:
+                - term [ref=f9e227]: Zones
+                - definition [ref=f9e228]: Front of house
+              - generic [ref=f9e229]:
+                - term [ref=f9e230]: Guest window
+                - definition [ref=f9e231]: "no"
+            - generic [ref=f9e232]:
+              - heading "Linked identities" [level=3] [ref=f9e233]
+              - generic [ref=f9e234]:
+                - generic [ref=f9e236]:
+                  - generic [ref=f9e237]: Diego Ruiz
+                  - generic [ref=f9e238]: face · sim 0.88
+                  - generic [ref=f9e239]:
+                    - button "✓" [ref=f9e240] [cursor=pointer]
+                    - button "✗" [ref=f9e241] [cursor=pointer]
+                - link "Open" [ref=f9e242] [cursor=pointer]:
+                  - /url: /identities/2
+              - button "Mark missed identity" [ref=f9e244] [cursor=pointer]
+            - generic [ref=f9e245]:
+              - button "Clear event" [ref=f9e247] [cursor=pointer]
+              - link "Full detail" [ref=f9e248] [cursor=pointer]:
+                - /url: /events/3

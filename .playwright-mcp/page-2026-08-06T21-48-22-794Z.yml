@@ -1,0 +1,175 @@
+- generic [active] [ref=f12e1]:
+  - complementary [ref=f12e2]:
+    - generic [ref=f12e3]:
+      - generic [ref=f12e14]: Siteloom
+      - generic [ref=f12e15]: poc
+    - button "Harbour Point" [ref=f12e16]
+    - navigation [ref=f12e19]:
+      - link "EV Events" [ref=f12e20] [cursor=pointer]:
+        - /url: /
+        - generic [ref=f12e21]: EV
+        - generic [ref=f12e22]: Events
+      - link "MD Media library" [ref=f12e23] [cursor=pointer]:
+        - /url: /library
+        - generic [ref=f12e24]: MD
+        - generic [ref=f12e25]: Media library
+      - link "ID Identities" [ref=f12e26] [cursor=pointer]:
+        - /url: /identities
+        - generic [ref=f12e27]: ID
+        - generic [ref=f12e28]: Identities
+      - link "CL Classes" [ref=f12e29] [cursor=pointer]:
+        - /url: /classes
+        - generic [ref=f12e30]: CL
+        - generic [ref=f12e31]: Classes
+      - link "TR Training data" [ref=f12e32] [cursor=pointer]:
+        - /url: /training
+        - generic [ref=f12e33]: TR
+        - generic [ref=f12e34]: Training data
+      - link "JB Jobs" [ref=f12e35] [cursor=pointer]:
+        - /url: /jobs
+        - generic [ref=f12e36]: JB
+        - generic [ref=f12e37]: Jobs
+      - link "NO Noise" [ref=f12e38] [cursor=pointer]:
+        - /url: /noise
+        - generic [ref=f12e39]: "NO"
+        - generic [ref=f12e40]: Noise
+    - generic [ref=f12e41]:
+      - generic [ref=f12e42]: OP
+      - generic [ref=f12e43]:
+        - generic [ref=f12e44]: Operator
+        - generic [ref=f12e45]: On duty
+  - generic [ref=f12e46]:
+    - banner [ref=f12e47]:
+      - generic [ref=f12e48]:
+        - heading "Detection classes" [level=1] [ref=f12e49]
+        - generic [ref=f12e50]: yolo11n.pt · mps · conf 0.40
+      - generic [ref=f12e51]:
+        - searchbox "Search" [ref=f12e52]
+        - generic [ref=f12e53]: 14:48:22
+    - main [ref=f12e54]:
+      - generic [ref=f12e55]:
+        - heading "Detection classes" [level=2] [ref=f12e56]
+        - generic [ref=f12e57]: yolo11n.pt · mps · conf 0.40
+        - generic [ref=f12e58]:
+          - button "Save to config" [ref=f12e59] [cursor=pointer]
+          - button "New class" [ref=f12e60] [cursor=pointer]
+      - generic [ref=f12e61]:
+        - generic [ref=f12e62]:
+          - generic [ref=f12e63]: Class
+          - generic [ref=f12e64]: Samples
+          - generic [ref=f12e65]: Threshold
+          - generic [ref=f12e66]: Active
+        - generic [ref=f12e67]:
+          - generic [ref=f12e68]: person identified by face
+          - generic [ref=f12e71]: "0"
+          - generic [ref=f12e72]: "0.36"
+          - button "Track person" [pressed] [ref=f12e77] [cursor=pointer]
+        - generic [ref=f12e79]:
+          - generic [ref=f12e80]: car identified by vehicle
+          - generic [ref=f12e83]: "0"
+          - generic [ref=f12e84]: "0.82"
+          - button "Track car" [pressed] [ref=f12e89] [cursor=pointer]
+        - generic [ref=f12e91]:
+          - generic [ref=f12e92]: truck identified by vehicle
+          - generic [ref=f12e95]: "0"
+          - generic [ref=f12e96]: "0.82"
+          - button "Track truck" [pressed] [ref=f12e101] [cursor=pointer]
+        - generic [ref=f12e103]:
+          - generic [ref=f12e104]: bus identified by vehicle
+          - generic [ref=f12e107]: "0"
+          - generic [ref=f12e108]: "0.82"
+          - button "Track bus" [pressed] [ref=f12e113] [cursor=pointer]
+        - generic [ref=f12e115]:
+          - generic [ref=f12e116]: motorcycle identified by vehicle
+          - generic [ref=f12e119]: "0"
+          - generic [ref=f12e120]: "0.82"
+          - button "Track motorcycle" [pressed] [ref=f12e125] [cursor=pointer]
+        - generic [ref=f12e127]:
+          - generic [ref=f12e128]: bicycle generic identifier added on first sighting
+          - generic [ref=f12e131]: "0"
+          - generic [ref=f12e132]: —
+          - button "Track bicycle" [pressed] [ref=f12e135] [cursor=pointer]
+        - generic [ref=f12e137]:
+          - generic [ref=f12e138]: dog generic identifier added on first sighting
+          - generic [ref=f12e141]: "0"
+          - generic [ref=f12e142]: —
+          - button "Track dog" [pressed] [ref=f12e145] [cursor=pointer]
+        - generic [ref=f12e147]:
+          - generic [ref=f12e148]: cat generic identifier added on first sighting
+          - generic [ref=f12e151]: "0"
+          - generic [ref=f12e152]: —
+          - button "Track cat" [pressed] [ref=f12e155] [cursor=pointer]
+        - generic [ref=f12e157]:
+          - generic [ref=f12e158]: bird generic identifier added on first sighting
+          - generic [ref=f12e161]: "0"
+          - generic [ref=f12e162]: —
+          - button "Track bird" [pressed] [ref=f12e165] [cursor=pointer]
+        - generic [ref=f12e167]:
+          - generic [ref=f12e168]: boat generic identifier added on first sighting
+          - generic [ref=f12e171]: "0"
+          - generic [ref=f12e172]: —
+          - button "Track boat" [ref=f12e175] [cursor=pointer]
+        - generic [ref=f12e177]:
+          - generic [ref=f12e178]: horse generic identifier added on first sighting
+          - generic [ref=f12e181]: "0"
+          - generic [ref=f12e182]: —
+          - button "Track horse" [ref=f12e185] [cursor=pointer]
+        - generic [ref=f12e187]:
+          - generic [ref=f12e188]: sheep generic identifier added on first sighting
+          - generic [ref=f12e191]: "0"
+          - generic [ref=f12e192]: —
+          - button "Track sheep" [ref=f12e195] [cursor=pointer]
+        - generic [ref=f12e197]:
+          - generic [ref=f12e198]: cow generic identifier added on first sighting
+          - generic [ref=f12e201]: "0"
+          - generic [ref=f12e202]: —
+          - button "Track cow" [ref=f12e205] [cursor=pointer]
+        - generic [ref=f12e207]:
+          - generic [ref=f12e208]: backpack generic identifier added on first sighting
+          - generic [ref=f12e211]: "0"
+          - generic [ref=f12e212]: —
+          - button "Track backpack" [ref=f12e215] [cursor=pointer]
+        - generic [ref=f12e217]:
+          - generic [ref=f12e218]: umbrella generic identifier added on first sighting
+          - generic [ref=f12e221]: "0"
+          - generic [ref=f12e222]: —
+          - button "Track umbrella" [ref=f12e225] [cursor=pointer]
+        - generic [ref=f12e227]:
+          - generic [ref=f12e228]: handbag generic identifier added on first sighting
+          - generic [ref=f12e231]: "0"
+          - generic [ref=f12e232]: —
+          - button "Track handbag" [ref=f12e235] [cursor=pointer]
+        - generic [ref=f12e237]:
+          - generic [ref=f12e238]: suitcase generic identifier added on first sighting
+          - generic [ref=f12e241]: "0"
+          - generic [ref=f12e242]: —
+          - button "Track suitcase" [ref=f12e245] [cursor=pointer]
+        - generic [ref=f12e247]:
+          - generic [ref=f12e248]: bottle generic identifier added on first sighting
+          - generic [ref=f12e251]: "0"
+          - generic [ref=f12e252]: —
+          - button "Track bottle" [ref=f12e255] [cursor=pointer]
+        - generic [ref=f12e257]:
+          - generic [ref=f12e258]: cell phone generic identifier added on first sighting
+          - generic [ref=f12e261]: "0"
+          - generic [ref=f12e262]: —
+          - button "Track cell phone" [ref=f12e265] [cursor=pointer]
+        - generic [ref=f12e267]:
+          - generic [ref=f12e268]: laptop generic identifier added on first sighting
+          - generic [ref=f12e271]: "0"
+          - generic [ref=f12e272]: —
+          - button "Track laptop" [ref=f12e275] [cursor=pointer]
+      - generic [ref=f12e277]: Adding a class is the only step needed to start identifying it — an unconfigured class gets a generic appearance identifier and its own vector collection on first sighting.
+      - heading "Custom sub-classes" [level=3] [ref=f12e278]
+      - generic [ref=f12e279]:
+        - generic [ref=f12e280]:
+          - generic [ref=f12e281]: Class
+          - generic [ref=f12e282]: Examples
+          - generic [ref=f12e283]: Threshold
+        - generic [ref=f12e284]: None defined yet.
+      - generic [ref=f12e286]:
+        - text: Sub-classes are a k-nearest-neighbour vote over the appearance embeddings that already exist — there is no training run. A verified example counts immediately;
+        - code [ref=f12e287]: siteloom classes rebuild
+        - text: is only needed after the embedder itself changes.
+        - link "Open training data" [ref=f12e288] [cursor=pointer]:
+          - /url: /training?show=needs_review
