@@ -1,6 +1,7 @@
 from siteloom.store.db import get_session, init_db, make_engine
 from siteloom.store.models import (
     Annotation,
+    BackfillClip,
     Base,
     Booking,
     Camera,
@@ -22,6 +23,7 @@ from siteloom.store.models import (
 
 __all__ = [
     "Annotation",
+    "BackfillClip",
     "Base",
     "Booking",
     "Camera",

@@ -53,6 +53,10 @@ class UniFiConfig(BaseModel):
     port: int = 443
     username: str = ""
     password: str = ""
+    # Protect API key (Settings → Control Plane → Integrations). Optional:
+    # the username/password pair covers everything the adapter does today;
+    # the key additionally unlocks Protect's public API endpoints.
+    api_key: str = ""
     verify_ssl: bool = False
 
 

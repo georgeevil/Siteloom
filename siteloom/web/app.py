@@ -20,6 +20,8 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
+    StreamingResponse,
 )
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, not_, or_, select
@@ -845,6 +847,59 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             config, Session
         )
         recognition_api.register(app, config, service)
+
+    # -- live view ---------------------------------------------------------
+
+    from siteloom.web.live import LiveHub
+
+    hub = LiveHub(config)
+    app.router.on_shutdown.append(hub.stop)
+
+    @app.get("/live", response_class=HTMLResponse)
+    def live(request: Request):
+        return templates.TemplateResponse(
+            request,
+            "live.html",
+            {
+                "site_name": config.site_name or config.site_id,
+                "live_cameras": hub.cameras(),
+            },
+        )
+
+    @app.get("/live/{camera_id}/stream.mjpeg")
+    def live_stream(camera_id: str):
+        """Shared-reader MJPEG stream (see web/live.py).
+
+        Each open stream occupies one serving-threadpool thread for its
+        whole lifetime — fine for an operator console's worth of tiles,
+        not a public endpoint to embed forty times.
+        """
+        if not any(c.id == camera_id for c in hub.cameras()):
+            raise HTTPException(404)
+
+        def gen():
+            for jpeg in hub.frames(camera_id):
+                yield (
+                    b"--frame\r\nContent-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+                    + jpeg
+                    + b"\r\n"
+                )
+
+        return StreamingResponse(
+            gen(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/live/{camera_id}/snapshot.jpg")
+    def live_snapshot(camera_id: str):
+        if not any(c.id == camera_id for c in hub.cameras()):
+            raise HTTPException(404)
+        jpeg = hub.snapshot(camera_id)
+        if jpeg is None:
+            raise HTTPException(503, detail="camera stream unavailable")
+        return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/media/{path:path}")
     def media(path: str):

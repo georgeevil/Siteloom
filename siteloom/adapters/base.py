@@ -55,6 +55,12 @@ class FrameSource:
         self.source_id = source_id
         self._base_time = base_time
 
+    @property
+    def target(self) -> str:
+        """The URL or file path this source reads (e.g. for cleanup of
+        temporary clip files after processing)."""
+        return self._target
+
     #: Live-stream open/read timeouts. Without them a network drop leaves
     #: grab() blocked inside FFmpeg forever, so the ingest reconnect loop
     #: never regains control; with them the stream ends and the caller
