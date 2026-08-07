@@ -56,6 +56,69 @@ def identity_for_label(session: Session, name: str) -> Identity:
     return identity
 
 
+def embed_crop_file(embedder, crop_path: str | None):
+    """Re-embed a stored crop JPEG with the identifier's own embedder.
+
+    The stored crop is the SAME image live matching embedded ("one crop,
+    two jobs"), so re-embedding it lands in the same vector space. Face
+    embedders get a tight-crop fallback: a crop with no detectable face
+    inside it is embedded directly rather than losing the sample.
+    Returns None for a missing or hopeless crop.
+    """
+    if not crop_path:
+        return None
+    import cv2
+
+    crop = cv2.imread(crop_path)
+    if crop is None:
+        return None
+    embedding = embedder.embed(crop)
+    if embedding is None and hasattr(embedder, "_recognizer"):
+        try:
+            resized = cv2.resize(crop, (112, 112))
+            feature = (
+                embedder._recognizer.feature(resized).flatten().astype("float32")
+            )
+            embedding = embedder._finish(feature)
+        except (cv2.error, AttributeError):
+            embedding = None
+    return embedding
+
+
+def rebuild_gallery(
+    vectors, embedder, identity, annotations, max_vectors: int = 20
+) -> int:
+    """Drop an identity's vectors and re-embed them from stored crops.
+
+    The split path: after annotations change hands, both identities'
+    galleries must be rebuilt from what each now owns — a polluted
+    gallery keeps re-attracting the wrong subject, and a fresh identity
+    with no vectors is a name the system cannot see. Verified crops
+    enroll first so the cap keeps human-confirmed samples; rejected and
+    crop-less annotations contribute nothing. Every considered
+    annotation is marked enrolled — a hopeless crop fails identically
+    on every pass (same policy as enroll_annotation), and over-cap
+    crops must not be re-swept either.
+
+    Returns the number of vectors now in the gallery (also written to
+    identity.vector_count).
+    """
+    vectors.delete_identity(identity.identifier_key, identity.id)
+    count = 0
+    ordered = sorted(annotations, key=lambda a: (not a.verified, a.id))
+    for annotation in ordered:
+        if annotation.rejected or not annotation.crop_path:
+            continue
+        if count < max_vectors:
+            embedding = embed_crop_file(embedder, annotation.crop_path)
+            if embedding is not None:
+                vectors.add(identity.identifier_key, embedding, identity.id)
+                count += 1
+        annotation.enrolled = True
+    identity.vector_count = count
+    return count
+
+
 def enroll_annotation(
     session: Session,
     annotation: Annotation,
@@ -87,26 +150,7 @@ def enroll_annotation(
         annotation.enrolled = True
         return False
 
-    import cv2
-
-    crop = cv2.imread(annotation.crop_path)
-    embedding = None
-    if crop is not None:
-        faces = embedder.detect(crop)
-        if faces:
-            embedding = embedder.embed_face(crop, max(faces, key=lambda f: f[-1]))
-        else:
-            # Tight crop: embed directly rather than losing the sample.
-            try:
-                resized = cv2.resize(crop, (112, 112))
-                feature = (
-                    embedder._recognizer.feature(resized)
-                    .flatten()
-                    .astype("float32")
-                )
-                embedding = embedder._finish(feature)
-            except (cv2.error, AttributeError):
-                embedding = None
+    embedding = embed_crop_file(embedder, annotation.crop_path)
     if embedding is None:
         log.debug("could not embed %s", annotation.crop_path)
         annotation.enrolled = True  # do not retry a hopeless crop

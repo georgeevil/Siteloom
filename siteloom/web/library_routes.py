@@ -654,21 +654,98 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             session.commit()
         return RedirectResponse(f"/identities/{target_id}", status_code=303)
 
+    # Embedders for split's gallery rebuild, cached per algo: re-embedding
+    # a stored crop must use the same embedder live matching used ("one
+    # crop, two jobs"), and building one is expensive (model load).
+    _split_embedders: dict = {}
+
+    def _identifier_embedder(identifier_key: str):
+        from siteloom.identity import embedders
+
+        ident = config.identity.identifiers.get(identifier_key)
+        # Auto-added classes have no configured identifier; they are
+        # generic by construction (identity/registry.py).
+        algo = ident.algo if ident else "generic"
+        if algo not in _split_embedders:
+            _split_embedders[algo] = embedders.build_embedder(
+                algo,
+                device=config.detection.device,
+                projection_path=config.identity.face_projection_path or None,
+            )
+        return _split_embedders[algo]
+
     @app.post("/identities/{identity_id}/split")
     def split_identity(identity_id: int, annotation_ids: str = Form("")):
         """Pull selected annotations out into a fresh identity.
 
-        Used when a cluster has absorbed two people. The old identity's
-        vectors are dropped and rebuilt from what remains, because a
-        polluted gallery keeps re-attracting the wrong faces.
+        Used when a cluster has absorbed two people. Vectors move with
+        the annotations: the fresh identity is enrolled from the crops
+        it takes (a label without vectors is a name the system cannot
+        see), and the old identity's vectors are dropped and rebuilt
+        from what remains, because a polluted gallery keeps
+        re-attracting the wrong faces.
         """
-        ids = [int(v) for v in annotation_ids.split(",") if v.strip().isdigit()]
+        from siteloom.identity import get_shared_store
+        from siteloom.identity.enroll import rebuild_gallery
+
+        tokens = [t.strip() for t in annotation_ids.split(",") if t.strip()]
+        malformed = [t for t in tokens if not t.isdigit()]
+        if malformed:
+            # Distinct from the empty-selection case: silently dropping a
+            # bad token would split off a subset and report success.
+            raise HTTPException(
+                400,
+                "annotation ids must be integers, got: " + ", ".join(malformed),
+            )
+        # De-duplicate while keeping submission order.
+        ids = list(dict.fromkeys(int(t) for t in tokens))
         if not ids:
             raise HTTPException(400, "select at least one annotation to split off")
         with Session() as session:
             source = session.get(Identity, identity_id)
             if source is None:
                 raise HTTPException(404)
+            rows = {
+                a.id: a
+                for a in session.scalars(
+                    select(Annotation).filter(Annotation.id.in_(ids))
+                )
+            }
+            # Ownership guard: this endpoint only claims to split the
+            # identity in the URL. Naming the offending ids — rather than
+            # silently skipping them — is how the caller learns that less
+            # than asked (or nothing) would have moved.
+            wrong = [
+                str(i)
+                for i in ids
+                if i not in rows or rows[i].identity_id != identity_id
+            ]
+            if wrong:
+                raise HTTPException(
+                    400,
+                    "annotations do not belong to this identity: "
+                    + ", ".join(wrong),
+                )
+            # Reuse the process-wide client — embedded Qdrant allows ONE
+            # client per path per machine (see identity/vectors.py). A
+            # RuntimeError here means a different process holds the store;
+            # moving rows without moving vectors is exactly the bug this
+            # endpoint used to be, so refuse instead of splitting halfway.
+            try:
+                vectors = get_shared_store(config.identity.vector_db_path)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    503,
+                    "the vector store is locked by another process — a "
+                    "backfill, library index, or frigate job is likely "
+                    "running against the same database. Wait for it to "
+                    "finish (see /jobs), then retry the split. "
+                    f"({exc})",
+                )
+            embedder = _identifier_embedder(source.identifier_key)
+            ident_cfg = config.identity.identifiers.get(source.identifier_key)
+            max_vectors = ident_cfg.max_vectors_per_identity if ident_cfg else 20
+            moved = [rows[i] for i in ids]
             fresh = Identity(
                 identifier_key=source.identifier_key,
                 class_name=source.class_name,
@@ -677,11 +754,39 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             )
             session.add(fresh)
             session.flush()
-            session.execute(
-                Annotation.__table__.update()
-                .where(Annotation.id.in_(ids))
-                .values(identity_id=fresh.id)
-            )
+            for annotation in moved:
+                annotation.identity_id = fresh.id
+            # Enroll the fresh identity from the crops it now owns, then
+            # rebuild the source's gallery from what remains. Historical
+            # EventIdentity claims stay with the source: library
+            # annotations carry no link to camera events, so there is
+            # nothing to derive "this event was the split-off subject"
+            # from — the rebuilt galleries fix attribution going forward,
+            # and per-event verdicts (CLD-16) remain the tool for
+            # correcting individual past claims.
+            rebuild_gallery(vectors, embedder, fresh, moved, max_vectors)
+            remaining = session.scalars(
+                select(Annotation).filter(Annotation.identity_id == identity_id)
+            ).all()
+            rebuild_gallery(vectors, embedder, source, remaining, max_vectors)
+            # Appearance counts tally camera sightings, which cannot be
+            # apportioned from library crops; count the moved crops as the
+            # new identity's appearances and deduct them from the source
+            # so the pair still sums to something sensible.
+            fresh.appearance_count = len(moved)
+            source.appearance_count = max(source.appearance_count - len(moved), 0)
+            moved_paths = {a.crop_path for a in moved if a.crop_path}
+            if source.best_crop_path and source.best_crop_path in moved_paths:
+                # The source handed its face to the new identity; pick it
+                # a new thumbnail from what it kept.
+                fresh.best_crop_path = source.best_crop_path
+                source.best_crop_path = next(
+                    (a.crop_path for a in remaining if a.crop_path), None
+                )
+            else:
+                fresh.best_crop_path = next(
+                    (a.crop_path for a in moved if a.crop_path), None
+                )
             session.commit()
             new_id = fresh.id
         return RedirectResponse(
