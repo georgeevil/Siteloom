@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -877,6 +877,35 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             "noise.html",
             {"site_name": config.site_name or config.site_id, "noise_events": rows},
         )
+
+    @app.get("/stats", response_class=HTMLResponse)
+    def stats(request: Request, days: int = Query(1, ge=1, le=90)):
+        """Accuracy readout over a window (CLD-17).
+
+        Defaults to one day because the question this answers is "how did
+        last night's soak go" — a lifetime average buries the run you are
+        actually trying to judge.
+        """
+        from siteloom import stats as stats_mod
+
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+        thresholds = {
+            key: ident.threshold
+            for key, ident in config.identity.identifiers.items()
+        }
+        with Session() as session:
+            context = {
+                "site_name": config.site_name or config.site_id,
+                "days": days,
+                "identifiers": stats_mod.identifier_stats(session, since=since),
+                "cameras": stats_mod.camera_stats(session, since=since),
+                "coverage": stats_mod.review_coverage(session, since=since),
+                "histograms": stats_mod.similarity_histograms(
+                    session, thresholds, since=since
+                ),
+                "thresholds": thresholds,
+            }
+        return templates.TemplateResponse(request, "stats.html", context)
 
     from siteloom.web import library_routes
 
