@@ -20,7 +20,11 @@ from siteloom.config import IdentityConfig, SiteConfig, StorageConfig
 from siteloom.identity import VectorStore
 from siteloom.store import AuditLog, Identity, get_session, init_db, make_engine
 from siteloom.web.app import create_app
-from siteloom.web.recognition_api import RecognitionService
+from siteloom.web.recognition_api import (
+    MAX_UPLOAD_BYTES,
+    RateLimiter,
+    RecognitionService,
+)
 
 TS = datetime(2026, 8, 5, 12, 0)
 
@@ -267,6 +271,65 @@ def test_oversized_upload_is_413(client):
     blob = b"\0" * (10 * 1024 * 1024 + 1)
     assert enroll(client, "Ann", blob).status_code == 413
     assert recognize(client, blob).status_code == 413
+
+
+def test_oversized_content_length_rejected_before_the_body(client):
+    """A declared oversize body is refused without the multipart parser
+    ever running — the only check that happens before the spool."""
+    r = client.post(
+        "/api/v1/recognition/recognize",
+        headers={
+            "content-type": "multipart/form-data; boundary=x",
+            "content-length": str(MAX_UPLOAD_BYTES + 1),
+        },
+        content=b"",  # never parsed: the header alone decides
+    )
+    assert r.status_code == 413
+    # A garbage Content-Length must not 500 the route; the byte count
+    # stays the real gate.
+    ok = client.post(
+        "/api/v1/recognition/recognize",
+        headers={"content-length": "not-a-number"},
+        files={"file": ("f.jpg", io.BytesIO(photo("ann")), "image/jpeg")},
+    )
+    assert ok.status_code == 200
+
+
+def test_rate_limiter_does_not_grow_without_bound():
+    """An attacker rotating source addresses must not be able to grow
+    the tracked set forever — that turns the abuse defence into a slow
+    OOM (the CLD-66 bug shape)."""
+    limiter = RateLimiter(per_minute=60)
+    for i in range(5000):
+        assert limiter.allow(f"10.0.{i // 256}.{i % 256}", now=1.0)
+    assert limiter.tracked_ips == 5000  # all inside one window, still live
+
+    # One request a full window later: the sweep drops every address
+    # whose last hit fell out of the window.
+    assert limiter.allow("10.9.9.9", now=1.0 + 61.0)
+    assert limiter.tracked_ips == 1
+
+    # Repeated rotation across many windows stays bounded rather than
+    # accumulating one entry per address ever seen.
+    for window in range(20):
+        base = 100.0 + window * 61.0
+        for i in range(100):
+            limiter.allow(f"192.168.{window}.{i}", now=base)
+    assert limiter.tracked_ips <= 200
+
+
+def test_rate_limiter_still_counts_a_returning_client():
+    # The sweep must not become an amnesty: a client inside its window
+    # is still held to the budget.
+    limiter = RateLimiter(per_minute=3)
+    assert [limiter.allow("1.2.3.4", now=1000.0 + i) for i in range(4)] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    # Once the window has passed, the same client is served again.
+    assert limiter.allow("1.2.3.4", now=1000.0 + 61.0) is True
 
 
 def test_rate_limit_trips_but_probes_survive(tmp_path):

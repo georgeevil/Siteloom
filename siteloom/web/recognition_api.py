@@ -43,29 +43,43 @@ from siteloom.store import AuditLog, Identity
 
 log = logging.getLogger(__name__)
 
-#: Hard cap on one upload, enforced on the bytes actually read — never
-#: on Content-Length, which is client-supplied and absent when chunked.
+#: Hard cap on one upload. Enforced on the bytes actually read; a
+#: Content-Length over the cap is turned away earlier as an optimization
+#: only, since that header is client-supplied and absent when chunked.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+WINDOW_S = 60.0
 
 
 class RateLimiter:
-    """Sliding-minute request budget per client IP.
+    """Sliding-window request budget per client IP.
 
     Lock-serialized because FastAPI serves sync endpoints from a
     threadpool (same reasoning as VectorStore's locking).
+
+    Memory is bounded by the sweep, not by the per-IP eviction: draining
+    a deque only helps for an IP that comes back, and the traffic a rate
+    limiter attracts is precisely the kind that rotates source addresses
+    and never returns. Without the sweep the defence against abuse
+    becomes the mechanism of a slow OOM, so the tracked set is capped at
+    the addresses actually seen in the last window or two.
     """
 
     def __init__(self, per_minute: int):
         self.per_minute = per_minute
         self._hits: dict[str, deque[float]] = {}
+        self._last_sweep = 0.0
         self._lock = threading.Lock()
 
     def allow(self, ip: str, now: float | None = None) -> bool:
         if self.per_minute <= 0:
             return True
         now = time.monotonic() if now is None else now
-        cutoff = now - 60.0
+        cutoff = now - WINDOW_S
         with self._lock:
+            if now - self._last_sweep >= WINDOW_S:
+                self._sweep(cutoff)
+                self._last_sweep = now
             hits = self._hits.setdefault(ip, deque())
             while hits and hits[0] <= cutoff:
                 hits.popleft()
@@ -74,11 +88,48 @@ class RateLimiter:
             hits.append(now)
             return True
 
+    def _sweep(self, cutoff: float) -> None:
+        """Drop every address whose most recent hit fell out of the
+        window. Caller holds the lock."""
+        for ip in [
+            ip for ip, hits in self._hits.items() if not hits or hits[-1] <= cutoff
+        ]:
+            del self._hits[ip]
+
+    @property
+    def tracked_ips(self) -> int:
+        with self._lock:
+            return len(self._hits)
+
+
+def _declared_too_large(request: Request) -> bool:
+    """True when the client announced a body over the cap.
+
+    Only a hint: absent on chunked requests and trivially wrong on a
+    lying one, which is why it never replaces the byte count below.
+    """
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return False
+    try:
+        return int(raw) > MAX_UPLOAD_BYTES
+    except ValueError:
+        return False
+
 
 async def _read_upload(file: UploadFile) -> bytes:
-    """Read an upload, aborting with 413 the moment it exceeds the cap —
-    before the whole body lands in memory, and regardless of what the
-    Content-Length header claimed."""
+    """Read an upload, aborting with 413 once it exceeds the cap.
+
+    This is the real enforcement, and it is deliberately late: FastAPI
+    resolves an UploadFile parameter by awaiting request.form(), so
+    python-multipart has already parsed — and past its spool threshold,
+    written to a temp file — the entire body before this function reads
+    its first chunk. The middleware's Content-Length check turns away
+    honest oversized clients before that spool; a chunked or lying
+    client still gets its whole body received and spooled, and only then
+    answered with 413. Bandwidth and disk are therefore bounded only by
+    the header check, memory by this one.
+    """
     chunks: list[bytes] = []
     size = 0
     while chunk := await file.read(1 << 20):
@@ -288,12 +339,31 @@ def register(app, config: SiteConfig, service: RecognitionService) -> None:
     #: username discipline as web/auth.py, one consistent actor string.
     actor = "(api-key)" if api_cfg.api_key else "(api-open)"
 
-    def guard(request: Request) -> None:
-        # Rate-limit before the key check so key brute-forcing is
-        # throttled along with everything else.
+    @app.middleware("http")
+    async def api_limits(request: Request, call_next):
+        """Rate limit and declared-size rejection for /api/v1/ only.
+
+        Both live here rather than in the route dependency because
+        FastAPI awaits request.form() before it resolves dependencies:
+        anything checked in a Depends has already cost a full body
+        parse. Scoped to the API prefix so /healthz, /readyz and /login
+        can never be throttled — a probe that gets a 429 gets the
+        service killed.
+        """
+        if not request.url.path.startswith("/api/v1/"):
+            return await call_next(request)
+        # Rate-limit before the key check (below) so key brute-forcing
+        # is throttled along with everything else.
         client = request.client.host if request.client else "unknown"
         if not limiter.allow(client):
-            raise HTTPException(429, "rate limit exceeded")
+            return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
+        if _declared_too_large(request):
+            return JSONResponse(
+                {"detail": "upload larger than 10 MB"}, status_code=413
+            )
+        return await call_next(request)
+
+    def guard(request: Request) -> None:
         supplied = request.headers.get("x-api-key", "")
         if api_cfg.api_key and not hmac.compare_digest(supplied, api_cfg.api_key):
             raise HTTPException(401, "invalid or missing x-api-key")
