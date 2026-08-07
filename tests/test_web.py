@@ -98,9 +98,72 @@ def test_event_404(client):
     assert client.get("/events/999").status_code == 404
 
 
+def media_url(path) -> str:
+    """URL for an absolute media path.
+
+    The stored crop_path carries the media_dir prefix, so it is absolute
+    whenever media_dir is — which makes "/media/" + "/abs/path" the
+    ordinary shape of these requests, double slash and all.
+    """
+    return "/media/" + str(path)
+
+
 def test_media_path_confinement(client):
     assert client.get("/media/../../etc/passwd").status_code == 404
     assert client.get("/media/etc/passwd").status_code == 404
+    # The plain ".." above never reaches the handler — the client
+    # normalizes it and routing 404s first — so it proves nothing about
+    # the route. Percent-encoded traversal arrives intact and does.
+    assert client.get("/media/%2e%2e%2f%2e%2e%2fetc/passwd").status_code == 404
+
+
+def test_media_serves_a_legitimate_nested_file(client, tmp_path):
+    """Positive control: the confinement checks must not be passing
+    merely because everything 404s."""
+    crop = tmp_path / "media" / "cam1" / "2026-08-05" / "120000_car_3.jpg"
+    crop.parent.mkdir(parents=True)
+    crop.write_bytes(b"\xff\xd8\xff-jpeg-ish")
+
+    r = client.get(media_url(crop))
+    assert r.status_code == 200
+    assert r.content == b"\xff\xd8\xff-jpeg-ish"
+
+
+def test_media_rejects_sibling_prefix_directory(client, tmp_path):
+    """`media-x` shares a string prefix with `media` but is not inside
+    it — the escape a startswith() check waves through (CLD-49)."""
+    sibling = tmp_path / "media-x" / "secret.txt"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("not yours")
+
+    assert client.get(media_url(sibling)).status_code == 404
+
+
+def test_media_rejects_symlink_escaping_media_dir(client, tmp_path):
+    """A symlink *inside* media_dir pointing out of it must not serve.
+    Only resolving the final path catches this — a check that trusts the
+    unresolved path sees an innocent child of media_dir."""
+    outside = tmp_path / "outside" / "secret.txt"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("not yours")
+
+    media = tmp_path / "media"
+    media.mkdir(exist_ok=True)
+    link = media / "escape.jpg"
+    link.symlink_to(outside)
+    assert link.is_file()  # the symlink itself resolves to a real file
+
+    assert client.get(media_url(link)).status_code == 404
+
+
+def test_media_rejects_absolute_path_outside_media_dir(client, tmp_path):
+    """An absolute component is not joined onto media_root (that would
+    discard the base), so containment is what has to refuse it."""
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("not yours")
+
+    assert client.get(media_url(outside)).status_code == 404
+    assert client.get("/media//etc/passwd").status_code == 404
 
 
 def test_identity_verdict_confirm_and_clear(webenv):

@@ -945,10 +945,25 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
 
     @app.get("/media/{path:path}")
     def media(path: str):
-        # Crop paths in the DB are relative to the working directory;
-        # resolve and confine them to the media dir.
-        full = (Path(path).resolve() if Path(path).is_absolute() else Path(path).resolve())
-        if not str(full).startswith(str(media_root)) or not full.is_file():
+        """Serve a stored crop, confined to media_dir.
+
+        The request component is resolved as given, never joined onto
+        media_root. That is deliberate: ingest stores crop_path with the
+        media_dir prefix already on it, so the component is absolute
+        whenever media_dir is — the normal case, not an attack. Joining
+        would also be no defence at all, since Path("/a") / "/etc/passwd"
+        is "/etc/passwd": an absolute component silently discards the
+        base. Containment is therefore the only gate.
+
+        That gate compares *resolved* paths with is_relative_to. Both
+        halves matter. A string-prefix test would admit a sibling
+        directory — "/var/media-x/secret" starts with "/var/media"
+        (CLD-49) — and resolving the full path last, rather than
+        trusting a resolved root, is what catches a symlink inside
+        media_dir pointing outside it.
+        """
+        full = Path(path).resolve()
+        if not full.is_relative_to(media_root) or not full.is_file():
             raise HTTPException(404)
         return FileResponse(full)
 
