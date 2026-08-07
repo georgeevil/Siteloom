@@ -224,7 +224,9 @@ media/
 samples/
 *.pt
 identity_db/
-training/
+# Training *outputs* (TrainingConfig.output_dir) live at the repo root;
+# anchored so the source package siteloom/training/ stays tracked.
+/training/
 *.npy
 .DS_Store
 
