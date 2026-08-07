@@ -36,7 +36,6 @@ from siteloom.store import (
     EventIdentity,
     Identity,
     NoiseEvent,
-    User,
     WebSession,
     get_session,
     init_db,
@@ -210,6 +209,8 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     init_db(engine)
     Session = get_session(engine)
     media_root = Path(config.storage.media_dir).resolve()
+    #: Per-app so a second app in the same process (tests) starts clean.
+    login_throttle = auth.LoginThrottle()
 
     @app.middleware("http")
     async def auth_and_audit(request: Request, call_next):
@@ -250,8 +251,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     session.commit()
         return response
 
-    @app.get("/login", response_class=HTMLResponse)
-    def login_form(request: Request, next: str = "/"):
+    def _login_page(request: Request, next: str, error: str | None, status: int):
         return templates.TemplateResponse(
             request,
             "login.html",
@@ -261,9 +261,14 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 # value is echoed into the form's hidden field, so an
                 # unchecked one survives the round trip to the redirect.
                 "next": auth.safe_next(next),
-                "error": None,
+                "error": error,
             },
+            status_code=status,
         )
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request, next: str = "/"):
+        return _login_page(request, next, None, 200)
 
     @app.post("/login", response_class=HTMLResponse)
     def login_submit(
@@ -272,26 +277,40 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         password: str = Form(...),
         next: str = Form("/"),
     ):
-        with Session() as session:
-            user = session.scalar(
-                select(User).filter_by(username=username.strip())
+        caller = request.client.host if request.client else "unknown"
+        wait = login_throttle.retry_after(caller)
+        if wait > 0:
+            # Not audited: nothing was attempted, and a row per hammered
+            # request would turn the defence into unbounded table growth.
+            response = _login_page(
+                request,
+                next,
+                f"Too many sign-in attempts. Try again in {int(wait) + 1}s.",
+                429,
             )
-            if (
-                user is None
-                or user.disabled
-                or not auth.verify_password(password, user.password_hash)
-            ):
-                # One message for both failures — do not confirm usernames.
-                return templates.TemplateResponse(
-                    request,
-                    "login.html",
-                    {
-                        "site_name": config.site_name or config.site_id,
-                        "next": auth.safe_next(next),
-                        "error": "Wrong username or password.",
-                    },
-                    status_code=401,
+            response.headers["Retry-After"] = str(int(wait) + 1)
+            return response
+
+        with Session() as session:
+            user = auth.authenticate(session, username, password)
+            if user is None:
+                login_throttle.record_failure(caller)
+                # A failed sign-in is an event even though nothing
+                # happened — it is the only trace a guessing run leaves.
+                auth.record_audit(
+                    session,
+                    None,
+                    "POST",
+                    "/login",
+                    401,
+                    username=auth.failed_actor(username),
                 )
+                session.commit()
+                # One message for both failures — do not confirm usernames.
+                return _login_page(
+                    request, next, "Wrong username or password.", 401
+                )
+            login_throttle.record_success(caller)
             token = auth.create_session(session, user)
             auth.record_audit(session, user, "POST", "/login", 303)
             session.commit()

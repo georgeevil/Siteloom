@@ -14,6 +14,9 @@ Design (CLD auth milestone):
   remembering.
 * The recognition API (/api/v1/…) keeps its own x-api-key scheme —
   machine clients, per CompreFace convention — and is exempt here.
+* Sign-in is slowed by address, never locked by username (LoginThrottle),
+  costs the same whether or not the account exists (`authenticate`), and
+  leaves an audit row either way.
 
 Passwords are scrypt (stdlib) with a per-user salt; the cookie stores
 only an opaque token whose server side row can be revoked.
@@ -24,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -45,6 +50,17 @@ EXEMPT_PREFIXES = ("/api/v1/",)
 ADMIN_PREFIXES = ("/classes/detection", "/classes/events", "/jobs/reindex", "/users")
 
 _SCRYPT = {"n": 2**14, "r": 8, "p": 1}
+
+#: Login backoff (CLD-51). The first few misses are free — an operator
+#: fat-fingering their own password must not be punished — after which
+#: each further miss doubles the wait, up to the cap.
+LOGIN_FREE_ATTEMPTS = 3
+LOGIN_BASE_DELAY_S = 2.0
+LOGIN_MAX_DELAY_S = 300.0
+#: An address that stops guessing for this long starts fresh.
+LOGIN_FORGET_S = 900.0
+#: Cap on the attacker-supplied name copied into an audit row.
+FAILED_ACTOR_MAX = 64
 
 
 def _now() -> datetime:
@@ -130,6 +146,130 @@ def resolve_user(session, token: str | None) -> User | None:
     return user
 
 
+_dummy_hash_cache: str | None = None
+_dummy_lock = threading.Lock()
+
+
+def _dummy_hash() -> str:
+    """A hash of a password nobody knows, built once per process.
+
+    Not computed at import: scrypt at these parameters costs ~100 ms and
+    every CLI command imports this module.
+    """
+    global _dummy_hash_cache
+    with _dummy_lock:
+        if _dummy_hash_cache is None:
+            _dummy_hash_cache = hash_password(secrets.token_urlsafe(24))
+        return _dummy_hash_cache
+
+
+def authenticate(session, username: str, password: str) -> User | None:
+    """Check a username/password pair in constant work (CLD-51).
+
+    A missing user is verified against a throwaway hash instead of
+    returning early, so "no such account" and "wrong password" cost the
+    same scrypt round and cannot be told apart by a stopwatch — the
+    timing half of the same leak the shared error message closes. The
+    disabled check comes after the verification for the same reason.
+    """
+    user = session.scalar(select(User).filter_by(username=username.strip()))
+    stored = user.password_hash if user is not None else _dummy_hash()
+    ok = verify_password(password, stored)
+    if user is None or user.disabled or not ok:
+        return None
+    return user
+
+
+class LoginThrottle:
+    """Exponential backoff for failed sign-ins, keyed by client address.
+
+    Keyed by address and *not* by username on purpose: a username-keyed
+    lockout hands any stranger who can reach the port a way to lock the
+    operator out of their own console by failing logins as them. Keying
+    on the caller bounds guessing from that caller no matter how many
+    usernames it tries, and the operator's own address is only ever
+    slowed by their own mistakes.
+
+    Nothing here is permanent. The delay is a wait, not a lock: it
+    expires on its own (capped at LOGIN_MAX_DELAY_S), a successful
+    sign-in clears it, an idle address is forgotten after
+    LOGIN_FORGET_S, and the whole thing is in-process memory that a
+    restart of `siteloom serve` drops.
+
+    Lock-serialized because FastAPI serves sync endpoints from a
+    threadpool (same reasoning as the recognition API's RateLimiter),
+    and swept on access so an attacker rotating source addresses cannot
+    turn the defence into a slow memory leak.
+    """
+
+    def __init__(
+        self,
+        free_attempts: int = LOGIN_FREE_ATTEMPTS,
+        base_delay_s: float = LOGIN_BASE_DELAY_S,
+        max_delay_s: float = LOGIN_MAX_DELAY_S,
+        forget_s: float = LOGIN_FORGET_S,
+    ):
+        self.free_attempts = free_attempts
+        self.base_delay_s = base_delay_s
+        self.max_delay_s = max_delay_s
+        self.forget_s = forget_s
+        # key -> [failures, blocked_until, last_failure]
+        self._state: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def retry_after(self, key: str, now: float | None = None) -> float:
+        """Seconds the caller must wait; 0.0 when it may try now."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            entry = self._state.get(key)
+            if entry is None:
+                return 0.0
+            return max(0.0, entry[1] - now)
+
+    def record_failure(self, key: str, now: float | None = None) -> float:
+        """Count a failed attempt; return the wait it just earned."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            self._sweep(now)
+            entry = self._state.get(key)
+            if entry is None or now - entry[2] > self.forget_s:
+                entry = [0.0, 0.0, now]
+                self._state[key] = entry
+            entry[0] += 1
+            entry[2] = now
+            over = int(entry[0]) - self.free_attempts
+            if over <= 0:
+                return 0.0
+            delay = min(self.base_delay_s * 2 ** (over - 1), self.max_delay_s)
+            entry[1] = now + delay
+            return delay
+
+    def record_success(self, key: str) -> None:
+        with self._lock:
+            self._state.pop(key, None)
+
+    def _sweep(self, now: float) -> None:
+        stale = [
+            k
+            for k, e in self._state.items()
+            if e[1] <= now and now - e[2] > self.forget_s
+        ]
+        for k in stale:
+            del self._state[k]
+
+
+def failed_actor(attempted: str) -> str:
+    """The audit `username` for a sign-in that did not succeed.
+
+    The attempted name is what makes a brute-force run readable in the
+    log, but it is attacker-controlled text, so it is printable-filtered,
+    truncated, and wrapped in a marker that no successful actor string
+    can collide with. The row's `user_id` stays NULL: nobody acted.
+    """
+    name = "".join(c for c in attempted.strip() if c.isprintable())
+    return f"(failed:{name[:FAILED_ACTOR_MAX]})"
+
+
 def required_role(method: str, path: str) -> str:
     if method in ("GET", "HEAD", "OPTIONS"):
         return "view"
@@ -143,13 +283,20 @@ def has_role(user: User, role: str) -> bool:
 
 
 def record_audit(
-    session, user: User | None, method: str, path: str, status_code: int
+    session,
+    user: User | None,
+    method: str,
+    path: str,
+    status_code: int,
+    username: str | None = None,
 ) -> None:
+    """Record one action. `username` overrides the denormalized actor
+    string for rows with no User behind them — a failed sign-in, say."""
     session.add(
         AuditLog(
             at=_now(),
             user_id=user.id if user else None,
-            username=user.username if user else "(open)",
+            username=username or (user.username if user else "(open)"),
             method=method,
             path=path,
             status_code=status_code,
