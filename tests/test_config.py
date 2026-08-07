@@ -38,6 +38,16 @@ def test_site_config_defaults():
     assert cfg.storage.db_url.startswith("sqlite")
 
 
+def test_recognition_api_defaults_closed():
+    # Biometric surface (NFR5, CLD-47): disabled by default, keyless
+    # serving is an explicit opt-in, rate limiting on by default.
+    api = SiteConfig(site_id="s").integrations.recognition_api
+    assert api.enabled is False
+    assert api.api_key == ""
+    assert api.allow_open is False
+    assert api.rate_limit_per_minute == 60
+
+
 def test_event_rules_defaults():
     cfg = SiteConfig(site_id="s")
     assert cfg.events.min_detections == 3

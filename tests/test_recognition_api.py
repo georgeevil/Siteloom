@@ -7,16 +7,18 @@ colour) so no model downloads are needed and matches are deterministic.
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime
 
 import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from siteloom.config import IdentityConfig, SiteConfig, StorageConfig
 from siteloom.identity import VectorStore
-from siteloom.store import Identity, get_session, init_db, make_engine
+from siteloom.store import AuditLog, Identity, get_session, init_db, make_engine
 from siteloom.web.app import create_app
 from siteloom.web.recognition_api import RecognitionService
 
@@ -77,16 +79,25 @@ def empty_photo() -> bytes:
     return buf.tobytes()
 
 
-@pytest.fixture
-def client_and_session(tmp_path):
-    config = SiteConfig(
+def make_config(tmp_path, tag: str = "") -> SiteConfig:
+    return SiteConfig(
         site_id="test",
         cameras=[],
-        identity=IdentityConfig(vector_db_path=str(tmp_path / "vec")),
+        identity=IdentityConfig(vector_db_path=str(tmp_path / f"vec{tag}")),
         storage=StorageConfig(
-            db_url=f"sqlite:///{tmp_path}/api.db", media_dir=str(tmp_path / "media")
+            db_url=f"sqlite:///{tmp_path}/api{tag}.db",
+            media_dir=str(tmp_path / f"media{tag}"),
         ),
     )
+
+
+@pytest.fixture
+def client_and_session(tmp_path):
+    config = make_config(tmp_path)
+    # The API no longer mounts by default and keyless serving is an
+    # explicit opt-in (CLD-47); these tests exercise the open mode.
+    config.integrations.recognition_api.enabled = True
+    config.integrations.recognition_api.allow_open = True
     engine = make_engine(config.storage.db_url)
     init_db(engine)
     Session = get_session(engine)
@@ -201,21 +212,19 @@ def test_enroll_without_face_is_400(client):
     assert "no face" in r.json()["detail"]
 
 
-def test_api_key_enforced(tmp_path):
-    config = SiteConfig(
-        site_id="test",
-        cameras=[],
-        identity=IdentityConfig(vector_db_path=str(tmp_path / "vec2")),
-        storage=StorageConfig(
-            db_url=f"sqlite:///{tmp_path}/api2.db", media_dir=str(tmp_path / "m2")
-        ),
-    )
-    config.integrations.recognition_api.api_key = "sekret"
+def make_client(config) -> TestClient:
     engine = make_engine(config.storage.db_url)
     init_db(engine)
     Session = get_session(engine)
     service = RecognitionService(config, Session, vectors=None, embedder=StubFace())
-    client = TestClient(create_app(config, recognition_service=service))
+    return TestClient(create_app(config, recognition_service=service))
+
+
+def test_api_key_enforced(tmp_path):
+    config = make_config(tmp_path, "2")
+    config.integrations.recognition_api.enabled = True
+    config.integrations.recognition_api.api_key = "sekret"
+    client = make_client(config)
 
     assert client.get("/api/v1/recognition/subjects").status_code == 401
     assert (
@@ -226,3 +235,66 @@ def test_api_key_enforced(tmp_path):
     )
     ok = client.get("/api/v1/recognition/subjects", headers={"x-api-key": "sekret"})
     assert ok.status_code == 200
+
+
+def test_disabled_by_default_does_not_mount(tmp_path):
+    # Biometric surface, off by default (NFR5): a default config must
+    # not expose /api/v1/ at all.
+    client = make_client(make_config(tmp_path, "3"))
+    assert client.get("/api/v1/recognition/subjects").status_code == 404
+
+
+def test_enabled_keyless_without_opt_in_fails_fast(tmp_path):
+    config = make_config(tmp_path, "4")
+    config.integrations.recognition_api.enabled = True  # no key, no opt-in
+    with pytest.raises(ValueError, match="allow_open"):
+        make_client(config)
+
+
+def test_allow_open_serves_and_warns(tmp_path, caplog):
+    config = make_config(tmp_path, "5")
+    config.integrations.recognition_api.enabled = True
+    config.integrations.recognition_api.allow_open = True
+    with caplog.at_level(logging.WARNING, logger="siteloom.web.recognition_api"):
+        client = make_client(config)
+    assert any("WITHOUT authentication" in r.message for r in caplog.records)
+    assert client.get("/api/v1/recognition/subjects").status_code == 200
+
+
+def test_oversized_upload_is_413(client):
+    # 10 MB + 1 byte of not-an-image: the size gate must trip on the
+    # bytes actually read, before any decode is attempted.
+    blob = b"\0" * (10 * 1024 * 1024 + 1)
+    assert enroll(client, "Ann", blob).status_code == 413
+    assert recognize(client, blob).status_code == 413
+
+
+def test_rate_limit_trips_but_probes_survive(tmp_path):
+    config = make_config(tmp_path, "6")
+    config.integrations.recognition_api.enabled = True
+    config.integrations.recognition_api.allow_open = True
+    config.integrations.recognition_api.rate_limit_per_minute = 3
+    client = make_client(config)
+
+    codes = [
+        client.get("/api/v1/recognition/subjects").status_code for _ in range(4)
+    ]
+    assert codes == [200, 200, 200, 429]
+    # The limiter is scoped to /api/v1/ — supervision probes must keep
+    # answering while it is tripped (a throttled probe kills the service).
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/readyz").status_code in (200, 503)
+    assert client.get("/readyz").json()  # answered, not throttled
+
+
+def test_api_mutations_are_audited(client_and_session):
+    client, Session, _v, _c = client_and_session
+    client.post("/api/v1/recognition/subjects", json={"subject": "Cara"})
+    enroll(client, "Ann", photo("ann"))
+    recognize(client, photo("ann"))  # read path: not a mutation, no row
+    with Session() as session:
+        rows = session.scalars(select(AuditLog).order_by(AuditLog.id)).all()
+        assert [(r.username, r.path, r.status_code) for r in rows] == [
+            ("(api-open)", "/api/v1/recognition/subjects", 201),
+            ("(api-open)", "/api/v1/recognition/faces", 201),
+        ]

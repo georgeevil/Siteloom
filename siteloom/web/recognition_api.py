@@ -17,11 +17,20 @@ actually use), shape-compatible with CompreFace v1:
 
 Auth follows CompreFace's convention: the x-api-key header, checked
 against integrations.recognition_api.api_key when one is configured.
+Serving without a key is an explicit opt-in (allow_open) — this surface
+hands out biometric matching and gallery writes, so enabled-but-keyless
+fails fast at startup instead of coming up wide open (CLD-47). The 413
+upload cap and per-IP 429 are additions on top of the CompreFace v1
+shape, not redefinitions of it.
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
+import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 
 import numpy as np
@@ -30,9 +39,54 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from siteloom.config import SiteConfig
-from siteloom.store import Identity
+from siteloom.store import AuditLog, Identity
 
 log = logging.getLogger(__name__)
+
+#: Hard cap on one upload, enforced on the bytes actually read — never
+#: on Content-Length, which is client-supplied and absent when chunked.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+class RateLimiter:
+    """Sliding-minute request budget per client IP.
+
+    Lock-serialized because FastAPI serves sync endpoints from a
+    threadpool (same reasoning as VectorStore's locking).
+    """
+
+    def __init__(self, per_minute: int):
+        self.per_minute = per_minute
+        self._hits: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, ip: str, now: float | None = None) -> bool:
+        if self.per_minute <= 0:
+            return True
+        now = time.monotonic() if now is None else now
+        cutoff = now - 60.0
+        with self._lock:
+            hits = self._hits.setdefault(ip, deque())
+            while hits and hits[0] <= cutoff:
+                hits.popleft()
+            if len(hits) >= self.per_minute:
+                return False
+            hits.append(now)
+            return True
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    """Read an upload, aborting with 413 the moment it exceeds the cap —
+    before the whole body lands in memory, and regardless of what the
+    Content-Length header claimed."""
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := await file.read(1 << 20):
+        size += len(chunk)
+        if size > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "upload larger than 10 MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _now() -> datetime:
@@ -211,10 +265,52 @@ class RecognitionService:
 
 def register(app, config: SiteConfig, service: RecognitionService) -> None:
     api_cfg = config.integrations.recognition_api
+    if not api_cfg.api_key and not api_cfg.allow_open:
+        # Fail fast at mount time: the operator finds out when the
+        # process comes up, not when the first anonymous request
+        # enrolls a face into the gallery.
+        raise ValueError(
+            "integrations.recognition_api is enabled without an api_key. "
+            "Set api_key (the 'key' CompreFace clients send as x-api-key), "
+            "or set allow_open: true to deliberately serve face matching "
+            "and enrollment without authentication."
+        )
+    if not api_cfg.api_key:
+        log.warning(
+            "recognition API is serving WITHOUT authentication "
+            "(allow_open=true): anyone who can reach this port can match "
+            "faces and enroll new ones"
+        )
 
-    def check_key(request: Request) -> None:
-        if api_cfg.api_key and request.headers.get("x-api-key") != api_cfg.api_key:
+    limiter = RateLimiter(api_cfg.rate_limit_per_minute)
+    #: Audit rows need a who with no User row to join (the /api/v1/
+    #: prefix is exempt from the console middleware) — same denormalized
+    #: username discipline as web/auth.py, one consistent actor string.
+    actor = "(api-key)" if api_cfg.api_key else "(api-open)"
+
+    def guard(request: Request) -> None:
+        # Rate-limit before the key check so key brute-forcing is
+        # throttled along with everything else.
+        client = request.client.host if request.client else "unknown"
+        if not limiter.allow(client):
+            raise HTTPException(429, "rate limit exceeded")
+        supplied = request.headers.get("x-api-key", "")
+        if api_cfg.api_key and not hmac.compare_digest(supplied, api_cfg.api_key):
             raise HTTPException(401, "invalid or missing x-api-key")
+
+    def audit(method: str, path: str, status_code: int) -> None:
+        with service.Session() as session:
+            session.add(
+                AuditLog(
+                    at=_now(),
+                    user_id=None,
+                    username=actor,
+                    method=method,
+                    path=path,
+                    status_code=status_code,
+                )
+            )
+            session.commit()
 
     @app.post("/api/v1/recognition/recognize")
     async def recognize(
@@ -223,44 +319,47 @@ def register(app, config: SiteConfig, service: RecognitionService) -> None:
         limit: int = Query(0),
         det_prob_threshold: float | None = Query(None),
         prediction_count: int = Query(1),
-        _=Depends(check_key),
+        _=Depends(guard),
     ):
         try:
             result = service.recognize(
-                await file.read(),
+                await _read_upload(file),
                 limit=limit,
                 det_prob_threshold=det_prob_threshold,
                 prediction_count=prediction_count,
             )
-        except ValueError as exc:
+        except (ValueError, LookupError) as exc:
             raise HTTPException(400, str(exc))
         return JSONResponse({"result": result})
 
     @app.get("/api/v1/recognition/subjects")
-    def list_subjects(_=Depends(check_key)):
+    def list_subjects(_=Depends(guard)):
         return JSONResponse({"subjects": service.subjects()})
 
     @app.post("/api/v1/recognition/subjects")
-    async def create_subject(request: Request, _=Depends(check_key)):
+    async def create_subject(request: Request, _=Depends(guard)):
         body = await request.json()
         subject = str(body.get("subject", "")).strip()
         if not subject:
             raise HTTPException(400, "subject name required")
-        return JSONResponse({"subject": service.add_subject(subject)}, status_code=201)
+        result = service.add_subject(subject)
+        audit("POST", "/api/v1/recognition/subjects", 201)
+        return JSONResponse({"subject": result}, status_code=201)
 
     @app.post("/api/v1/recognition/faces")
     async def add_face(
-        file: UploadFile, subject: str = Query(...), _=Depends(check_key)
+        file: UploadFile, subject: str = Query(...), _=Depends(guard)
     ):
         try:
-            result = service.enroll(subject, await file.read())
+            result = service.enroll(subject, await _read_upload(file))
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except LookupError as exc:
             # CompreFace returns 400 for no-face-found as well.
             raise HTTPException(400, str(exc))
+        audit("POST", "/api/v1/recognition/faces", 201)
         return JSONResponse(result, status_code=201)
 
     @app.get("/api/v1/recognition/faces")
-    def list_faces(_=Depends(check_key)):
+    def list_faces(_=Depends(guard)):
         return JSONResponse({"faces": service.faces()})
