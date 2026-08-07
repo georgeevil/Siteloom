@@ -199,16 +199,51 @@ class IdentifierConfig(BaseModel):
     # Vehicle path only: also try plate OCR on crops and match by plate
     # first (PRD §6.4). Requires the "plates" optional dependencies.
     plate_ocr: bool = False
+    # Required score gap between the best and second-best *identity*
+    # before a visual match is accepted. Two identities inside this band
+    # are an ambiguous read: the frame is left unresolved (after the
+    # camera-recency tie-break) rather than guessed — one borderline
+    # vector in the wrong gallery must not win outright (CLD-41).
+    min_margin: float = 0.0
+    # Consistency gate on minting unknown identities: a sub-threshold
+    # embedding is parked in the identifier's pending pool and an
+    # Identity row is only created once this many mutually-similar
+    # sightings accumulate (Frigate's consistency principle). 1 = mint
+    # immediately (the pre-CLD-41 behavior; auto-added classes keep it).
+    min_sightings: int = 1
+    # Detection confidence at or above which a single crop is trusted to
+    # mint an identity immediately, bypassing min_sightings. A plate
+    # always bypasses — plates are exact evidence.
+    immediate_quality: float = 0.85
 
 
 def _default_identifiers() -> dict[str, IdentifierConfig]:
     return {
-        "face": IdentifierConfig(algo="face", applies_to=["person"], threshold=0.36),
-        "person": IdentifierConfig(algo="generic", applies_to=["person"], threshold=0.80),
+        # People are the unknown-identity churn source (CLD-41): both
+        # person identifiers demand two consistent sightings before an
+        # unknown is minted, and a margin so near-ties stay unresolved
+        # instead of guessed. Vehicles keep min_sightings=1 — they are
+        # fewer, their visual threshold is already strict, and the
+        # plate-learning flow (PRD §6.4) expects first-sighting rows.
+        "face": IdentifierConfig(
+            algo="face",
+            applies_to=["person"],
+            threshold=0.36,
+            min_margin=0.05,
+            min_sightings=2,
+        ),
+        "person": IdentifierConfig(
+            algo="generic",
+            applies_to=["person"],
+            threshold=0.80,
+            min_margin=0.02,
+            min_sightings=2,
+        ),
         "vehicle": IdentifierConfig(
             algo="generic",
             applies_to=["car", "truck", "bus", "motorcycle"],
             threshold=0.82,
+            min_margin=0.02,
             plate_ocr=True,
         ),
     }
@@ -231,6 +266,16 @@ class IdentityConfig(BaseModel):
     # Fine-tuned face projection matrix (.npy) produced by
     # `siteloom train-face`. Empty = use raw SFace embeddings.
     face_projection_path: str = "training/face_projection.npy"
+    # Camera-recency tie-break window (CLD-41): when two identities land
+    # inside an identifier's min_margin band, one seen on the SAME camera
+    # within this many seconds (stream time) wins the tie. Soft prior
+    # only — it never overrides a clear better match, and losing it
+    # (process restart) degrades to the conservative no-match.
+    recency_window_s: float = 120.0
+    # Pending-pool entries older than this are pruned: "consistent
+    # sightings" means within this horizon, and a one-off blurry crop
+    # must not linger as a promotion seed forever.
+    pending_ttl_s: float = 3600.0
 
 
 class AudioConfig(BaseModel):

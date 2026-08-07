@@ -32,10 +32,19 @@ identity:
   vector_db_path: identity_db   # Qdrant embedded mode — a directory, no server
   auto_add_classes: true        # unseen classes get a generic identifier on the fly
   # identifiers:                # per-class algorithms; defaults shown
-  #   face:    {algo: face,    applies_to: [person], threshold: 0.36}
-  #   person:  {algo: generic, applies_to: [person], threshold: 0.80}
+  #   face:    {algo: face,    applies_to: [person], threshold: 0.36,
+  #             min_margin: 0.05, min_sightings: 2}
+  #   person:  {algo: generic, applies_to: [person], threshold: 0.80,
+  #             min_margin: 0.02, min_sightings: 2}
   #   vehicle: {algo: generic, applies_to: [car, truck, bus, motorcycle],
-  #             threshold: 0.82, plate_ocr: true}
+  #             threshold: 0.82, min_margin: 0.02, plate_ocr: true}
+  # min_margin: required gap over the runner-up identity before a visual
+  #   match is accepted (near-ties stay unresolved). min_sightings: how
+  #   many mutually-similar sightings before an unknown identity is
+  #   minted (1 = immediately); detection confidence >= immediate_quality
+  #   (0.85) or a plate bypasses the gate.
+  # recency_window_s: 120.0     # same-camera tie-break window
+  # pending_ttl_s: 3600.0       # unknown sightings expire after this
 
 audio:
   enabled: true

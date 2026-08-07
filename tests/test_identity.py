@@ -11,7 +11,7 @@ from siteloom.config import IdentifierConfig, IdentityConfig
 from siteloom.identity.registry import IdentifierRegistry
 from siteloom.identity.resolver import IdentityResolver
 from siteloom.identity.vectors import VectorStore
-from siteloom.store import get_session, init_db, make_engine
+from siteloom.store import Identity, get_session, init_db, make_engine
 
 TS = datetime(2026, 8, 5, 12, 0, 0)
 
@@ -54,26 +54,49 @@ def test_search_missing_collection_is_empty(vectors):
     assert vectors.search("nope", unit([1.0, 0.0])) == []
 
 
-def test_resolver_creates_then_matches(resolver, session):
+def test_resolver_quarantines_then_promotes(resolver, session):
+    """person requires two consistent sightings (CLD-41): the first crop
+    is parked, the second mints the identity with both appearances and
+    both vectors, the third is a plain match."""
     v = unit([0.3, 0.4, 0.5, 0.1])
+    kw = dict(
+        identifier_key="person", class_name="person",
+        vector=v.tolist(), plate=None, threshold=0.8,
+    )
+    first = resolver.resolve(session, timestamp=TS, **kw)
+    assert first.identity is None
+    assert first.pending
+    assert session.query(Identity).count() == 0
+
+    second = resolver.resolve(session, timestamp=TS, **kw)
+    assert second.is_new
+    assert second.identity.label is None  # unknown bucket
+    assert second.identity.appearance_count == 2  # parked sighting counts
+    assert second.identity.vector_count == 2  # pool vector moved over
+    assert second.identity.first_seen == TS
+
+    third = resolver.resolve(session, timestamp=TS, **kw)
+    assert not third.is_new
+    assert third.identity.id == second.identity.id
+    assert third.similarity > 0.99
+    assert third.identity.appearance_count == 3
+
+
+def test_resolver_high_quality_mints_immediately(resolver, session):
+    """Detection confidence at or above immediate_quality bypasses the
+    sighting gate — a crisp crop is trusted on its own."""
     first = resolver.resolve(
         session, identifier_key="person", class_name="person",
-        vector=v.tolist(), plate=None, timestamp=TS, threshold=0.8,
+        vector=unit([0.3, 0.4, 0.5, 0.1]).tolist(), plate=None,
+        timestamp=TS, threshold=0.8, quality=0.9,
     )
     assert first.is_new
-    assert first.identity.label is None  # unknown bucket
-
-    again = resolver.resolve(
-        session, identifier_key="person", class_name="person",
-        vector=v.tolist(), plate=None, timestamp=TS, threshold=0.8,
-    )
-    assert not again.is_new
-    assert again.identity.id == first.identity.id
-    assert again.similarity > 0.99
-    assert again.identity.appearance_count == 2
+    assert first.identity is not None
 
 
-def test_resolver_below_threshold_creates_new(resolver, session):
+def test_resolver_below_threshold_stays_pending(resolver, session):
+    """Two one-off unknowns mint nothing — sub-threshold embeddings park
+    in the pending pool instead of becoming vector-space magnets."""
     a = resolver.resolve(
         session, identifier_key="person", class_name="person",
         vector=unit([1.0, 0.0, 0.0, 0.0]).tolist(), plate=None,
@@ -84,8 +107,92 @@ def test_resolver_below_threshold_creates_new(resolver, session):
         vector=unit([0.0, 1.0, 0.0, 0.0]).tolist(), plate=None,
         timestamp=TS, threshold=0.8,
     )
-    assert b.is_new
-    assert b.identity.id != a.identity.id
+    assert a.pending and b.pending
+    assert session.query(Identity).count() == 0
+
+
+def test_resolver_pending_expires(resolver, session):
+    """A parked sighting older than pending_ttl_s no longer counts
+    toward promotion — consistency has a time horizon."""
+    from datetime import timedelta
+
+    v = unit([0.3, 0.4, 0.5, 0.1])
+    kw = dict(
+        identifier_key="person", class_name="person",
+        vector=v.tolist(), plate=None, threshold=0.8,
+    )
+    resolver.resolve(session, timestamp=TS, **kw)
+    late = resolver.resolve(session, timestamp=TS + timedelta(hours=2), **kw)
+    assert late.pending  # the stale sighting was pruned, count restarts
+    assert session.query(Identity).count() == 0
+
+
+def test_resolver_auto_added_class_mints_immediately(resolver, session):
+    """Identifiers without config (auto-added classes) keep the
+    pre-CLD-41 behavior: min_sightings defaults to 1."""
+    res = resolver.resolve(
+        session, identifier_key="deer", class_name="deer",
+        vector=unit([1.0, 0.0, 0.0, 0.0]).tolist(), plate=None,
+        timestamp=TS, threshold=0.8,
+    )
+    assert res.is_new
+    assert res.identity is not None
+
+
+def _mint(resolver, session, vector, camera=None, ts=TS):
+    """Create a person identity directly via the quality bypass."""
+    res = resolver.resolve(
+        session, identifier_key="person", class_name="person",
+        vector=vector.tolist(), plate=None, timestamp=ts,
+        threshold=0.8, quality=0.99, camera_id=camera,
+    )
+    assert res.identity is not None
+    return res.identity
+
+
+def test_resolver_margin_leaves_near_ties_unresolved(resolver, session):
+    """A query sitting between two known identities inside min_margin is
+    an ambiguous read: no match, and nothing is learned from it."""
+    a = unit([1.0, 0.3, 0.0, 0.0])
+    b = unit([0.3, 1.0, 0.0, 0.0])
+    ia = _mint(resolver, session, a)
+    ib = _mint(resolver, session, b)
+    assert ia.id != ib.id
+
+    q = unit(a + b)  # exactly equidistant, similarity ~0.88 to both
+    res = resolver.resolve(
+        session, identifier_key="person", class_name="person",
+        vector=q.tolist(), plate=None, timestamp=TS, threshold=0.8,
+    )
+    assert res.identity is None
+    assert res.ambiguous
+    assert not res.pending  # ambiguity must not seed a duplicate
+    assert session.query(Identity).count() == 2
+
+
+def test_resolver_recency_breaks_near_ties(resolver, session):
+    """Within the margin band, an identity seen on the same camera
+    moments ago wins the tie; on a different camera it stays ambiguous."""
+    a = unit([1.0, 0.3, 0.0, 0.0])
+    b = unit([0.3, 1.0, 0.0, 0.0])
+    ia = _mint(resolver, session, a, camera="gate")
+    _mint(resolver, session, b, camera="yard")
+
+    q = unit(a + b)
+    kw = dict(
+        identifier_key="person", class_name="person",
+        vector=q.tolist(), plate=None, timestamp=TS, threshold=0.8,
+    )
+    # On a camera where neither was seen recently: still ambiguous (and
+    # checked first — a successful match below enrolls q into a gallery,
+    # which would make any later read of q unambiguous).
+    elsewhere = resolver.resolve(session, camera_id="lobby", **kw)
+    assert elsewhere.identity is None
+    assert elsewhere.ambiguous
+
+    on_gate = resolver.resolve(session, camera_id="gate", **kw)
+    assert on_gate.identity is not None
+    assert on_gate.identity.id == ia.id
 
 
 def test_plate_beats_visual_similarity(resolver, session):

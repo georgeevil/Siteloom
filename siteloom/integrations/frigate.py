@@ -246,7 +246,14 @@ class FrigateConsumer:
                 crop_path=crop_path,
                 threshold=ident_cfg.threshold if ident_cfg else None,
                 max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
+                camera_id=event.camera_id,
+                # Frigate serves its best snapshot for the event; its own
+                # score is the closest thing to detection quality here.
+                quality=event.best_confidence or None,
             )
+            if resolution.identity is None:
+                # Quarantined or ambiguous (CLD-41) — no link, no publish.
+                continue
             link = session.scalar(
                 select(EventIdentity).filter_by(
                     event_id=event.id, identity_id=resolution.identity.id
