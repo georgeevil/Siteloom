@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import (
@@ -143,20 +143,13 @@ def _identity_rail(session, identity_id: int) -> dict | None:
 
 
 def _safe_next(next_url: str, event_id: int) -> str:
-    """Confine a form-supplied redirect target to this site.
+    """The triage rail's redirect target, confined to this site.
 
-    The triage rail round-trips the operator back to the filtered list
-    they were working, so the target comes from the page. That makes it
-    attacker-supplied: anything not a plain absolute path on this origin
-    (scheme, host, protocol-relative `//evil`) falls back to the event.
+    One validator (`auth.safe_next`) decides what "on this site" means
+    for every redirect in the console; this only supplies the rail's
+    fallback, which is the event the operator was judging.
     """
-    if (
-        next_url.startswith("/")
-        and not next_url.startswith("//")
-        and "\\" not in next_url
-    ):
-        return next_url
-    return f"/events/{event_id}"
+    return auth.safe_next(next_url, f"/events/{event_id}")
 
 
 def _rail_context(session, event_id: int) -> dict | None:
@@ -238,7 +231,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         if enabled and not exempt:
             if user is None:
                 if request.method in ("GET", "HEAD"):
-                    return RedirectResponse(f"/login?next={path}", status_code=303)
+                    # Quoted so a crafted path cannot smuggle extra query
+                    # parameters into the login URL it is pasted into.
+                    target = quote(path, safe="/")
+                    return RedirectResponse(f"/login?next={target}", status_code=303)
                 return JSONResponse({"detail": "login required"}, status_code=401)
             if not auth.has_role(user, auth.required_role(request.method, path)):
                 return JSONResponse({"detail": "insufficient role"}, status_code=403)
@@ -261,7 +257,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             "login.html",
             {
                 "site_name": config.site_name or config.site_id,
-                "next": _safe_next(next, 0) if next != "/" else "/",
+                # Sanitized on the way in as well as on the way out: the
+                # value is echoed into the form's hidden field, so an
+                # unchecked one survives the round trip to the redirect.
+                "next": auth.safe_next(next),
                 "error": None,
             },
         )
@@ -288,7 +287,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     "login.html",
                     {
                         "site_name": config.site_name or config.site_id,
-                        "next": next,
+                        "next": auth.safe_next(next),
                         "error": "Wrong username or password.",
                     },
                     status_code=401,
@@ -296,8 +295,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             token = auth.create_session(session, user)
             auth.record_audit(session, user, "POST", "/login", 303)
             session.commit()
-        target = next if next.startswith("/") and not next.startswith("//") else "/"
-        response = RedirectResponse(target, status_code=303)
+        response = RedirectResponse(auth.safe_next(next), status_code=303)
         response.set_cookie(
             auth.SESSION_COOKIE,
             token,

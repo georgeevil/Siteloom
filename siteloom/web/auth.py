@@ -70,6 +70,37 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+def safe_next(next_url: str, fallback: str = "/") -> str:
+    """Confine a caller-supplied redirect target to this origin.
+
+    Both the login form and the triage rail round-trip an operator back
+    to where they were, so the target arrives from the page and is
+    therefore attacker-supplied. Only a plain absolute path on this
+    origin survives; anything else becomes `fallback`.
+
+    The rules are all one bug in different clothes — a target the server
+    reads as local and the browser resolves as external:
+
+    * `https://evil` / `javascript:…` — a scheme.
+    * `//evil` — protocol-relative, host in the "path".
+    * `/\\evil` — browsers normalize the backslash to a slash, so this
+      reaches the network as `//evil`. This is the rule POST /login was
+      missing (CLD-52); it lives here now so there is one validator
+      rather than a copy per call site that can drift again.
+    * Control characters — browsers strip tab/CR/LF from URLs before
+      resolving them, so `/\\t/evil` is another spelling of the above,
+      and a bare CR/LF in a Location header is response splitting.
+    """
+    if (
+        next_url.startswith("/")
+        and not next_url.startswith("//")
+        and "\\" not in next_url
+        and all(ch.isprintable() for ch in next_url)
+    ):
+        return next_url
+    return fallback
+
+
 def auth_enabled(session) -> bool:
     return session.scalar(select(User.id).limit(1)) is not None
 

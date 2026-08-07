@@ -25,7 +25,12 @@ from siteloom.store import (
     make_engine,
 )
 from siteloom.web.app import create_app
-from siteloom.web.auth import hash_password, required_role, verify_password
+from siteloom.web.auth import (
+    hash_password,
+    required_role,
+    safe_next,
+    verify_password,
+)
 
 TS = datetime(2026, 8, 6, 9, 0, 0)
 
@@ -268,3 +273,57 @@ def test_edit_role_can_preview_but_not_save_a_threshold(tmp_path):
         ).status_code
         == 403
     )
+
+# -- redirect containment (CLD-52) -----------------------------------------
+
+OFFSITE = [
+    "//evil.example",  # protocol-relative: host in the "path"
+    "/\\evil.example",  # browsers normalize \ to / — the missing rule
+    "\\\\evil.example",
+    "/\\/evil.example",
+    "https://evil.example/x",
+    "javascript:alert(1)",
+    "/ok\r\nSet-Cookie: sl_session=stolen",  # response splitting
+    "/ok\tevil",  # browsers strip tabs before resolving
+]
+
+
+def test_safe_next_confines_every_shape_of_offsite_target():
+    for bad in OFFSITE:
+        assert safe_next(bad, "/fallback") == "/fallback", bad
+    for good in ["/", "/events/3", "/?camera=cam1&class=car", "/identities"]:
+        assert safe_next(good, "/fallback") == good
+
+
+@pytest.mark.parametrize("target", OFFSITE)
+def test_login_never_redirects_off_site(tmp_path, target):
+    """POST /login used to check only the leading-slash rules, so a
+    backslash target it read as local resolved externally in a browser —
+    a credential-phishing hop straight off a successful sign-in."""
+    client, Session = make_env(tmp_path)
+    add_user(Session, "ana", "admin")
+    r = client.post(
+        "/login", data={"username": "ana", "password": "hunter2!", "next": target}
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+
+
+def test_login_keeps_a_genuine_local_target(tmp_path):
+    client, Session = make_env(tmp_path)
+    add_user(Session, "ana", "admin")
+    r = client.post(
+        "/login",
+        data={"username": "ana", "password": "hunter2!", "next": "/?camera=cam1"},
+    )
+    assert r.headers["location"] == "/?camera=cam1"
+
+
+def test_login_form_sanitizes_the_target_it_echoes(tmp_path):
+    """The form round-trips `next` through a hidden field, so a target
+    left unchecked on the way in comes back on the way out."""
+    client, _ = make_env(tmp_path)
+    r = client.get("/login", params={"next": "/\\evil.example"})
+    assert r.status_code == 200
+    assert "evil.example" not in r.text
+    assert 'name="next" value="/"' in r.text
