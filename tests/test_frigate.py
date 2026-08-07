@@ -162,3 +162,116 @@ def test_snapshot_failure_counts_error(consumer):
     assert consumer.stats.errors == 1
     with consumer.Session() as session:
         assert session.query(Event).count() == 0
+
+
+# -- input hostility (CLD-48 / CLD-75) --------------------------------------
+#
+# MQTT payloads are untrusted: the event id reaches a URL, the camera id
+# reaches a filesystem path and a Camera row, the label reaches class
+# routing. Every hostile value must be skipped as "bad-input" — never
+# raised — leaving no rows, no files, and no snapshot fetch.
+
+
+def assert_rejected(consumer, msg):
+    assert consumer.handle_message(msg) is False
+    assert consumer.stats.by_reason.get("bad-input", 0) >= 1
+    assert consumer._test_fetches == []  # hostile id never reached the URL
+    with consumer.Session() as session:
+        assert session.query(Event).count() == 0
+        assert session.query(Camera).count() == 0  # no Camera-row pollution
+
+
+@pytest.mark.parametrize(
+    "camera",
+    [
+        "../../etc",  # relative traversal
+        "..",  # bare traversal, allowed by the char class alone
+        ".hidden",  # leading dot
+        "/etc/passwd",  # absolute path
+        "a/b",  # separator
+        "a" * 65,  # overlong
+        "",  # empty
+        "with space",
+        5,  # non-string
+        None,
+    ],
+)
+def test_malicious_camera_rejected(consumer, camera):
+    assert_rejected(consumer, frigate_msg(camera=camera))
+
+
+@pytest.mark.parametrize(
+    "event_id",
+    [
+        "../../../etc/passwd",  # would traverse both URL and filename
+        "abc/../snap",
+        "abc?crop=1&h=9999",  # URL query smuggling
+        "abc#frag",
+        "id with spaces",
+        "x" * 65,
+        7,  # non-string (truthy, so it passes the no-id gate)
+    ],
+)
+def test_malicious_event_id_rejected(consumer, event_id):
+    assert_rejected(consumer, frigate_msg(event_id=event_id))
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        "not-a-number",
+        float("nan"),  # json.dumps emits bare NaN, which json.loads accepts
+        float("inf"),
+        -3.0,
+        1e9,  # far outside Frigate's [0, 1] confidence range
+        {"x": 1},  # non-scalar
+    ],
+)
+def test_malformed_score_rejected(consumer, score):
+    assert_rejected(consumer, frigate_msg(score=score))
+
+
+@pytest.mark.parametrize("label", ["../person", "a" * 65, "bad label", "", 3])
+def test_malicious_label_rejected(consumer, label):
+    assert_rejected(consumer, frigate_msg(label=label))
+
+
+def test_non_dict_after_rejected(consumer):
+    assert_rejected(consumer, json.dumps({"type": "new", "after": "not-a-dict"}))
+
+
+def test_malformed_end_time_does_not_raise(consumer):
+    consumer.handle_message(frigate_msg(kind="new"))
+    before = None
+    with consumer.Session() as session:
+        before = session.query(Event).one().last_seen
+    assert consumer.handle_message(frigate_msg(kind="end", end_time="garbage")) is False
+    assert consumer.stats.by_reason.get("bad-input") == 1
+    with consumer.Session() as session:
+        assert session.query(Event).one().last_seen == before  # untouched
+
+
+def test_save_snapshot_refuses_resolved_escape(consumer, tmp_path):
+    # Defense in depth behind the id validation: even if a traversal
+    # camera id reached _save_snapshot, the resolved-path check keeps the
+    # write inside media_dir.
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    event = SimpleNamespace(camera_id="../escape", detection_count=1)
+    path = consumer._save_snapshot(
+        "1712345678.123-abc", event, SNAPSHOT, datetime(2026, 8, 1, 12, 0, 0)
+    )
+    assert path is None
+    assert not (tmp_path / "escape").exists()
+
+
+def test_legitimate_message_still_processes(consumer):
+    # Positive control: a real Frigate payload (dotted id and all) passes
+    # every gate and runs the pipeline end-to-end.
+    assert consumer.handle_message(frigate_msg()) is True
+    assert consumer.stats.processed == 1
+    assert consumer.stats.by_reason.get("bad-input") is None
+    with consumer.Session() as session:
+        assert session.query(Event).one().external_id == "1712345678.123-abc"
+        assert session.query(EventIdentity).count() == 1
