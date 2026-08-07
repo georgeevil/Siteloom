@@ -73,6 +73,12 @@
     text-transform: uppercase; letter-spacing: .07em; color: var(--faint);
   }
   .ccrow { display: grid; grid-template-columns: 1fr 116px 128px 96px; }
+  .erow { display: grid; grid-template-columns: 1fr 128px; }
+  .erule {
+    width: 100%; padding: 6px 8px; border-radius: 6px; font: inherit; font-size: 12px;
+    font-family: var(--font-mono);
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
 
   /* New-class drawer */
   .drawer {
@@ -156,6 +162,55 @@
   unconfigured class gets a generic appearance identifier and its own vector
   collection on first sighting.
   {% if not auto_add %}Auto-add is currently off, so new classes are detected but not identified.{% endif %}
+</div>
+
+<h3 class="sec">Event rules</h3>
+<div class="tablecard">
+  <div class="crow erow head">
+    <div>Rule</div><div>Value</div>
+  </div>
+  {% for field, label, desc, step in [
+    ("min_detections", "Min detections", "an event needs this many detections to count as significant", "1"),
+    ("min_confidence", "Min confidence", "at least one detection this confident (0..1)", "0.05"),
+    ("min_duration_s", "Min duration (s)", "0 disables the duration gate", "0.5"),
+    ("stitch_gap_s", "Stitch gap (s)", "reattach trackless/fresh-track detections to an event seen this recently", "1"),
+    ("stitch_min_iou", "Stitch min IoU", "box overlap required for the stitch (0..1)", "0.01"),
+    ("identify_min_confidence", "Identify min confidence", "skip identity on weaker detections", "0.05"),
+    ("identify_min_crop_px", "Identify min crop (px)", "skip identity on smaller crops", "8"),
+  ] %}
+  <div class="crow erow">
+    <div class="cname">
+      <span style="min-width:0">
+        <span class="t">{{ label }}</span><br>
+        <span class="d">{{ desc }}</span>
+      </span>
+    </div>
+    <div>
+      <input class="erule" type="number" id="er-{{ field }}" data-field="{{ field }}"
+             value="{{ event_rules[field] }}" step="{{ step }}" min="0">
+    </div>
+  </div>
+  {% endfor %}
+  <div class="crow erow">
+    <div class="cname">
+      <span style="min-width:0">
+        <span class="t">Identify significant events only</span><br>
+        <span class="d">skip identity resolution while an event is still ephemeral — each unresolved fragment otherwise creates a new unknown identity</span>
+      </span>
+    </div>
+    <div>
+      <button type="button" class="toggle" id="er-identify_only_significant"
+              aria-pressed="{{ 'true' if event_rules.identify_only_significant else 'false' }}"
+              aria-label="Identify significant events only"><i></i></button>
+    </div>
+  </div>
+</div>
+<div class="banner">
+  Ephemeral events are stored and reachable via the Ephemeral chip on the
+  events page — never deleted. Rules apply to ingest on restart; run
+  <code>siteloom events retag</code> to reapply them to existing events.
+  <button class="btn-outline sm" id="er-save" style="margin-left:auto">Save event rules</button>
+  <span class="status" id="er-status"></span>
 </div>
 
 <h3 class="sec">Custom sub-classes</h3>
@@ -273,6 +328,30 @@
           : "save failed";
       })
       .catch(function () { status.textContent = "save failed"; });
+  };
+
+  var erSave = document.getElementById("er-save");
+  erSave.onclick = function () {
+    var body = {};
+    document.querySelectorAll(".erule").forEach(function (input) {
+      if (input.value !== "") body[input.getAttribute("data-field")] = Number(input.value);
+    });
+    body.identify_only_significant =
+      document.getElementById("er-identify_only_significant").getAttribute("aria-pressed") === "true";
+    var erStatus = document.getElementById("er-status");
+    erStatus.textContent = "saving…";
+    fetch("/classes/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        erStatus.textContent = res.ok
+          ? (res.d.written_to ? "saved to " + res.d.written_to : "applied in memory")
+          : "save failed";
+      })
+      .catch(function () { erStatus.textContent = "save failed"; });
   };
 })();
 </script>

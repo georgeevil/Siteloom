@@ -483,6 +483,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 seen=seen,
                 auto_add=config.identity.auto_add_classes,
                 confidence=config.detection.confidence,
+                event_rules=config.events,
                 class_rows=_class_rows(config, seen),
                 model_line=(
                     f"{config.detection.model} · {config.detection.device} · "
@@ -517,6 +518,33 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 ident.plate_ocr = bool(values["plate_ocr"])
         if "auto_add_classes" in body:
             config.identity.auto_add_classes = bool(body["auto_add_classes"])
+        written = _persist_config(config)
+        return JSONResponse({"ok": True, "written_to": written})
+
+    @app.post("/classes/events")
+    async def update_event_rules(request: Request):
+        """Rewrite the site-wide event rules (significance + stitching).
+
+        Same contract as /classes/detection: live config object + YAML
+        write-back. Applies to ingest on restart — `siteloom serve` and
+        `siteloom run` are separate processes. Per-camera overrides stay
+        YAML-only (CameraConfig.events).
+        """
+        body = await request.json()
+        rules = config.events
+        for field, cast in (
+            ("min_detections", int),
+            ("min_duration_s", float),
+            ("min_confidence", float),
+            ("stitch_gap_s", float),
+            ("stitch_min_iou", float),
+            ("identify_min_confidence", float),
+            ("identify_min_crop_px", int),
+        ):
+            if field in body:
+                setattr(rules, field, cast(body[field]))
+        if "identify_only_significant" in body:
+            rules.identify_only_significant = bool(body["identify_only_significant"])
         written = _persist_config(config)
         return JSONResponse({"ok": True, "written_to": written})
 

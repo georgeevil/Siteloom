@@ -29,6 +29,15 @@ class ZoneConfig(BaseModel):
         return pts
 
 
+class EventRulesOverride(BaseModel):
+    """Per-camera overrides for EventConfig — only non-None fields apply."""
+
+    min_detections: int | None = None
+    min_duration_s: float | None = None
+    min_confidence: float | None = None
+    stitch_gap_s: float | None = None
+
+
 class CameraConfig(BaseModel):
     id: str
     name: str = ""
@@ -46,6 +55,9 @@ class CameraConfig(BaseModel):
     # Only report detections inside at least one zone. If no zones are
     # configured the full frame is used regardless of this flag.
     require_zone: bool = False
+    # Per-camera overrides of the site-wide event rules (a busy doorway
+    # and a quiet driveway want different stitching/significance gates).
+    events: "EventRulesOverride | None" = None
 
 
 class UniFiConfig(BaseModel):
@@ -90,6 +102,66 @@ class DetectionConfig(BaseModel):
         "cat",
         "bird",
     ]
+
+
+class EventConfig(BaseModel):
+    """Event consolidation and significance gating.
+
+    A sampled stream fragments one physical visit into many short events
+    (trackless detections, tracker restarts, class flapping). Stitching
+    reattaches those fragments at ingest time; the significance gate keeps
+    the fragments that remain out of the default triage view and away from
+    identity resolution. Ephemeral (insignificant) events are stored and
+    inspectable — never dropped.
+    """
+
+    # An event is significant once it has this many detections...
+    min_detections: int = 3
+    # ...spanning at least this long (0 = off; duration is largely
+    # redundant with the count at a fixed sample rate)...
+    min_duration_s: float = 0.0
+    # ...with at least one detection this confident (gates on
+    # Event.best_confidence; the detector's own threshold stays lower so
+    # weak evidence is still recorded).
+    min_confidence: float = 0.5
+    # Stitch a trackless or fresh-track detection onto the most recent
+    # event of the same camera + class group seen within this many
+    # seconds, if their boxes overlap. Keep well under EVENT_LINK_GAP_S.
+    stitch_gap_s: float = 15.0
+    # Minimum IoU between the new detection and the candidate event's
+    # last detection for the stitch to apply (guards against merging two
+    # subjects crossing the same camera back-to-back).
+    stitch_min_iou: float = 0.05
+    # Classes the detector flaps between mid-track; members of a group
+    # share events instead of splitting them.
+    class_groups: list[list[str]] = [["car", "truck", "bus"]]
+    # Identity resolution gates: skip crops from weak or tiny detections,
+    # and (by default) skip events still below the significance gate —
+    # each unresolved fragment otherwise mints a fresh unknown identity.
+    identify_min_confidence: float = 0.5
+    identify_min_crop_px: int = 48
+    identify_only_significant: bool = True
+
+    def for_camera(self, camera: "CameraConfig") -> "EventConfig":
+        """Effective rules for one camera: site defaults + overrides.
+
+        Shared by ingest and `siteloom events retag` so the two can never
+        disagree about what "significant" means.
+        """
+        if camera.events is None:
+            return self
+        merged = self.model_copy()
+        for field, value in camera.events.model_dump().items():
+            if value is not None:
+                setattr(merged, field, value)
+        return merged
+
+    def group_for(self, class_name: str) -> list[str]:
+        """The class group containing class_name (or just itself)."""
+        for group in self.class_groups:
+            if class_name in group:
+                return group
+        return [class_name]
 
 
 class IdentifierConfig(BaseModel):
@@ -287,6 +359,7 @@ class SiteConfig(BaseModel):
     unifi: UniFiConfig = UniFiConfig()
     backend: BackendConfig = BackendConfig()
     detection: DetectionConfig = DetectionConfig()
+    events: EventConfig = EventConfig()
     identity: IdentityConfig = IdentityConfig()
     audio: AudioConfig = AudioConfig()
     guests: GuestConfig = GuestConfig()

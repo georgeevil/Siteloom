@@ -36,3 +36,47 @@ def test_site_config_defaults():
     cfg = SiteConfig(site_id="s", cameras=[CameraConfig(id="c", source="x")])
     assert cfg.detection.device == "mps"
     assert cfg.storage.db_url.startswith("sqlite")
+
+
+def test_event_rules_defaults():
+    cfg = SiteConfig(site_id="s")
+    assert cfg.events.min_detections == 3
+    assert cfg.events.min_confidence == 0.5
+    assert cfg.events.stitch_gap_s == 15.0
+    assert cfg.events.identify_only_significant is True
+    assert cfg.events.group_for("truck") == ["car", "truck", "bus"]
+    assert cfg.events.group_for("person") == ["person"]
+
+
+def test_event_rules_per_camera_override_merges_only_set_fields():
+    from siteloom.config import EventRulesOverride
+
+    cfg = SiteConfig(
+        site_id="s",
+        cameras=[
+            CameraConfig(
+                id="c",
+                source="x",
+                events=EventRulesOverride(min_detections=1, stitch_gap_s=5.0),
+            )
+        ],
+    )
+    eff = cfg.events.for_camera(cfg.cameras[0])
+    assert eff.min_detections == 1
+    assert eff.stitch_gap_s == 5.0
+    assert eff.min_confidence == cfg.events.min_confidence  # untouched default
+    # No override -> the site object itself (no copy churn).
+    plain = CameraConfig(id="p", source="x")
+    assert cfg.events.for_camera(plain) is cfg.events
+
+
+def test_event_rules_round_trip_through_yaml(tmp_path):
+    from siteloom.config import save_config
+
+    cfg = SiteConfig(site_id="s")
+    cfg.events.min_detections = 7
+    path = tmp_path / "site.yaml"
+    save_config(cfg, path)
+    again = load_config(path)
+    assert again.events.min_detections == 7
+    assert again.events.class_groups == [["car", "truck", "bus"]]

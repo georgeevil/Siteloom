@@ -280,3 +280,92 @@ def test_rail_deep_link_to_an_event_off_the_loaded_page(deep_link_env):
     frag = deep_link_env.client.get(f"/events/{deep_link_env.old_id}/rail")
     assert frag.status_code == 200
     assert "Cam One" in frag.text
+
+
+@pytest.fixture
+def gated_env(tmp_path):
+    """One significant event and one ephemeral fragment on the same camera."""
+    config = SiteConfig(
+        site_id="test-site",
+        cameras=[CameraConfig(id="cam1", adapter="file", source="x")],
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/gated.db", media_dir=str(tmp_path / "media")
+        ),
+    )
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    with Session() as session:
+        session.add(Camera(id="cam1", site_id="test-site", name="Cam One"))
+        session.add(
+            Event(
+                camera_id="cam1",
+                track_id=1,
+                class_name="person",
+                first_seen=datetime(2026, 8, 5, 12, 0, 0),
+                last_seen=datetime(2026, 8, 5, 12, 0, 30),
+                detection_count=12,
+                best_confidence=0.9,
+                significant=True,
+            )
+        )
+        session.add(
+            Event(
+                camera_id="cam1",
+                track_id=None,
+                class_name="dog",
+                first_seen=datetime(2026, 8, 5, 12, 1, 0),
+                last_seen=datetime(2026, 8, 5, 12, 1, 1),
+                detection_count=1,
+                best_confidence=0.45,
+                significant=False,
+            )
+        )
+        session.commit()
+    return SimpleNamespace(client=TestClient(create_app(config)), Session=Session)
+
+
+def test_default_view_hides_ephemeral_events(gated_env):
+    r = gated_env.client.get("/")
+    assert r.status_code == 200
+    assert 'data-event="1"' in r.text  # significant person event
+    assert 'data-event="2"' not in r.text  # ephemeral dog fragment
+    # The count line links to the hidden events rather than losing them.
+    assert "1 ephemeral hidden" in r.text
+
+
+def test_ephemeral_chip_reveals_gated_events(gated_env):
+    r = gated_env.client.get("/", params={"show_ephemeral": "1"})
+    assert 'data-event="1"' in r.text
+    assert 'data-event="2"' in r.text
+    assert "ephemeral hidden" not in r.text
+
+
+def test_min_conf_and_min_count_filter_events(gated_env):
+    r = gated_env.client.get(
+        "/", params={"show_ephemeral": "1", "min_conf": "0.8"}
+    )
+    assert 'data-event="1"' in r.text and 'data-event="2"' not in r.text
+    r = gated_env.client.get(
+        "/", params={"show_ephemeral": "1", "min_count": "5"}
+    )
+    assert 'data-event="1"' in r.text and 'data-event="2"' not in r.text
+
+
+def test_triage_url_round_trips_new_filters(gated_env):
+    """Toggling any chip must preserve the ephemeral flag and numeric
+    filters, like every other filter (the _triage_url contract)."""
+    r = gated_env.client.get(
+        "/",
+        params={
+            "show_ephemeral": "1",
+            "min_conf": "0.4",
+            "min_count": "1",
+            "camera": "cam1",
+        },
+    )
+    assert r.status_code == 200
+    # The Needs-review chip link keeps all three new params.
+    assert "show_ephemeral=1" in r.text
+    assert "min_conf=0.4" in r.text
+    assert "min_count=1" in r.text

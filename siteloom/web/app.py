@@ -42,7 +42,7 @@ from siteloom.store import (
     init_db,
     make_engine,
 )
-from siteloom.store.models import status_clause, unmatched_clause
+from siteloom.store.models import significance_clause, status_clause, unmatched_clause
 
 log = logging.getLogger(__name__)
 
@@ -75,10 +75,10 @@ def _triage_url(base: dict, **overrides) -> str:
     """
     params: list[tuple[str, str]] = []
     merged = {**base, **overrides}
-    for key in ("camera", "class", "since", "until"):
+    for key in ("camera", "class", "since", "until", "min_conf", "min_count"):
         if merged.get(key):
             params.append((key, str(merged[key])))
-    for flag in ("needs_review", "unmatched"):
+    for flag in ("needs_review", "unmatched", "show_ephemeral"):
         if merged.get(flag):
             params.append((flag, "1"))
     for k in merged.get("kinds") or []:
@@ -329,6 +329,9 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         until: str | None = None,
         needs_review: bool = False,
         unmatched: bool = False,
+        show_ephemeral: bool = False,
+        min_conf: float | None = None,
+        min_count: int | None = None,
         kind: list[str] = Query(default=[]),
         selected: int | None = None,
         page: int = 1,
@@ -366,6 +369,22 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 q = q.filter(unmatched_clause())
             if kinds:
                 q = q.filter(or_(*(_kind_clause(k) for k in kinds)))
+            if min_conf is not None:
+                q = q.filter(Event.best_confidence >= min_conf)
+            if min_count is not None:
+                q = q.filter(Event.detection_count >= min_count)
+            # The significance gate is the default view: ephemeral events
+            # (fragments below EventConfig's thresholds) stay hidden until
+            # asked for. SQL-side, like every other filter, so paging
+            # counts only rows the operator sees.
+            hidden = 0
+            if not show_ephemeral:
+                hidden = session.scalar(
+                    select(func.count()).select_from(
+                        q.filter(not_(significance_clause())).subquery()
+                    )
+                )
+                q = q.filter(significance_clause())
 
             total = session.scalar(
                 select(func.count()).select_from(Event)
@@ -395,6 +414,9 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             "until": until,
             "needs_review": needs_review,
             "unmatched": unmatched,
+            "show_ephemeral": show_ephemeral,
+            "min_conf": min_conf,
+            "min_count": min_count,
             "kinds": kinds,
         }
         # Selecting a row is a filter-preserving link, and every chip
@@ -402,6 +424,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         chip_urls = {
             "needs_review": _triage_url(state, needs_review=not needs_review),
             "unmatched": _triage_url(state, unmatched=not unmatched),
+            "show_ephemeral": _triage_url(state, show_ephemeral=not show_ephemeral),
         }
         for k in CLASS_KINDS:
             chip_urls[k] = _triage_url(
@@ -430,15 +453,22 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     "class": class_name or "",
                     "since": since or "",
                     "until": until or "",
+                    "min_conf": min_conf if min_conf is not None else "",
+                    "min_count": min_count if min_count is not None else "",
                 },
                 "chips": {
                     "needs_review": needs_review,
                     "unmatched": unmatched,
+                    "show_ephemeral": show_ephemeral,
                     "kinds": kinds,
                 },
-                "chip_count": int(needs_review) + int(unmatched) + len(kinds),
+                "chip_count": int(needs_review)
+                + int(unmatched)
+                + int(show_ephemeral)
+                + len(kinds),
                 "matched": matched,
                 "total": total,
+                "hidden": hidden,
                 "selected": selected,
                 "rail": rail,
                 "page": page,

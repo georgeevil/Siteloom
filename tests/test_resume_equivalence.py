@@ -269,3 +269,108 @@ def test_resumed_takeout_does_not_duplicate_tags_or_faces(tmp_path, takeout):
 
     importer.import_tree(takeout, batch_size=1)  # a full, redundant rerun
     assert takeout_snapshot(importer.Session) == first
+
+
+# -- ingest restart (event stitching) ---------------------------------------
+
+
+def _ingest_config(tmp_path, name: str, source: Path) -> SiteConfig:
+    from siteloom.config import CameraConfig
+
+    root = tmp_path / name
+    root.mkdir()
+    return SiteConfig(
+        site_id="test",
+        cameras=[
+            CameraConfig(
+                id="cam1",
+                adapter="file",
+                source=str(source),
+                sample_fps=5.0,
+                modules=["detection"],
+            )
+        ],
+        identity=IdentityConfig(enabled=False),
+        storage=StorageConfig(
+            db_url=f"sqlite:///{root}/ingest.db", media_dir=str(root / "media")
+        ),
+    )
+
+
+def _ingest_snapshot(Session) -> list:
+    """Events by content — row and track ids differ across runs."""
+    from siteloom.store import Event
+
+    with Session() as session:
+        return sorted(
+            (
+                e.camera_id,
+                e.class_name,
+                e.first_seen,
+                e.last_seen,
+                e.detection_count,
+                e.significant,
+            )
+            for e in session.query(Event).all()
+        )
+
+
+def _make_ingest(config, tracks_per_clip):
+    """One IngestService whose stub detector emits the given track id for
+    every sampled frame of each clip, in order (10 samples per clip)."""
+    from test_ingest import SequenceDetector, _det
+
+    from siteloom.dispatch import LocalBackend
+    from siteloom.ingest import IngestService
+
+    frames = [
+        [_det(track_id=t)] for t in tracks_per_clip for _ in range(10)
+    ]
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", SequenceDetector(frames))
+    return IngestService(config, dispatcher=dispatcher)
+
+
+def test_restarted_ingest_stitches_like_a_clean_run(tmp_path, sample_video):
+    """The stitch fallback reads prior rows, so a run interrupted at a
+    clip boundary and resumed by a fresh process (new tracker, new track
+    ids) must land on the same events as one uninterrupted run. Frame
+    timestamps come from file mtime + frame offset — never wall clock —
+    which is what makes this deterministic."""
+    import os
+    import shutil
+
+    corpus = tmp_path / "clips"
+    corpus.mkdir()
+    clip1 = corpus / "a_clip1.mp4"
+    clip2 = corpus / "b_clip2.mp4"
+    shutil.copy(sample_video, clip1)
+    shutil.copy(sample_video, clip2)
+    base = 1_754_000_000  # clip2 starts 3 s after clip1 (2 s of media)
+    os.utime(clip1, (base, base))
+    os.utime(clip2, (base + 3, base + 3))
+
+    # Clean: one service processes both clips; the tracker restarts per
+    # clip, so clip2 arrives under a different track id and must stitch.
+    clean = _make_ingest(
+        _ingest_config(tmp_path, "clean", corpus), tracks_per_clip=[1, 2]
+    )
+    clean.run_camera(clean.config.cameras[0])
+
+    # Interrupted-at-clip-boundary + resumed by a fresh process: same DB,
+    # new service (fresh detector state) per half.
+    half1 = _make_ingest(
+        _ingest_config(tmp_path, "split", clip1), tracks_per_clip=[1]
+    )
+    half1.run_camera(half1.config.cameras[0])
+    resumed_config = _ingest_config(tmp_path, "split-resume", clip2)
+    resumed_config.storage = half1.config.storage  # same database
+    half2 = _make_ingest(resumed_config, tracks_per_clip=[1])
+    half2.run_camera(half2.config.cameras[0])
+
+    clean_snap = _ingest_snapshot(clean.Session)
+    split_snap = _ingest_snapshot(half2.Session)
+    assert clean_snap == split_snap
+    # And the stitch actually happened: one event spanning both clips.
+    assert len(clean_snap) == 1
+    assert clean_snap[0][4] == 20  # detections from both clips

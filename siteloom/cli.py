@@ -27,7 +27,61 @@ app.add_typer(train_app, name="train")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(users_app, name="users")
 
+events_app = typer.Typer(help="Event maintenance.")
+app.add_typer(events_app, name="events")
+
 CONFIG_OPT = typer.Option("site.yaml", "--config", "-c", help="Site config YAML")
+
+
+@events_app.command()
+def retag(config: Path = CONFIG_OPT):
+    """Recompute every event's significance flag from the current rules.
+
+    The gate normally flips at ingest time; this reapplies it to existing
+    rows — after installing the feature on a database that predates it, or
+    after changing the rules. Uses the same per-camera effective rules as
+    ingest (EventConfig.for_camera), is idempotent, and never deletes
+    anything.
+    """
+    from siteloom.config import load_config
+    from siteloom.store import Event, get_session, init_db as _init, make_engine
+
+    cfg = load_config(config)
+    engine = make_engine(cfg.storage.db_url)
+    _init(engine)
+    Session = get_session(engine)
+    overrides = {cam.id: cfg.events.for_camera(cam) for cam in cfg.cameras}
+    with Session() as session:
+        before = (
+            session.query(Event).filter(Event.significant.is_(True)).count()
+        )
+        changed = 0
+        # Externally curated events (Frigate consumer sets external_id)
+        # are pre-gated upstream and stay significant; events from cameras
+        # no longer in the config are judged by the site-wide defaults.
+        for event in (
+            session.query(Event).filter(Event.external_id.is_(None)).yield_per(500)
+        ):
+            rules = overrides.get(event.camera_id, cfg.events)
+            significant = (
+                event.detection_count >= rules.min_detections
+                and event.best_confidence >= rules.min_confidence
+            )
+            # Duration gates only when configured — out-of-order frame
+            # timestamps can make last_seen precede first_seen.
+            if significant and rules.min_duration_s > 0:
+                duration = (event.last_seen - event.first_seen).total_seconds()
+                significant = duration >= rules.min_duration_s
+            if event.significant != significant:
+                event.significant = significant
+                changed += 1
+        session.commit()
+        after = session.query(Event).filter(Event.significant.is_(True)).count()
+        total = session.query(Event).count()
+    typer.echo(
+        f"retagged {changed} of {total} events: "
+        f"{before} -> {after} significant ({total - after} ephemeral)"
+    )
 
 
 @app.command()

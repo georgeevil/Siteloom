@@ -213,6 +213,10 @@ class FrigateConsumer:
                 first_seen=ts,
                 last_seen=ts,
                 guest_window=False,
+                # Frigate already motion/score-gates its events; the
+                # significance gate is ingest's fragmentation fix and
+                # must not hide externally curated events.
+                significant=True,
             )
             session.add(event)
             session.flush()
