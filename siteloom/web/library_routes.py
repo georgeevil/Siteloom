@@ -679,14 +679,22 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         """Pull selected annotations out into a fresh identity.
 
         Used when a cluster has absorbed two people. Vectors move with
-        the annotations: the fresh identity is enrolled from the crops
-        it takes (a label without vectors is a name the system cannot
-        see), and the old identity's vectors are dropped and rebuilt
-        from what remains, because a polluted gallery keeps
-        re-attracting the wrong faces.
+        the annotations: the fresh identity is enrolled from the verified
+        crops it takes (a label without vectors is a name the system
+        cannot see), and the source loses exactly those crops' vectors,
+        because a polluted gallery keeps re-attracting the wrong faces.
+
+        The source's gallery is edited, never rebuilt. Most of an
+        identity's vectors come from live camera matching
+        (identity/resolver.py adds them directly) and have no Annotation
+        row to re-embed them from, so dropping the gallery and
+        reconstructing it from annotations would delete everything the
+        cameras learned. What can be removed safely is the moved crops'
+        own vectors, identified by re-embedding them and matching on
+        numerical identity — see VectorStore.delete_duplicates_of.
         """
         from siteloom.identity import get_shared_store
-        from siteloom.identity.enroll import rebuild_gallery
+        from siteloom.identity.enroll import embed_annotations, enroll_embedded
 
         tokens = [t.strip() for t in annotation_ids.split(",") if t.strip()]
         malformed = [t for t in tokens if not t.isdigit()]
@@ -756,30 +764,52 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             session.flush()
             for annotation in moved:
                 annotation.identity_id = fresh.id
-            # Enroll the fresh identity from the crops it now owns, then
-            # rebuild the source's gallery from what remains. Historical
-            # EventIdentity claims stay with the source: library
-            # annotations carry no link to camera events, so there is
-            # nothing to derive "this event was the split-off subject"
-            # from — the rebuilt galleries fix attribution going forward,
-            # and per-event verdicts (CLD-16) remain the tool for
-            # correcting individual past claims.
-            rebuild_gallery(vectors, embedder, fresh, moved, max_vectors)
-            remaining = session.scalars(
-                select(Annotation).filter(Annotation.identity_id == identity_id)
-            ).all()
-            rebuild_gallery(vectors, embedder, source, remaining, max_vectors)
-            # Appearance counts tally camera sightings, which cannot be
-            # apportioned from library crops; count the moved crops as the
-            # new identity's appearances and deduct them from the source
-            # so the pair still sums to something sensible.
-            fresh.appearance_count = len(moved)
-            source.appearance_count = max(source.appearance_count - len(moved), 0)
+            # Enroll the fresh identity from the verified crops it now
+            # owns, then take those same vectors off the source. The
+            # embeddings are computed once and used for both halves, so
+            # the vector deleted from the source is provably the one the
+            # crop contributed. Historical EventIdentity claims stay with
+            # the source: library annotations carry no link to camera
+            # events, so there is nothing to derive "this event was the
+            # split-off subject" from — per-event verdicts (CLD-16)
+            # remain the tool for correcting individual past claims.
+            embedded = embed_annotations(embedder, moved)
+            enroll_embedded(vectors, fresh, embedded, max_vectors)
+            removed = vectors.delete_duplicates_of(
+                source.identifier_key,
+                source.id,
+                [embedding for _, embedding in embedded],
+            )
+            # Read both counts back from the store rather than doing
+            # arithmetic on them: vector_count is incremented by several
+            # writers and drifts, and a split is exactly when an operator
+            # is looking at the number.
+            fresh.vector_count = vectors.count_identity(
+                fresh.identifier_key, fresh.id
+            )
+            source.vector_count = vectors.count_identity(
+                source.identifier_key, source.id
+            )
+            # Appearance counts tally sightings; a library crop that was
+            # enrolled counted as one on the source (identity/enroll.py),
+            # so exactly those move. Live camera sightings stay with the
+            # source along with their event links.
+            fresh.appearance_count = removed
+            source.appearance_count = max(source.appearance_count - removed, 0)
             moved_paths = {a.crop_path for a in moved if a.crop_path}
             if source.best_crop_path and source.best_crop_path in moved_paths:
                 # The source handed its face to the new identity; pick it
                 # a new thumbnail from what it kept.
                 fresh.best_crop_path = source.best_crop_path
+                remaining = session.scalars(
+                    select(Annotation)
+                    .filter(
+                        Annotation.identity_id == identity_id,
+                        Annotation.rejected.is_(False),
+                        Annotation.crop_path.is_not(None),
+                    )
+                    .order_by(Annotation.verified.desc(), Annotation.id)
+                ).all()
                 source.best_crop_path = next(
                     (a.crop_path for a in remaining if a.crop_path), None
                 )

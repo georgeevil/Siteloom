@@ -1,12 +1,21 @@
 """Identity split (web console) — vectors move with the annotations.
 
 Split exists to fix a polluted gallery, so the split endpoint must do
-three things beyond re-pointing Annotation rows: enroll the fresh
-identity from the crops it takes (a label without vectors is a name the
-system cannot see), rebuild the source's gallery from what remains
-(pollution left in place keeps re-attracting the wrong subject), and
-refuse with an actionable 503 when another process holds the embedded
-vector store — the same shared-client rules the merge endpoint follows.
+more than re-point Annotation rows: it enrolls the fresh identity from
+the verified crops it takes (a label without vectors is a name the
+system cannot see), removes exactly those crops' vectors from the
+source, and refuses with an actionable 503 when another process holds
+the embedded vector store — the same shared-client rules merge follows.
+
+The sharpest constraint is what split must NOT do. An identity's
+gallery is the union of two disjoint populations: vectors added by live
+camera matching (identity/resolver.py adds them directly and never
+creates an Annotation) and vectors enrolled from verified library
+annotations. Only the second is reconstructible, so rebuilding a
+gallery from annotations would silently delete everything the cameras
+learned. `test_split_keeps_live_matched_vectors_it_cannot_rebuild`
+pins that; it is the reason the source's gallery is edited surgically
+rather than dropped and rebuilt.
 
 The embedder is stubbed (colour-square crops -> fixed unit vectors);
 tests must not require model weights.
@@ -164,6 +173,9 @@ def split_env(tmp_path, monkeypatch):
                 class_name="car",
                 identity_id=source.id,
                 crop_path=crop_paths[name],
+                # Verified and enrolled: each contributed the vector
+                # seeded above, which is what makes them removable.
+                verified=True,
                 enrolled=True,
                 created_at=datetime(2026, 8, 1),
             )
@@ -191,7 +203,7 @@ def _vector_owner(config, vector) -> tuple[int, float]:
     return hit.identity_id, hit.score
 
 
-def test_split_moves_annotations_and_rebuilds_vectors_on_both_sides(split_env):
+def test_split_moves_annotations_and_their_vectors(split_env):
     red_id = split_env.annotation_ids["red"]
     r = split_env.client.post(
         f"/identities/{split_env.source_id}/split",
@@ -217,7 +229,7 @@ def test_split_moves_annotations_and_rebuilds_vectors_on_both_sides(split_env):
         # and the source falls back to a crop it still owns.
         assert fresh.best_crop_path == split_env.crop_paths["red"]
         source = session.get(Identity, split_env.source_id)
-        assert source.vector_count == 2  # rebuilt from what remains
+        assert source.vector_count == 2  # lost exactly the moved crop's
         assert source.appearance_count == 10 - 1
         assert source.best_crop_path in (
             split_env.crop_paths["blue"],
@@ -235,6 +247,165 @@ def test_split_moves_annotations_and_rebuilds_vectors_on_both_sides(split_env):
     for name in ("blue", "green"):
         owner, score = _vector_owner(split_env.config, COLOURS[name][1])
         assert owner == split_env.source_id and score > 0.99
+
+
+def test_split_keeps_live_matched_vectors_it_cannot_rebuild(split_env):
+    """The gallery is two disjoint populations and only one of them is
+    reconstructible: live camera matching adds vectors directly with no
+    Annotation row (identity/resolver.py), so rebuilding a gallery from
+    annotations would delete everything the cameras learned. Split must
+    remove the moved crops' vectors and nothing else.
+    """
+    store = get_shared_store(split_env.config.identity.vector_db_path)
+    # Vectors the cameras contributed: no annotation covers them.
+    live = [_unit(1.0, 1.0, 0.0, 0.0), _unit(0.0, 1.0, 1.0, 0.0)]
+    for vector in live:
+        store.add("vehicle", vector, identity_id=split_env.source_id)
+    with split_env.Session() as session:
+        session.get(Identity, split_env.source_id).vector_count = 5
+        session.commit()
+
+    r = split_env.client.post(
+        f"/identities/{split_env.source_id}/split",
+        data={"annotation_ids": str(split_env.annotation_ids["red"])},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    with split_env.Session() as session:
+        source = session.get(Identity, split_env.source_id)
+        # 5 seeded - 1 moved: the two live vectors and the two annotation
+        # vectors that stayed are all still there.
+        assert source.vector_count == 4
+    for vector in live:
+        owner, score = _vector_owner(split_env.config, vector)
+        assert owner == split_env.source_id and score > 0.99
+
+
+def test_split_enrolls_only_verified_crops_and_leaves_the_rest_sweepable(split_env):
+    """Only verified annotations are ground truth, so an unreviewed
+    auto-assignment must not enter the live gallery — and must not be
+    flagged `enrolled` either, or the confirmation a human gives it
+    later never reaches the vector store (`enroll_verified` sweeps on
+    enrolled=False), which is a label the system cannot see.
+    """
+    with split_env.Session() as session:
+        item_id = session.get(
+            Annotation, split_env.annotation_ids["red"]
+        ).item_id
+        guess = Annotation(
+            item_id=item_id,
+            bbox="[0.2, 0.2, 0.6, 0.6]",
+            class_name="car",
+            identity_id=split_env.source_id,
+            crop_path=split_env.crop_paths["green"],
+            source="auto",
+            verified=False,
+            created_at=datetime(2026, 8, 2),
+        )
+        session.add(guess)
+        session.commit()
+        guess_id = guess.id
+
+    r = split_env.client.post(
+        f"/identities/{split_env.source_id}/split",
+        data={
+            "annotation_ids": f"{split_env.annotation_ids['red']},{guess_id}"
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    new_id = int(r.headers["location"].split("/identities/")[1].split("?")[0])
+
+    with split_env.Session() as session:
+        guess = session.get(Annotation, guess_id)
+        assert guess.identity_id == new_id  # the row still moves
+        assert not guess.enrolled  # ... but contributed no vector
+        # Only the verified crop was enrolled.
+        assert session.get(Identity, new_id).vector_count == 1
+
+
+def test_a_crop_skipped_by_split_is_still_enrolled_when_verified_later(split_env):
+    """The `enrolled` flag is what retires an annotation from
+    `enroll_verified`. Split must set it only on crops whose vector
+    actually landed — otherwise a human confirming one of the crops
+    split passed over (unverified, or over the identifier's cap) sees
+    the sweep skip it forever, and the name never reaches the store.
+    """
+    with split_env.Session() as session:
+        item_id = session.get(
+            Annotation, split_env.annotation_ids["red"]
+        ).item_id
+        face_identity = Identity(
+            identifier_key="face",
+            class_name="person",
+            label="Dana",
+            first_seen=datetime(2026, 8, 6),
+            last_seen=datetime(2026, 8, 6),
+        )
+        session.add(face_identity)
+        session.flush()
+        pending = Annotation(
+            item_id=item_id,
+            bbox="[0.2, 0.2, 0.6, 0.6]",
+            class_name="face",
+            identity_id=face_identity.id,
+            crop_path=split_env.crop_paths["blue"],
+            proposed_name="Dana",
+            source="auto",
+            verified=False,  # split would pass this over
+            created_at=datetime(2026, 8, 2),
+        )
+        session.add(pending)
+        session.commit()
+        pending_id, face_id = pending.id, face_identity.id
+
+    # The human confirms it after the split.
+    from siteloom.identity.enroll import enroll_verified
+
+    vectors = get_shared_store(split_env.config.identity.vector_db_path)
+    with split_env.Session() as session:
+        session.get(Annotation, pending_id).verified = True
+        session.commit()
+        stats = enroll_verified(session, vectors, StubEmbedder())
+
+    assert stats.enrolled == 1
+    with split_env.Session() as session:
+        assert session.get(Annotation, pending_id).enrolled
+        assert session.get(Identity, face_id).vector_count == 1
+
+
+def test_split_does_not_touch_another_identitys_matching_vectors(split_env):
+    """`delete_duplicates_of` filters by identity before comparing
+    vectors. Two vehicles photographed in the same colour produce
+    near-identical embeddings, and deleting by similarity alone would
+    strip a bystander identity's gallery."""
+    store = get_shared_store(split_env.config.identity.vector_db_path)
+    with split_env.Session() as session:
+        bystander = Identity(
+            identifier_key="vehicle",
+            class_name="car",
+            label="Someone Else",
+            first_seen=datetime(2026, 8, 6),
+            last_seen=datetime(2026, 8, 6),
+            vector_count=1,
+        )
+        session.add(bystander)
+        session.commit()
+        bystander_id = bystander.id
+    # The exact vector split is about to remove from the source.
+    store.add("vehicle", COLOURS["red"][1], identity_id=bystander_id)
+
+    r = split_env.client.post(
+        f"/identities/{split_env.source_id}/split",
+        data={"annotation_ids": str(split_env.annotation_ids["red"])},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    assert store.count_identity("vehicle", bystander_id) == 1
+    with split_env.Session() as session:
+        assert session.get(Identity, bystander_id).vector_count == 1
 
 
 def test_split_rejects_invalid_and_empty_annotation_ids(split_env):

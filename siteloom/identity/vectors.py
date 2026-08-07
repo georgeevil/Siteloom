@@ -212,6 +212,87 @@ class VectorStore:
         )
 
     @_locked
+    def count_identity(self, collection: str, identity_id: int) -> int:
+        """How many vectors an identity actually has in the store.
+
+        Identity.vector_count is maintained by increments across several
+        writers and can drift; this is the authority when a count has to
+        be correct (identity split rewrites both sides from it)."""
+        if not self._client.collection_exists(collection):
+            return 0
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        return int(
+            self._client.count(
+                collection_name=collection,
+                count_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="identity_id", match=MatchValue(value=identity_id)
+                        )
+                    ]
+                ),
+            ).count
+        )
+
+    @_locked
+    def delete_duplicates_of(
+        self,
+        collection: str,
+        identity_id: int,
+        vectors: list[np.ndarray],
+        min_score: float = 0.999,
+    ) -> int:
+        """Delete an identity's vectors that duplicate one of `vectors`.
+
+        Provenance-free surgery for the identity split. Vector payloads
+        record only `identity_id` — nothing says which stored vector came
+        from which annotation — so an identity's gallery cannot be
+        separated by origin. What *can* be established is numerical
+        identity: re-embedding a stored crop with the same embedder
+        reproduces the vector that crop contributed (deterministic
+        embedder, same image — "one crop, two jobs"), so a stored vector
+        at cosine ≈ 1.0 to a re-embedded crop IS that crop's vector.
+
+        This deletes only those provable duplicates and leaves every
+        other vector alone — crucially the ones live camera matching
+        added, which have no annotation to rebuild them from and would
+        be destroyed by a wholesale delete-and-rebuild.
+
+        Vectors from the embedders are L2-normalized, so the dot product
+        is the cosine similarity. Returns the number deleted.
+        """
+        if not vectors or not self._client.collection_exists(collection):
+            return 0
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        points, _ = self._client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="identity_id", match=MatchValue(value=identity_id)
+                    )
+                ]
+            ),
+            limit=10_000,
+            with_vectors=True,
+        )
+        reference = np.asarray(vectors, dtype=np.float32)
+        doomed = []
+        for point in points:
+            if point.vector is None:
+                continue
+            candidate = np.asarray(point.vector, dtype=np.float32)
+            if candidate.shape[0] != reference.shape[1]:
+                continue  # a different embedding space; not ours to judge
+            if float(np.max(reference @ candidate)) >= min_score:
+                doomed.append(point.id)
+        if doomed:
+            self._client.delete(collection_name=collection, points_selector=doomed)
+        return len(doomed)
+
+    @_locked
     def reassign_identity(self, collection: str, old_id: int, new_id: int) -> int:
         """Move all of one identity's vectors to another (merge)."""
         if not self._client.collection_exists(collection):

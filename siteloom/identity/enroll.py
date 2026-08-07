@@ -85,38 +85,44 @@ def embed_crop_file(embedder, crop_path: str | None):
     return embedding
 
 
-def rebuild_gallery(
-    vectors, embedder, identity, annotations, max_vectors: int = 20
-) -> int:
-    """Drop an identity's vectors and re-embed them from stored crops.
+def embed_annotations(embedder, annotations) -> list[tuple[Annotation, "object"]]:
+    """Re-embed the annotations that are allowed to become vectors.
 
-    The split path: after annotations change hands, both identities'
-    galleries must be rebuilt from what each now owns — a polluted
-    gallery keeps re-attracting the wrong subject, and a fresh identity
-    with no vectors is a name the system cannot see. Verified crops
-    enroll first so the cap keeps human-confirmed samples; rejected and
-    crop-less annotations contribute nothing. Every considered
-    annotation is marked enrolled — a hopeless crop fails identically
-    on every pass (same policy as enroll_annotation), and over-cap
-    crops must not be re-swept either.
-
-    Returns the number of vectors now in the gallery (also written to
-    identity.vector_count).
+    Only verified, non-rejected annotations with a crop qualify — the
+    same rule `enroll_annotation` and `enroll_verified` enforce. An
+    unreviewed auto-assignment is a guess, and a guess must never enter
+    the live gallery (only verified annotations are ground truth).
+    Crops that cannot be embedded are dropped rather than reported.
     """
-    vectors.delete_identity(identity.identifier_key, identity.id)
-    count = 0
-    ordered = sorted(annotations, key=lambda a: (not a.verified, a.id))
-    for annotation in ordered:
-        if annotation.rejected or not annotation.crop_path:
+    embedded = []
+    for annotation in annotations:
+        if annotation.rejected or not annotation.verified or not annotation.crop_path:
             continue
-        if count < max_vectors:
-            embedding = embed_crop_file(embedder, annotation.crop_path)
-            if embedding is not None:
-                vectors.add(identity.identifier_key, embedding, identity.id)
-                count += 1
+        embedding = embed_crop_file(embedder, annotation.crop_path)
+        if embedding is not None:
+            embedded.append((annotation, embedding))
+    return embedded
+
+
+def enroll_embedded(vectors, identity, embedded, max_vectors: int = 20) -> int:
+    """Add already-computed embeddings to an identity's gallery.
+
+    Stops at the identifier's cap, and marks `enrolled` ONLY on the
+    annotations whose vector actually landed: `enroll_verified` sweeps
+    on `enrolled.is_(False)`, so flagging an annotation that was skipped
+    for the cap would retire it from every future sweep — a label whose
+    vector never arrives is exactly the failure this module exists to
+    prevent. `identity.vector_count` is left to the caller, which reads
+    it back from the store.
+    """
+    added = 0
+    for annotation, embedding in embedded:
+        if identity.vector_count + added >= max_vectors:
+            break
+        vectors.add(identity.identifier_key, embedding, identity.id)
         annotation.enrolled = True
-    identity.vector_count = count
-    return count
+        added += 1
+    return added
 
 
 def enroll_annotation(
