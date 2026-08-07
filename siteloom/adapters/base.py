@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -49,17 +50,35 @@ class FrameSource:
         *,
         is_file: bool = False,
         base_time: datetime | None = None,
+        owns_file: bool = False,
     ):
         self._target = target
         self._is_file = is_file
         self.source_id = source_id
         self._base_time = base_time
+        # An owned file is a temporary this source is responsible for
+        # deleting (e.g. an NVR clip export) — single-use: it is removed
+        # by close(), which frames() invokes once iteration ends.
+        self._owns_file = owns_file
 
     @property
     def target(self) -> str:
-        """The URL or file path this source reads (e.g. for cleanup of
-        temporary clip files after processing)."""
+        """The URL or file path this source reads."""
         return self._target
+
+    def close(self) -> None:
+        """Release what this source owns. Deletes the backing file for
+        sources that own a temporary (downloaded clips); a no-op for URLs
+        and caller-owned paths. Idempotent."""
+        if self._owns_file:
+            self._owns_file = False
+            Path(self._target).unlink(missing_ok=True)
+
+    def __enter__(self) -> "FrameSource":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     #: Live-stream open/read timeouts. Without them a network drop leaves
     #: grab() blocked inside FFmpeg forever, so the ingest reconnect loop
@@ -90,6 +109,11 @@ class FrameSource:
                 yield from self._live_frames(cap, sample_fps)
         finally:
             cap.release()
+            # An owned temp file is single-pass: once iteration ends (or
+            # is abandoned) the clip has served its purpose — delete it
+            # rather than rely on every caller remembering to close().
+            if self._owns_file:
+                self.close()
 
     def _file_frames(self, cap: cv2.VideoCapture, sample_fps: float) -> Iterator[Frame]:
         native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
