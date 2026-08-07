@@ -718,8 +718,10 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         row to re-embed them from, so dropping the gallery and
         reconstructing it from annotations would delete everything the
         cameras learned. What can be removed safely is the moved crops'
-        own vectors, identified by re-embedding them and matching on
-        numerical identity — see VectorStore.delete_duplicates_of.
+        own vectors: by the annotation recorded on the payload where
+        there is one (CLD-84), and by numerical identity for points
+        written before provenance existed — see
+        VectorStore.delete_by_annotations and delete_duplicates_of.
         """
         from siteloom.identity import get_shared_store
         from siteloom.identity.enroll import embed_annotations, enroll_embedded
@@ -803,7 +805,16 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             # remain the tool for correcting individual past claims.
             embedded = embed_annotations(embedder, moved)
             enroll_embedded(vectors, fresh, embedded, max_vectors)
-            removed = vectors.delete_duplicates_of(
+            # By origin first (CLD-84): a vector enrolled from one of
+            # these annotations records which one, so it comes out
+            # exactly. The numeric pass then catches points written
+            # before payloads carried provenance — for those, a
+            # re-embedded crop at cosine ≈ 1.0 is still the only
+            # available proof of which vector a crop contributed.
+            removed = vectors.delete_by_annotations(
+                source.identifier_key, source.id, [a.id for a in moved]
+            )
+            removed += vectors.delete_duplicates_of(
                 source.identifier_key,
                 source.id,
                 [embedding for _, embedding in embedded],

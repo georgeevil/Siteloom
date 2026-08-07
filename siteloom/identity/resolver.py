@@ -129,7 +129,7 @@ class IdentityResolver:
                 eff_threshold = self._threshold(identifier_key, ident_cfg, threshold)
                 promoted = self._consistent_sightings(
                     identifier_key, arr, eff_threshold, min_sightings,
-                    camera_id, timestamp,
+                    camera_id, timestamp, crop_path,
                 )
                 if promoted is None:
                     return Resolution(
@@ -155,8 +155,16 @@ class IdentityResolver:
             # The quarantined sightings become the new identity's gallery
             # and count as appearances — they were this individual all
             # along, the system just refused to guess from one of them.
-            for vec, _ in promoted[: max(0, max_vectors - 1)]:
-                self.vectors.add(identifier_key, vec, identity.id)
+            # Each carries the crop it was made from through quarantine,
+            # so a promoted vector is as traceable as a directly matched
+            # one (CLD-84).
+            for vec, payload in promoted[: max(0, max_vectors - 1)]:
+                self.vectors.add(
+                    identifier_key,
+                    vec,
+                    identity.id,
+                    crop_path=payload.get("crop_path"),
+                )
                 identity.vector_count += 1
             identity.appearance_count += len(promoted)
 
@@ -169,7 +177,12 @@ class IdentityResolver:
         if crop_path and not identity.best_crop_path:
             identity.best_crop_path = crop_path
         if arr is not None and identity.vector_count < max_vectors:
-            self.vectors.add(identifier_key, arr, identity.id)
+            # `crop_path` is this vector's provenance (CLD-84): the live
+            # population has no Annotation row, so the crop file is the
+            # only thing that can name it later — which is what lets an
+            # operator's correction move or strip exactly the vectors one
+            # event taught an identity.
+            self.vectors.add(identifier_key, arr, identity.id, crop_path=crop_path)
             identity.vector_count += 1
         self._note_seen(identifier_key, identity.id, camera_id, timestamp)
 
@@ -292,6 +305,7 @@ class IdentityResolver:
         min_sightings: int,
         camera_id: str | None,
         timestamp: datetime,
+        crop_path: str | None = None,
     ) -> list[tuple[np.ndarray, dict]] | None:
         """Count this unknown against the identifier's pending pool.
 
@@ -311,7 +325,11 @@ class IdentityResolver:
             self.vectors.add_labeled(
                 pool,
                 arr,
-                {"ts": timestamp.timestamp(), "camera": camera_id},
+                {
+                    "ts": timestamp.timestamp(),
+                    "camera": camera_id,
+                    "crop_path": crop_path,
+                },
             )
             return None
         return self.vectors.pop_matching(pool, arr, threshold)
