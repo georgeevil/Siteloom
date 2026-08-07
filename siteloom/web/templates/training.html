@@ -96,7 +96,12 @@
       repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 5px, transparent 5px 11px),
       oklch(0.26 0.01 250);
   }
-  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* contain, not cover: a body crop is taller than it is wide and the whole
+     subject has to be visible to be judged. */
+  .tile img {
+    width: 100%; height: 100%; object-fit: contain; display: block;
+    background: oklch(0.2 0.008 250);
+  }
   .tile[data-sel="1"] figure { border-color: var(--accent); }
   .tile .cap {
     font-family: var(--font-mono); font-size: 9px; color: var(--faint); margin-top: 4px;

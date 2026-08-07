@@ -78,6 +78,14 @@ class DetectionConfig(BaseModel):
     # created and instantly discarded, and every detection becomes its
     # own event (CLD-5).
     tracker: dict[str, float | int | bool | str] = {"fuse_score": False}
+    # Context kept around each detection when the crop is cut, as a
+    # fraction of the box's own width/height on each side (clamped to the
+    # frame). A tight bbox crop is unreadable as a thumbnail and clips the
+    # top of a head; a little surrounding frame makes it legible.
+    # NOTE: the crop is both what gets stored and what the identity
+    # embedders see, so changing this changes the embedding space —
+    # re-enroll faces and `siteloom classes rebuild` after changing it.
+    crop_margin: float = Field(0.12, ge=0.0, le=1.0)
     # COCO class names we care about (PRD §6.2).
     classes: list[str] = [
         "person",

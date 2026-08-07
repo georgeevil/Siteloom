@@ -14,11 +14,18 @@ Job payload (all serializable):
 
 Result: {"detections": [{class_name, confidence, bbox, track_id,
                           zones, crop_jpeg}]}
+
+`bbox` is the detection box; `crop_jpeg` is that box grown by
+DetectionConfig.crop_margin so the crop carries some surrounding frame.
+One crop serves both jobs — it is stored for display and it is what the
+identity embedders see — so the two can never disagree about what a
+detection looked like.
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 from typing import Any
 
@@ -125,8 +132,14 @@ class DetectionModule:
             if require_zone and not hit_zones:
                 continue
 
-            crop = image[max(0, int(y1)) : int(y2), max(0, int(x1)) : int(x2)]
-            ok, crop_jpeg = cv2.imencode(".jpg", crop)
+            cx1, cy1, cx2, cy2 = expand_box(
+                (x1, y1, x2, y2), self.cfg.crop_margin, w, h
+            )
+            crop = image[cy1:cy2, cx1:cx2]
+            crop_jpeg = None
+            if crop.size:
+                ok, buf = cv2.imencode(".jpg", crop)
+                crop_jpeg = buf.tobytes() if ok else None
             detections.append(
                 {
                     "class_name": class_name,
@@ -134,10 +147,35 @@ class DetectionModule:
                     "bbox": [x1, y1, x2, y2],
                     "track_id": track_id,
                     "zones": hit_zones,
-                    "crop_jpeg": crop_jpeg.tobytes() if ok else None,
+                    "crop_jpeg": crop_jpeg,
                 }
             )
         return {"detections": detections}
+
+
+def expand_box(
+    bbox: tuple[float, float, float, float],
+    margin: float,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    """Grow a bbox by `margin` of its own size on each side, clamped to the frame.
+
+    The margin is a fraction of each dimension, so a tall person crop and
+    a wide vehicle crop keep their shape and just gain context. Bounds are
+    floored/ceiled outward — rounding must never eat into the box itself —
+    and the result is always a valid slice (x1 <= x2, y1 <= y2), which is
+    what makes the degenerate box at a frame edge an empty crop rather
+    than an exception inside cv2.
+    """
+    x1, y1, x2, y2 = bbox
+    dx = max(0.0, x2 - x1) * margin
+    dy = max(0.0, y2 - y1) * margin
+    nx1 = int(math.floor(max(0.0, x1 - dx)))
+    ny1 = int(math.floor(max(0.0, y1 - dy)))
+    nx2 = int(math.ceil(min(float(width), x2 + dx)))
+    ny2 = int(math.ceil(min(float(height), y2 + dy)))
+    return nx1, ny1, max(nx1, nx2), max(ny1, ny2)
 
 
 def _zones_hit(
