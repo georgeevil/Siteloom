@@ -38,6 +38,36 @@
   instead of disappearing.
 </p>
 
+{% if unifi_cameras %}
+<div class="job" style="margin-bottom:1rem;">
+  <h3 style="margin-bottom:0.35rem;">Reindex from NVR</h3>
+  <p class="muted" style="font-size:0.78rem; margin:0 0 0.55rem; max-width:70ch;">
+    Drops this window's events, detections and crops (identities are kept),
+    then re-runs the UniFi Protect backfill through the live pipeline — so
+    current stitching, significance and confidence settings apply to the
+    rebuilt events. Runs in the background and appears below.
+  </p>
+  <form method="post" action="/jobs/reindex"
+        style="display:flex; gap:0.7rem; align-items:center; flex-wrap:wrap; font-size:0.82rem;">
+    <label>Last
+      <input type="number" name="hours" value="6" min="0.5" max="336" step="0.5"
+             style="width:4.5em; padding:0.2rem 0.35rem;"> hours
+    </label>
+    {% for cam in unifi_cameras %}
+    <label style="display:flex; gap:0.3rem; align-items:center;">
+      <input type="checkbox" name="cameras" value="{{ cam.id }}" checked>
+      {{ cam.name or cam.id }}
+    </label>
+    {% endfor %}
+    <button type="submit" {% if reindex_running %}disabled{% endif %}
+            onclick="return confirm('Drop and rebuild this window\'s events? Identities are kept; this cannot be undone.')"
+            style="padding:0.3rem 0.8rem; border-radius:6px; cursor:pointer;">
+      {% if reindex_running %}Reindex running…{% else %}Drop &amp; reindex{% endif %}
+    </button>
+  </form>
+</div>
+{% endif %}
+
 <div id="jobs">
   {% for r in runs %}
   <div class="job {{ r.status }}" data-id="{{ r.id }}">

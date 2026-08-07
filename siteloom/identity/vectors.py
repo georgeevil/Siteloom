@@ -58,6 +58,7 @@ class LabeledHit:
 class VectorStore:
     def __init__(self, path: str | Path):
         Path(path).mkdir(parents=True, exist_ok=True)
+        self._path_key = str(Path(path).resolve())
         self._lock = threading.RLock()
         self._client = QdrantClient(
             path=str(path), force_disable_check_same_thread=True
@@ -319,6 +320,18 @@ class VectorStore:
 
     @_locked
     def close(self) -> None:
+        """Close the embedded client and release its lock.
+
+        A closed client is unusable, so if this instance is the process's
+        shared store it is also evicted from the cache — the next
+        get_shared_store() opens a fresh client instead of handing out a
+        dead one. Live services never close the shared store (the lock is
+        released at process exit); closing is for tests that simulate a
+        process restart on one path, and for deliberate shutdowns.
+        """
+        with _shared_stores_lock:
+            if _shared_stores.get(self._path_key) is self:
+                del _shared_stores[self._path_key]
         self._client.close()
 
 

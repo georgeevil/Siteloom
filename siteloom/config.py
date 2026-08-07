@@ -92,6 +92,11 @@ class DetectionConfig(BaseModel):
     # created and instantly discarded, and every detection becomes its
     # own event (CLD-5).
     tracker: dict[str, float | int | bool | str] = {"fuse_score": False}
+    # Per-class minimum confidence, overriding `confidence` for that
+    # class (e.g. demand more of "dog" than "person"). The detector runs
+    # at the lowest applicable threshold and per-class filtering happens
+    # on its output, so a class absent here uses `confidence`.
+    class_confidence: dict[str, float] = {}
     # Context kept around each detection when the crop is cut, as a
     # fraction of the box's own width/height on each side (clamped to the
     # frame). A tight bbox crop is unreadable as a thumbnail and clips the

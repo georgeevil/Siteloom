@@ -100,10 +100,16 @@ class DetectionModule:
 
         camera_id = payload["camera_id"]
         model = self._model_for(camera_id)
+        # Run the detector at the lowest applicable threshold; per-class
+        # minimums are applied to its output below. (YOLO's conf is a
+        # single global floor.)
+        floor = min(
+            [self.cfg.confidence, *self.cfg.class_confidence.values()]
+        )
         results = model.track(
             image,
             persist=True,
-            conf=self.cfg.confidence,
+            conf=floor,
             device=self.cfg.device,
             tracker=str(self._tracker_path),
             verbose=False,
@@ -125,6 +131,11 @@ class DetectionModule:
             class_name = names[int(boxes.cls[i])]
             if class_name not in wanted:
                 continue
+            confidence = float(boxes.conf[i])
+            if confidence < self.cfg.class_confidence.get(
+                class_name, self.cfg.confidence
+            ):
+                continue
             x1, y1, x2, y2 = (float(v) for v in boxes.xyxy[i])
             track_id = int(boxes.id[i]) if boxes.id is not None else None
 
@@ -143,7 +154,7 @@ class DetectionModule:
             detections.append(
                 {
                     "class_name": class_name,
-                    "confidence": float(boxes.conf[i]),
+                    "confidence": confidence,
                     "bbox": [x1, y1, x2, y2],
                     "track_id": track_id,
                     "zones": hit_zones,
