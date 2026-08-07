@@ -168,6 +168,141 @@ def _class_rows(config, seen: dict) -> list[dict]:
     return rows
 
 
+#: Slider bounds per identification algorithm, plus the value that
+#: algorithm's similarity distribution actually sits around. Face (SFace)
+#: cosine scores cluster around 0.36 while generic appearance scores sit
+#: above 0.80 — a single 0..1 track for both would put every usable face
+#: value in its first third and invite the reading that one scale fits
+#: all identifiers. Each row is edited on its own algorithm's scale.
+THRESHOLD_BOUNDS: dict[str, dict[str, float]] = {
+    "face": {"min": 0.15, "max": 0.70, "step": 0.01, "typical": 0.36},
+    "generic": {"min": 0.50, "max": 0.99, "step": 0.01, "typical": 0.80},
+}
+
+
+def _identifier_rows(config) -> list[dict]:
+    """One editable row per configured identifier (CLD-38).
+
+    Thresholds belong to the identifier, not the class: "vehicle" covers
+    car/truck/bus/motorcycle with one number, so the control lives here
+    rather than on the class table where it would look per-class and
+    silently move four classes at once.
+    """
+    rows = []
+    for key, ident in config.identity.identifiers.items():
+        bounds = THRESHOLD_BOUNDS.get(ident.algo, THRESHOLD_BOUNDS["generic"])
+        rows.append(
+            {
+                "key": key,
+                "algo": ident.algo,
+                "applies_to": list(ident.applies_to or []),
+                "threshold": ident.threshold,
+                "plate_ocr": ident.plate_ocr,
+                "min": bounds["min"],
+                "max": bounds["max"],
+                "step": bounds["step"],
+                "typical": bounds["typical"],
+                # Cameras that override this identifier's threshold —
+                # shown so the site-wide slider never looks like the last
+                # word for a camera that has its own (CLD-39).
+                "camera_overrides": [
+                    {"camera": cam.id, "threshold": cam.identity.thresholds[key]}
+                    for cam in config.cameras
+                    if cam.identity is not None and key in cam.identity.thresholds
+                ],
+            }
+        )
+    return rows
+
+
+def _camera_override_rows(config) -> list[dict]:
+    """Per-camera event/identity overrides, read-only (CLD-39).
+
+    Editing per-camera values from the web UI is deliberately not offered
+    yet: the page shows what the YAML says so an operator tuning the
+    site-wide sliders can see which cameras will ignore them.
+    """
+    rows = []
+    for cam in config.cameras:
+        events = (
+            {
+                field: value
+                for field, value in cam.events.model_dump().items()
+                if value is not None
+            }
+            if cam.events is not None
+            else {}
+        )
+        thresholds = dict(cam.identity.thresholds) if cam.identity is not None else {}
+        rows.append(
+            {
+                "id": cam.id,
+                "name": cam.name or cam.id,
+                "events": events,
+                "thresholds": thresholds,
+                "count": len(events) + len(thresholds),
+            }
+        )
+    return rows
+
+
+def _threshold_preview(session, identifier_key: str, threshold: float, limit: int):
+    """What moving one identifier's threshold would have done (CLD-38).
+
+    Replayed from `EventIdentity.similarity`, which is recorded for both
+    outcomes: a visual match stores the winning score, and a frame that
+    minted a new identity stores its best *sub-threshold* near-miss. So
+    the two counts that matter are both answerable without re-embedding
+    anything:
+
+    * `would_unmatch` — visual matches whose score falls below the
+      candidate: those visits become unknowns.
+    * `would_match` — near-misses that clear it: those new identities
+      would instead have joined an existing one.
+
+    Plate matches are reported but never counted: a plate outranks visual
+    similarity outright (PRD §6.4), so no threshold moves it. This is an
+    estimate over recorded scores, not a re-run of the resolver — a link
+    keeps the strongest score across a visit's frames, and the margin and
+    consistency gates (CLD-41) are not replayed. The UI says so.
+    """
+    from siteloom.store import EventIdentity
+
+    rows = session.execute(
+        select(EventIdentity.similarity, EventIdentity.matched_by)
+        .where(
+            EventIdentity.identifier_key == identifier_key,
+            EventIdentity.identity_id.is_not(None),
+        )
+        .order_by(EventIdentity.id.desc())
+        .limit(limit)
+    ).all()
+    matched = near_misses = plate = would_unmatch = would_match = 0
+    for similarity, matched_by in rows:
+        if matched_by == "plate":
+            plate += 1
+        elif matched_by == "visual":
+            matched += 1
+            if (similarity or 0.0) < threshold:
+                would_unmatch += 1
+        else:
+            # No match mode recorded: the frame minted a new identity and
+            # `similarity` is the best score that failed to clear the bar.
+            near_misses += 1
+            if (similarity or 0.0) >= threshold:
+                would_match += 1
+    return {
+        "identifier": identifier_key,
+        "threshold": threshold,
+        "sampled": len(rows),
+        "visual_matches": matched,
+        "near_misses": near_misses,
+        "plate_matches": plate,
+        "would_unmatch": would_unmatch,
+        "would_match": would_match,
+    }
+
+
 def _source_progress(session) -> list[dict]:
     """Per-source indexing progress for the sources rail.
 
@@ -498,9 +633,12 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 custom_classes=custom,
                 seen=seen,
                 auto_add=config.identity.auto_add_classes,
+                auto_add_threshold=config.identity.auto_add_threshold,
                 confidence=config.detection.confidence,
                 event_rules=config.events,
                 class_rows=_class_rows(config, seen),
+                identifier_rows=_identifier_rows(config),
+                camera_rows=_camera_override_rows(config),
                 model_line=(
                     f"{config.detection.model} · {config.detection.device} · "
                     f"conf {config.detection.confidence:.2f}"
@@ -539,15 +677,49 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             if ident is None:
                 continue
             if "threshold" in values:
-                ident.threshold = float(values["threshold"])
+                threshold = float(values["threshold"])
+                if not (0.0 <= threshold <= 1.0):
+                    raise HTTPException(
+                        400, f"{key} threshold must be a cosine similarity in 0..1"
+                    )
+                ident.threshold = threshold
             if "applies_to" in values:
                 ident.applies_to = [v for v in values["applies_to"] if v]
             if "plate_ocr" in values:
                 ident.plate_ocr = bool(values["plate_ocr"])
         if "auto_add_classes" in body:
             config.identity.auto_add_classes = bool(body["auto_add_classes"])
+        if "auto_add_threshold" in body:
+            # The threshold a class with no identifier of its own gets on
+            # first sighting — always the generic scale, since auto-added
+            # identifiers are always generic.
+            auto_threshold = float(body["auto_add_threshold"])
+            if not (0.0 <= auto_threshold <= 1.0):
+                raise HTTPException(
+                    400, "auto_add_threshold must be a cosine similarity in 0..1"
+                )
+            config.identity.auto_add_threshold = auto_threshold
         written = _persist_config(config)
         return JSONResponse({"ok": True, "written_to": written})
+
+    @app.get("/classes/thresholds/preview")
+    def preview_threshold(identifier: str, threshold: float, limit: int = 200):
+        """Dry-run one identifier's threshold against recorded matches.
+
+        Read-only: it answers "what would have happened" from
+        EventIdentity scores so a threshold can be explored before it is
+        saved — and, because serve and ingest are separate processes,
+        long before it reaches live ingest.
+        """
+        if identifier not in config.identity.identifiers:
+            raise HTTPException(404, "no such identifier")
+        if not (0.0 <= threshold <= 1.0):
+            raise HTTPException(400, "threshold must be in 0..1")
+        limit = max(1, min(int(limit), 2000))
+        with Session() as session:
+            body = _threshold_preview(session, identifier, threshold, limit)
+        body["current"] = config.identity.identifiers[identifier].threshold
+        return JSONResponse(body)
 
     @app.post("/classes/events")
     async def update_event_rules(request: Request):

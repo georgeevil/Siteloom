@@ -225,3 +225,237 @@ def test_classes_page_renders_editable_confidence(client):
     assert r.status_code == 200
     assert 'class="dconf' in r.text
     assert "Det confidence" in r.text
+
+
+# -- CLD-38: identity thresholds are editable, and previewable ----------
+
+
+def test_identifier_rows_carry_their_own_algo_scale():
+    """Face and generic thresholds are not on the same scale, so the
+    control for each is bounded by its own algorithm's distribution."""
+    from siteloom.web.library_routes import _identifier_rows
+
+    config = SiteConfig(site_id="t")
+    rows = {r["key"]: r for r in _identifier_rows(config)}
+    assert rows["face"]["threshold"] == 0.36
+    # Different worlds: the face track is centred where face scores live
+    # and stops short of where generic ones start being meaningful.
+    assert rows["face"]["min"] < rows["person"]["min"]
+    assert rows["face"]["max"] < rows["person"]["max"]
+    assert rows["face"]["typical"] < rows["face"]["max"] < rows["person"]["typical"]
+    assert rows["person"]["typical"] == rows["vehicle"]["typical"]  # same algo
+    assert rows["vehicle"]["applies_to"] == ["car", "truck", "bus", "motorcycle"]
+    assert rows["vehicle"]["plate_ocr"] is True
+
+
+def test_identifier_rows_name_the_cameras_that_override_them():
+    from siteloom.config import CameraIdentityOverride
+    from siteloom.web.library_routes import _identifier_rows
+
+    config = SiteConfig(
+        site_id="t",
+        cameras=[
+            CameraConfig(
+                id="doorway",
+                source="x",
+                identity=CameraIdentityOverride(thresholds={"face": 0.44}),
+            ),
+            CameraConfig(id="quiet", source="x"),
+        ],
+    )
+    rows = {r["key"]: r for r in _identifier_rows(config)}
+    assert rows["face"]["camera_overrides"] == [
+        {"camera": "doorway", "threshold": 0.44}
+    ]
+    assert rows["person"]["camera_overrides"] == []
+
+
+def test_classes_page_renders_threshold_sliders_not_only_bars(client):
+    r = client.get("/classes")
+    assert r.status_code == 200
+    assert 'class="ithr" type="range" data-key="face"' in r.text
+    assert 'data-key="vehicle"' in r.text
+    # The page must not imply one scale fits every identifier.
+    assert "not comparable with each other" in r.text
+    # ...and must stay honest about when a saved value reaches ingest.
+    assert "separate\n  processes" in r.text or "separate processes" in r.text
+
+
+def test_identifier_threshold_post_updates_config_and_yaml(tmp_path):
+    from siteloom.config import load_config, save_config
+
+    config = SiteConfig(
+        site_id="t",
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/it.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    path = tmp_path / "site.yaml"
+    save_config(config, path)
+    config = load_config(path)
+    client = TestClient(create_app(config))
+    r = client.post(
+        "/classes/detection",
+        json={"identifiers": {"face": {"threshold": 0.42}}},
+    )
+    assert r.status_code == 200
+    assert config.identity.identifiers["face"].threshold == 0.42
+    again = load_config(path)
+    assert again.identity.identifiers["face"].threshold == 0.42
+    # Editing one identifier must not disturb another's scale.
+    assert again.identity.identifiers["person"].threshold == 0.80
+
+
+def test_identifier_threshold_rejects_a_value_off_the_similarity_scale(client):
+    r = client.post(
+        "/classes/detection", json={"identifiers": {"face": {"threshold": 42}}}
+    )
+    assert r.status_code == 400
+    assert (
+        client.post("/classes/detection", json={"auto_add_threshold": 42}).status_code
+        == 400
+    )
+
+
+def test_auto_added_classes_get_a_threshold_control(client):
+    """A class with no identifier of its own still gets one on first
+    sighting — its threshold must be tunable too, on the generic scale."""
+    body = client.get("/classes").text
+    assert 'id="auto-add-threshold"' in body
+    assert client.post(
+        "/classes/detection", json={"auto_add_threshold": 0.88}
+    ).status_code == 200
+
+
+def test_threshold_preview_counts_both_directions(tmp_path):
+    """The dry run answers the two questions worth asking, from scores
+    already recorded on EventIdentity (CLD-38)."""
+    from siteloom.store import Event, EventIdentity
+
+    config = SiteConfig(
+        site_id="t",
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/tp.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    with Session() as s:
+        s.add(
+            Identity(
+                identifier_key="face", class_name="person", first_seen=TS, last_seen=TS
+            )
+        )
+        s.flush()
+        for i, (similarity, matched_by) in enumerate(
+            [
+                (0.30, "visual"),  # a match that 0.40 would break
+                (0.55, "visual"),  # a match that survives
+                (0.45, None),      # a near-miss 0.40 would have caught
+                (0.20, None),      # a near-miss still below 0.40
+                (0.01, "plate"),   # plates ignore the threshold entirely
+            ]
+        ):
+            event = Event(
+                camera_id="c",
+                class_name="person",
+                first_seen=TS,
+                last_seen=TS,
+                best_confidence=0.9,
+            )
+            s.add(event)
+            s.flush()
+            s.add(
+                EventIdentity(
+                    event_id=event.id,
+                    identity_id=1,
+                    identifier_key="face",
+                    similarity=similarity,
+                    matched_by=matched_by,
+                )
+            )
+            # A different identifier's history must not leak in.
+            s.add(
+                EventIdentity(
+                    event_id=event.id,
+                    identity_id=1,
+                    identifier_key="vehicle",
+                    similarity=0.99,
+                    matched_by="visual",
+                )
+            )
+        s.commit()
+
+    client = TestClient(create_app(config))
+    body = client.get(
+        "/classes/thresholds/preview", params={"identifier": "face", "threshold": 0.40}
+    ).json()
+    assert body["sampled"] == 5
+    assert body["visual_matches"] == 2 and body["would_unmatch"] == 1
+    assert body["near_misses"] == 2 and body["would_match"] == 1
+    assert body["plate_matches"] == 1
+    assert body["current"] == 0.36
+
+
+def test_threshold_preview_validates_its_inputs(client):
+    assert client.get(
+        "/classes/thresholds/preview", params={"identifier": "nope", "threshold": 0.4}
+    ).status_code == 404
+    assert client.get(
+        "/classes/thresholds/preview", params={"identifier": "face", "threshold": 7}
+    ).status_code == 400
+    # No history is a real answer, not an error.
+    empty = client.get(
+        "/classes/thresholds/preview", params={"identifier": "face", "threshold": 0.4}
+    ).json()
+    assert empty["sampled"] == 0
+
+
+# -- CLD-39: per-camera overrides are visible, read-only ---------------
+
+
+def test_camera_override_rows_report_only_what_is_set():
+    from siteloom.config import CameraIdentityOverride, EventRulesOverride
+    from siteloom.web.library_routes import _camera_override_rows
+
+    config = SiteConfig(
+        site_id="t",
+        cameras=[
+            CameraConfig(
+                id="doorway",
+                name="Doorway",
+                source="x",
+                events=EventRulesOverride(identify_min_crop_px=96),
+                identity=CameraIdentityOverride(thresholds={"face": 0.44}),
+            ),
+            CameraConfig(id="quiet", source="x"),
+        ],
+    )
+    rows = {r["id"]: r for r in _camera_override_rows(config)}
+    assert rows["doorway"]["events"] == {"identify_min_crop_px": 96}
+    assert rows["doorway"]["thresholds"] == {"face": 0.44}
+    assert rows["quiet"]["count"] == 0
+
+
+def test_classes_page_shows_per_camera_overrides_read_only(tmp_path):
+    from siteloom.config import CameraIdentityOverride
+
+    config = SiteConfig(
+        site_id="t",
+        cameras=[
+            CameraConfig(
+                id="doorway",
+                source="x",
+                identity=CameraIdentityOverride(thresholds={"face": 0.44}),
+            )
+        ],
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/cam.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    body = TestClient(create_app(config)).get("/classes").text
+    assert "Per-camera overrides" in body
+    assert "face threshold" in body and "0.44" in body
+    # Read-only for now, and the page says where the values live.
+    assert "cameras[].identity.thresholds" in body

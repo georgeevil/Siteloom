@@ -80,6 +80,18 @@
   }
   .ccrow { display: grid; grid-template-columns: 1fr 116px 128px 96px; }
   .erow { display: grid; grid-template-columns: 1fr 128px; }
+  .irow { display: grid; grid-template-columns: 1fr 188px 56px 84px; height: auto; padding-top: 10px; padding-bottom: 10px; }
+  .irow input[type=range] { width: 100%; accent-color: var(--accent); display: block; }
+  .irow .scale {
+    display: flex; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 9px; color: var(--faint); margin-top: 2px;
+  }
+  .ival { font-family: var(--font-mono); font-size: 12px; text-align: right; }
+  .ipreview { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 3px; }
+  .ipreview.warn { color: oklch(0.87 0.1 85); }
+  .camrow { display: grid; grid-template-columns: 200px 1fr; height: auto; padding-top: 10px; padding-bottom: 10px; }
+  .kv { font-family: var(--font-mono); font-size: 11px; color: var(--muted); line-height: 1.7; }
+  .kv b { color: var(--text); font-weight: 600; }
   .erule {
     width: 100%; padding: 6px 8px; border-radius: 6px; font: inherit; font-size: 12px;
     font-family: var(--font-mono);
@@ -153,7 +165,8 @@
              value="{{ '%.2f' | format(r.det_conf) }}"
              title="Minimum detection confidence for {{ r.name }} (global default {{ '%.2f' | format(confidence) }})">
     </div>
-    <div class="thr">
+    <div class="thr"
+         title="{% if r.identifier %}Set by the {{ r.identifier }} identifier below — it covers every class it applies to{% else %}No identifier configured for {{ r.name }}{% endif %}">
       {% if r.threshold is not none %}
         <span class="bar"><i style="width: {{ (r.threshold * 100) | round | int }}%"></i></span>
         <span class="mono">{{ '%.2f' | format(r.threshold) }}</span>
@@ -175,6 +188,81 @@
   unconfigured class gets a generic appearance identifier and its own vector
   collection on first sighting.
   {% if not auto_add %}Auto-add is currently off, so new classes are detected but not identified.{% endif %}
+</div>
+
+<h3 class="sec">Identity thresholds</h3>
+<div class="tablecard">
+  <div class="crow irow head">
+    <div>Identifier</div><div>Similarity threshold</div><div>Value</div><div></div>
+  </div>
+  {% for i in identifier_rows %}
+  <div class="crow irow">
+    <div class="cname">
+      <span class="sw" style="background: oklch(0.72 0.16 {{ 200 if i.algo == 'face' else 320 }})"></span>
+      <span style="min-width:0">
+        <span class="t">{{ i.key }}</span><br>
+        <span class="d">
+          {{ i.algo }} embedding · {{ i.applies_to | join(', ') or 'no classes' }}
+          {%- if i.plate_ocr %} · plate OCR wins over similarity{% endif %}
+          {%- for o in i.camera_overrides %} · {{ o.camera }} overrides to {{ '%.2f' | format(o.threshold) }}{% endfor %}
+        </span>
+        <span class="ipreview" id="ip-{{ i.key }}"></span>
+      </span>
+    </div>
+    <div>
+      <input class="ithr" type="range" data-key="{{ i.key }}"
+             min="{{ i.min }}" max="{{ i.max }}" step="{{ i.step }}"
+             value="{{ '%.2f' | format(i.threshold) }}"
+             aria-label="{{ i.key }} similarity threshold"
+             title="Cosine similarity on the {{ i.algo }} scale — {{ i.algo }} embeddings sit around {{ '%.2f' | format(i.typical) }}">
+      <span class="scale">
+        <span>{{ '%.2f' | format(i.min) }}</span>
+        <span>typical {{ '%.2f' | format(i.typical) }}</span>
+        <span>{{ '%.2f' | format(i.max) }}</span>
+      </span>
+    </div>
+    <div class="ival" id="iv-{{ i.key }}">{{ '%.2f' | format(i.threshold) }}</div>
+    <div>
+      <button type="button" class="btn-outline sm ipreview-btn" data-key="{{ i.key }}">Preview</button>
+    </div>
+  </div>
+  {% else %}
+  <div class="crow"><span class="d" style="color:var(--muted)">No identifiers configured.</span></div>
+  {% endfor %}
+  <div class="crow irow">
+    <div class="cname">
+      <span class="sw" style="background: oklch(0.72 0.16 320)"></span>
+      <span style="min-width:0">
+        <span class="t">auto-added classes</span><br>
+        <span class="d">
+          generic embedding · the identifier a class with none of its own gets
+          on first sighting{% if not auto_add %} · currently off{% endif %}
+        </span>
+      </span>
+    </div>
+    <div>
+      <input class="ithr-auto" type="range" id="auto-add-threshold"
+             min="0.50" max="0.99" step="0.01"
+             value="{{ '%.2f' | format(auto_add_threshold) }}"
+             aria-label="auto-added class similarity threshold"
+             title="Cosine similarity on the generic scale — generic embeddings sit around 0.80">
+      <span class="scale">
+        <span>0.50</span><span>typical 0.80</span><span>0.99</span>
+      </span>
+    </div>
+    <div class="ival" id="iv-auto-add">{{ '%.2f' | format(auto_add_threshold) }}</div>
+    <div></div>
+  </div>
+</div>
+<div class="banner">
+  Each identifier is tuned on its own scale — a face embedding's cosine
+  scores sit around 0.36 and a generic appearance embedding's above 0.80,
+  so these numbers are not comparable with each other. Preview replays the
+  recorded scores of past matches at a candidate value; it is an estimate,
+  not a re-run of the resolver, and it never re-scores plate matches.
+  Saving writes the config file — ingest picks it up on restart, because
+  <code>siteloom serve</code> and <code>siteloom run</code> are separate
+  processes. Past matches keep the score they were made at.
 </div>
 
 <h3 class="sec">Event rules</h3>
@@ -224,6 +312,41 @@
   <code>siteloom events retag</code> to reapply them to existing events.
   <button class="btn-outline sm" id="er-save" style="margin-left:auto">Save event rules</button>
   <span class="status" id="er-status"></span>
+</div>
+
+<h3 class="sec">Per-camera overrides</h3>
+<div class="tablecard">
+  <div class="crow camrow head">
+    <div>Camera</div><div>Overrides</div>
+  </div>
+  {% for c in camera_rows %}
+  <div class="crow camrow">
+    <div class="cname">
+      <span style="min-width:0">
+        <span class="t">{{ c.name }}</span><br>
+        <span class="d">{{ c.id }}</span>
+      </span>
+    </div>
+    <div class="kv">
+      {% if c.count %}
+        {% for field, value in c.events.items() %}<b>{{ field }}</b>
+          {%- if value is boolean %} {{ 'on' if value else 'off' }}{% else %} {{ value }}{% endif %}<br>
+        {%- endfor %}
+        {% for key, value in c.thresholds.items() %}<b>{{ key }} threshold</b> {{ '%.2f' | format(value) }}<br>{% endfor %}
+      {% else %}
+        follows the site-wide values above
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="crow"><span class="d" style="color:var(--muted)">No cameras configured.</span></div>
+  {% endfor %}
+</div>
+<div class="banner">
+  Per-camera values are YAML only — <code>cameras[].events</code> and
+  <code>cameras[].identity.thresholds</code> in the site config. They are
+  shown here read-only so a camera that ignores the site-wide sliders says
+  so; editing them from the console is not offered yet.
 </div>
 
 <h3 class="sec">Custom sub-classes</h3>
@@ -329,6 +452,57 @@
     });
   });
 
+  // Identity thresholds: the readout tracks the slider, and releasing it
+  // runs the dry-run preview so a value can be judged before it is saved.
+  function previewThreshold(key) {
+    var slider = document.querySelector('.ithr[data-key="' + key + '"]');
+    var out = document.getElementById("ip-" + key);
+    out.className = "ipreview";
+    out.textContent = "checking…";
+    fetch("/classes/thresholds/preview?identifier=" + encodeURIComponent(key) +
+          "&threshold=" + Number(slider.value))
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+      .then(function (d) {
+        if (!d.sampled) {
+          out.textContent = "no recorded matches for " + key + " yet — nothing to replay";
+          return;
+        }
+        var parts = ["over the last " + d.sampled + " " + key + " links: " +
+                     d.would_unmatch + " of " + d.visual_matches +
+                     " visual matches would fall to unknown, " +
+                     d.would_match + " of " + d.near_misses +
+                     " near-misses would have matched"];
+        if (d.plate_matches) {
+          parts.push(d.plate_matches + " plate matches are unaffected");
+        }
+        out.textContent = parts.join("; ");
+        if (d.would_unmatch || d.would_match) out.className = "ipreview warn";
+      })
+      .catch(function () { out.textContent = "preview unavailable"; });
+  }
+
+  document.querySelectorAll(".ithr").forEach(function (slider) {
+    var key = slider.getAttribute("data-key");
+    slider.addEventListener("input", function () {
+      document.getElementById("iv-" + key).textContent = Number(slider.value).toFixed(2);
+      document.getElementById("status").textContent = "unsaved changes";
+    });
+    slider.addEventListener("change", function () { previewThreshold(key); });
+  });
+  document.querySelectorAll(".ipreview-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      previewThreshold(b.getAttribute("data-key"));
+    });
+  });
+
+  // Auto-added classes have no identifier row to preview against — they
+  // have no history until a class of their own is first seen.
+  var autoAdd = document.getElementById("auto-add-threshold");
+  autoAdd.addEventListener("input", function () {
+    document.getElementById("iv-auto-add").textContent = Number(autoAdd.value).toFixed(2);
+    document.getElementById("status").textContent = "unsaved changes";
+  });
+
   document.getElementById("b-save").onclick = function () {
     var classes = [];
     document.querySelectorAll('.toggle[data-class][aria-pressed="true"]').forEach(function (t) {
@@ -343,12 +517,21 @@
         classConf[input.getAttribute("data-class")] = v;
       }
     });
+    // Thresholds are per identifier, each on its own scale — sent as a
+    // map so one identifier's value can never be applied to another.
+    var identifiers = {};
+    document.querySelectorAll(".ithr").forEach(function (slider) {
+      identifiers[slider.getAttribute("data-key")] = { threshold: Number(slider.value) };
+    });
     var status = document.getElementById("status");
     status.textContent = "saving…";
     fetch("/classes/detection", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ classes: classes, class_confidence: classConf })
+      body: JSON.stringify({
+        classes: classes, class_confidence: classConf, identifiers: identifiers,
+        auto_add_threshold: Number(autoAdd.value)
+      })
     })
       .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
       .then(function (res) {

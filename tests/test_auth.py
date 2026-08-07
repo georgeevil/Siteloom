@@ -244,3 +244,27 @@ def test_expired_session_is_rejected(tmp_path):
 
 def test_reindex_requires_admin():
     assert required_role("POST", "/jobs/reindex") == "admin"
+
+
+def test_threshold_write_is_admin_but_its_dry_run_is_not():
+    """Saving a similarity threshold reconfigures the system, so it goes
+    through the admin-gated /classes/detection. Previewing one only reads
+    recorded scores — a viewer may explore without being able to save."""
+    assert required_role("POST", "/classes/detection") == "admin"
+    assert required_role("GET", "/classes/thresholds/preview") == "view"
+
+
+def test_edit_role_can_preview_but_not_save_a_threshold(tmp_path):
+    client, Session = make_env(tmp_path)
+    add_user(Session, "eddy", "edit")
+    login(client, "eddy")
+    r = client.get(
+        "/classes/thresholds/preview", params={"identifier": "face", "threshold": 0.4}
+    )
+    assert r.status_code == 200
+    assert (
+        client.post(
+            "/classes/detection", json={"identifiers": {"face": {"threshold": 0.4}}}
+        ).status_code
+        == 403
+    )
