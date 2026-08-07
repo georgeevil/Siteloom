@@ -7,6 +7,7 @@ auth layer breaks nothing until someone opts in.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -531,6 +532,31 @@ def test_logout_clears_expired_rows_too(tmp_path):
     client.post("/logout")
     with Session() as s:
         assert s.scalars(select(WebSession)).all() == []
+
+
+def test_every_mutating_route_is_gated_when_auth_is_on(tmp_path):
+    """Walks the real route table rather than a list kept by hand.
+
+    The gate's whole design is that it is one middleware and therefore
+    covers routes nobody remembered to think about — which is only true
+    while every mutating route actually passes through it. A route added
+    under a new prefix, or on a mounted sub-app, would slip past
+    silently; this fails instead.
+    """
+    client, Session = make_env(tmp_path)
+    add_user(Session, "ana", "admin")
+    checked = 0
+    for route in client.app.routes:
+        methods = getattr(route, "methods", set()) - {"GET", "HEAD", "OPTIONS"}
+        path = getattr(route, "path", "")
+        if not methods or path == "/login" or path.startswith("/api/v1/"):
+            continue
+        concrete = re.sub(r"\{[^}]+\}", "1", path)
+        for method in sorted(methods):
+            r = client.request(method, concrete)
+            assert r.status_code == 401, f"{method} {concrete} -> {r.status_code}"
+            checked += 1
+    assert checked > 5  # the walk found routes, not an empty table
 
 
 def test_enabling_auth_takes_effect_on_a_running_console(tmp_path):
