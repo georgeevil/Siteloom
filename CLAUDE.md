@@ -96,6 +96,7 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 
 - Primary target is Apple Silicon (`device: mps`); later a heterogeneous fleet — keep model/runtime choices config-driven.
 - Zone hit-testing uses the bbox bottom-center point (Frigate convention) — see `_zones_hit` in `modules/detection.py`.
+- Tracker settings are config (`detection.tracker`, merged over `TRACKER_DEFAULTS` in `modules/detection.py`). `fuse_score` must stay off while streams are sampled at a few fps: fused cost (1 − IoU·conf) exceeds ultralytics' hard-coded 0.7 new-track confirmation ceiling between sparse samples, so every detection becomes its own trackless event (the CLD-5 fragmentation). Cameras watching walking-pace subjects want `sample_fps` ≥ 5.
 - Modules touching biometric/conversational data must be **off by default** (NFR5); voice transcription stays disabled pending legal review (PRD §9).
 - Tests must not require model weights or live cameras: stub modules + synthetic videos (see `tests/conftest.py`); the real-YOLO path is verified via the manual smoke run against `samples/`.
 - **Resumability is guarded by a differential test**, not by inspection: `tests/test_resume_equivalence.py` runs a corpus clean in one database and interrupted-then-resumed in another, and compares by content. Any change to a skip-what's-done query belongs in that harness. Interrupt deterministically with its `InterruptingReporter` (flips the flag a signal handler flips, at a chosen phase and position) — never by racing a real signal in a test.

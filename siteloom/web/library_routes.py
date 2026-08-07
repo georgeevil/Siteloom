@@ -573,7 +573,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         moved, stats summed, and the now-empty source row deleted."""
         if identity_id == target_id:
             raise HTTPException(400, "cannot merge an identity into itself")
-        from siteloom.identity import VectorStore
+        from siteloom.identity import get_shared_store
         from siteloom.store import EventIdentity
 
         with Session() as session:
@@ -585,13 +585,26 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 raise HTTPException(
                     400, "identities from different identifiers cannot be merged"
                 )
-            vectors = VectorStore(config.identity.vector_db_path)
+            # Reuse the process-wide client — embedded Qdrant allows ONE
+            # client per path per machine (see identity/vectors.py). A
+            # RuntimeError here means a different process (a backfill,
+            # library index, or frigate job) holds the store; merging
+            # without re-pointing the vectors would strand them on a
+            # deleted identity, so refuse instead of merging halfway.
             try:
-                moved = vectors.reassign_identity(
-                    source.identifier_key, source.id, target.id
+                vectors = get_shared_store(config.identity.vector_db_path)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    503,
+                    "the vector store is locked by another process — a "
+                    "backfill, library index, or frigate job is likely "
+                    "running against the same database. Wait for it to "
+                    "finish (see /jobs), then retry the merge. "
+                    f"({exc})",
                 )
-            finally:
-                vectors.close()
+            moved = vectors.reassign_identity(
+                source.identifier_key, source.id, target.id
+            )
             session.execute(
                 EventIdentity.__table__.update()
                 .where(EventIdentity.identity_id == source.id)
@@ -899,10 +912,14 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
 
     def _enroll_resources():
         if not _enroll_state:
-            from siteloom.identity import VectorStore
+            from siteloom.identity import get_shared_store
             from siteloom.identity.embedders import FaceEmbedder
 
-            _enroll_state["vectors"] = VectorStore(config.identity.vector_db_path)
+            # Shared process-wide client — a second one on the same path
+            # would deadlock against it (identity/vectors.py).
+            _enroll_state["vectors"] = get_shared_store(
+                config.identity.vector_db_path
+            )
             _enroll_state["embedder"] = FaceEmbedder(
                 projection_path=config.identity.face_projection_path or None
             )

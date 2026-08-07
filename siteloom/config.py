@@ -69,6 +69,15 @@ class DetectionConfig(BaseModel):
     model: str = "yolo11n.pt"
     device: str = "mps"
     confidence: float = 0.4
+    # Tracker settings merged over ByteTrack defaults (keys as in
+    # ultralytics' bytetrack.yaml). fuse_score is off by default because
+    # we sample streams at a few fps, not native rate: fused cost is
+    # 1 - IoU*conf, and a walking subject's between-sample IoU (~0.3)
+    # times any realistic confidence always lands above the tracker's
+    # hard-coded 0.7 new-track confirmation ceiling — so tracks are
+    # created and instantly discarded, and every detection becomes its
+    # own event (CLD-5).
+    tracker: dict[str, float | int | bool | str] = {"fuse_score": False}
     # COCO class names we care about (PRD §6.2).
     classes: list[str] = [
         "person",

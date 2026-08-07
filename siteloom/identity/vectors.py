@@ -191,3 +191,28 @@ class VectorStore:
     @_locked
     def close(self) -> None:
         self._client.close()
+
+
+#: One shared client per storage path per process. Embedded Qdrant takes
+#: an exclusive flock on `<path>/.lock`, and a second client on the same
+#: path fails with a RuntimeError even when opened by the SAME process
+#: (the lock is per open-file-description). Every in-process consumer
+#: (recognition API, face enrollment, identity merge) must therefore
+#: reuse one instance — see CLAUDE.md's "one client per path per
+#: machine" rule. The `_locked` wrapper already serializes calls across
+#: FastAPI's threadpool, which is what makes sharing safe.
+_shared_stores: dict[str, VectorStore] = {}
+_shared_stores_lock = threading.Lock()
+
+
+def get_shared_store(path: str | Path) -> VectorStore:
+    """Return the process-wide VectorStore for `path`, creating it on
+    first use. Never close the result — other components hold the same
+    reference, and the OS releases the lock at process exit."""
+    key = str(Path(path).resolve())
+    with _shared_stores_lock:
+        store = _shared_stores.get(key)
+        if store is None:
+            store = VectorStore(path)
+            _shared_stores[key] = store
+        return store

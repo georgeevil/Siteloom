@@ -51,9 +51,11 @@ class RecognitionService:
     @property
     def vectors(self):
         if self._vectors is None:
-            from siteloom.identity import VectorStore
+            from siteloom.identity import get_shared_store
 
-            self._vectors = VectorStore(self.config.identity.vector_db_path)
+            # Shared process-wide client — embedded Qdrant rejects a
+            # second one on the same path (identity/vectors.py).
+            self._vectors = get_shared_store(self.config.identity.vector_db_path)
         return self._vectors
 
     @property

@@ -18,13 +18,49 @@ Result: {"detections": [{class_name, confidence, bbox, track_id,
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+import yaml
 
 from siteloom.config import DetectionConfig
 from siteloom.dispatch.base import Job
+
+#: ultralytics' bytetrack.yaml defaults, restated here so the effective
+#: tracker config is explicit and stable across library upgrades.
+#: DetectionConfig.tracker entries are merged over these.
+TRACKER_DEFAULTS: dict[str, Any] = {
+    "tracker_type": "bytetrack",
+    "track_high_thresh": 0.25,
+    "track_low_thresh": 0.1,
+    "new_track_thresh": 0.25,
+    "track_buffer": 30,
+    "match_thresh": 0.8,
+    "fuse_score": True,
+}
+
+
+def tracker_config_path(cfg: DetectionConfig) -> Path:
+    """Materialize the effective tracker config as a YAML file.
+
+    ultralytics only takes tracker settings as a file path, so the merged
+    dict is written under the model cache, named by content hash — the
+    same config always maps to the same file, and a config change never
+    reuses a stale one.
+    """
+    merged = {**TRACKER_DEFAULTS, **cfg.tracker}
+    text = yaml.safe_dump(merged, sort_keys=True)
+    digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+    path = (
+        Path.home() / ".cache" / "siteloom" / "trackers" / f"tracker-{digest}.yaml"
+    )
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return path
 
 
 class DetectionModule:
@@ -36,6 +72,7 @@ class DetectionModule:
         # per-camera copy is cheap, and each stays warm-loaded (the Ray
         # actor pattern, PRD §7).
         self._models: dict[str, Any] = {}
+        self._tracker_path = tracker_config_path(self.cfg)
 
     def _model_for(self, camera_id: str):
         model = self._models.get(camera_id)
@@ -61,6 +98,7 @@ class DetectionModule:
             persist=True,
             conf=self.cfg.confidence,
             device=self.cfg.device,
+            tracker=str(self._tracker_path),
             verbose=False,
         )
 

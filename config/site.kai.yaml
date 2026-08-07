@@ -57,19 +57,19 @@ cameras:
     name: Front Yard
     adapter: unifi
     source: 65741eb001071203e4000656   # High channel resolves to rtsps://…:7441/m9rVUe1z8kE7ixAM
-    sample_fps: 2.0
+    sample_fps: 5.0   # >=5 keeps ByteTrack locking on walking-pace subjects
     modules: [detection, identity]
 
   - id: backyard-puerta
     name: Backyard Puerta
     adapter: unifi
     source: 6716b1d401f04503e400095c   # High channel resolves to rtsps://…:7441/lSAtcDET6k5pOaJa
-    sample_fps: 2.0
+    sample_fps: 5.0   # >=5 keeps ByteTrack locking on walking-pace subjects
     modules: [detection, identity]
 
   - id: back-door
     name: Back door
     adapter: unifi
     source: 6583a69f02feb903e4000418   # High channel resolves to rtsps://…:7441/4ooKjN4eAkpuFOOq
-    sample_fps: 2.0
+    sample_fps: 5.0   # >=5 keeps ByteTrack locking on walking-pace subjects
     modules: [detection, identity]
