@@ -126,19 +126,37 @@ def init_db(config: Path = CONFIG_OPT):
 
 @app.command()
 def run(
+    ctx: typer.Context,
     config: Path = CONFIG_OPT,
     max_frames: int | None = typer.Option(None, help="Stop after N frames per camera (debug)"),
+    log_file: str = typer.Option(None, "--log-file", help="Also write logs here"),
+    quiet: bool = typer.Option(False, "--quiet", help="No progress bar"),
 ):
-    """Run ingestion over all configured cameras."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    """Run ingestion over all configured cameras.
+
+    A soak is a long-running operation like any other, so it heartbeats an
+    OperationRun row (CLD-15): `siteloom jobs` and /jobs can watch it from
+    another terminal, and a crash at hour 3 shows up as stale rather than
+    as a healthy-looking row. Unlike a bounded job it has nothing to skip
+    on resume — see `IngestService.run` for that decision.
+    """
+    from siteloom.cli_library import INTERRUPTED_EXIT, _resume_command
     from siteloom.config import load_config
     from siteloom.ingest import IngestService
+    from siteloom.progress import ProgressReporter, setup_logging
 
-    service = IngestService(load_config(config))
-    service.run(max_frames=max_frames)
+    setup_logging(level="INFO", log_file=log_file)
+    cfg = load_config(config)
+    service = IngestService(cfg)
+    with ProgressReporter(
+        service.Session,
+        "run",
+        target=cfg.site_id,
+        resume_command=_resume_command(ctx),
+        bar=not quiet,
+    ) as progress:
+        service.run(max_frames=max_frames, progress=progress)
     if service.stopped:
-        from siteloom.cli_library import INTERRUPTED_EXIT
-
         raise typer.Exit(INTERRUPTED_EXIT)
 
 

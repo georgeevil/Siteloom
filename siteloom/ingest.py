@@ -121,6 +121,9 @@ class IngestService:
         self.notifier = WebhookNotifier(config.integrations.webhooks)
 
         self._stop = threading.Event()
+        # Optional heartbeat for a long soak (CLD-15). Set by run(); None
+        # everywhere else so backfill and the tests stay reporter-free.
+        self._progress = None
 
     def stop(self) -> None:
         """Ask a running ingest to finish in-flight frames and return."""
@@ -129,6 +132,35 @@ class IngestService:
     @property
     def stopped(self) -> bool:
         return self._stop.is_set()
+
+    #: Aggregate heartbeat counters, seeded in this order so the progress
+    #: bar's four-counter summary shows the totals rather than whichever
+    #: per-camera key happened to be touched first.
+    TICK_COUNTERS = ("frames", "detections", "matches", "reconnects")
+
+    def _tick(self, cam_id: str, n: int = 0, **counters: int) -> None:
+        """Advance the run's heartbeat, if one is attached (CLD-15).
+
+        Every counter is recorded twice — once aggregated and once under
+        `<camera>.<name>` — because the question a soak actually asks is
+        "which camera went quiet at 3am", which a total cannot answer.
+
+        This is also where the live workers notice a stop signal. The
+        reporter owns the handlers (one owner, per progress.py), so the
+        threads learn about Ctrl-C by polling it on their next tick
+        instead of each installing a handler of its own.
+        """
+        p = self._progress
+        if p is None:
+            return
+        wide = dict(counters)
+        wide.update({f"{cam_id}.{key}": value for key, value in counters.items()})
+        if n:
+            p.advance(n, **wide)
+        else:
+            p.bump(**wide)
+        if p.interrupt_requested:
+            self._stop.set()
 
     def _sync_cameras(self) -> None:
         with self.Session() as session:
@@ -259,6 +291,9 @@ class IngestService:
         detections = result.result["detections"]
         if detections:
             self._store_detections(cam, frame.timestamp, detections)
+        # A frame with nothing in it is still a frame the soak got through;
+        # counting only productive ones would make a quiet night look dead.
+        self._tick(cam.id, 1, frames=1, detections=len(detections))
 
     def _store_detections(
         self, cam: CameraConfig, timestamp: datetime, detections: list[dict]
@@ -380,6 +415,7 @@ class IngestService:
                 # Quarantined (awaiting consistent sightings) or ambiguous
                 # between known identities — no link either way (CLD-41).
                 continue
+            self._tick(cam.id, matches=1)
             # Identity-aware de-fragmentation (CLD-40): the same identity
             # moments apart on the same camera is one visit, even when the
             # subject moved too far between samples for the IoU stitch.
@@ -649,28 +685,65 @@ class IngestService:
         path.write_bytes(crop_jpeg)
         return str(path)
 
-    def run(self, max_frames: int | None = None) -> None:
+    def run(self, max_frames: int | None = None, progress=None) -> None:
         """Ingest all configured cameras until stopped.
 
         File cameras run sequentially to completion (the backfill shape,
         PRD §6.6). Live cameras then run one worker thread each, so a
         slow or dropped stream never starves the others; each worker
         reconnects with backoff until stop() or a signal.
+
+        `progress` is an optional live `ProgressReporter` (CLD-15). It
+        makes a day-long soak visible to `siteloom jobs` and `/jobs`, and
+        it takes over signal handling while attached — two owners racing
+        for SIGINT is how a Ctrl-C gets swallowed.
+
+        On "resume" for this command (CLD-12's open question): there is
+        nothing to skip. Live ingest has no unit of done-ness — the frames
+        it missed while stopped are simply gone — so the resume command is
+        the same invocation, and restarting it means "reconnect", not
+        "continue". Bounded catch-up over that gap is `backfill-unifi`.
         """
         self._stop.clear()
+        self._progress = progress
+        if progress is not None:
+            # Seed the aggregates so the bar's first four counters are the
+            # totals, not whichever per-camera key was touched first.
+            progress.bump(**{key: 0 for key in self.TICK_COUNTERS})
+        try:
+            self._run_cameras(max_frames)
+        finally:
+            self._progress = None
+
+    @contextmanager
+    def _phase(self, name: str):
+        """The reporter's phase if one is attached, otherwise nothing."""
+        if self._progress is None:
+            yield
+        else:
+            with self._progress.phase(name):
+                yield
+
+    def _run_cameras(self, max_frames: int | None) -> None:
         file_cams = [c for c in self.config.cameras if c.adapter == "file"]
         live_cams = [c for c in self.config.cameras if c.adapter != "file"]
 
-        for cam in file_cams:
-            if self._stop.is_set():
-                return
-            log.info("ingesting camera %s (%s)", cam.id, cam.adapter)
-            count = self.run_camera(cam, max_frames=max_frames)
-            log.info("camera %s: %d frames processed", cam.id, count)
+        if file_cams:
+            with self._phase(f"Ingesting {len(file_cams)} file camera(s)"):
+                for cam in file_cams:
+                    if self._stop.is_set():
+                        return
+                    log.info("ingesting camera %s (%s)", cam.id, cam.adapter)
+                    count = self.run_camera(cam, max_frames=max_frames)
+                    log.info("camera %s: %d frames processed", cam.id, count)
 
         if not live_cams:
             return
-        with self._stop_signals():
+        # The reporter installs STOP_SIGNALS itself; installing ours on top
+        # would leave whichever won holding a stop the other never sees.
+        with self._stop_signals(active=self._progress is None), self._phase(
+            f"Live ingest ({len(live_cams)} camera(s))"
+        ):
             workers = [
                 threading.Thread(
                     target=self._run_live,
@@ -682,8 +755,12 @@ class IngestService:
             ]
             for w in workers:
                 w.start()
-            # Join with a timeout so the main thread keeps handling signals.
+            # Join with a timeout so the main thread keeps handling signals
+            # — and, when a reporter owns them, so a stop reaches the
+            # workers even while every camera is asleep in its backoff.
             while any(w.is_alive() for w in workers):
+                if self._progress is not None and self._progress.interrupt_requested:
+                    self._stop.set()
                 for w in workers:
                     w.join(timeout=0.5)
 
@@ -733,15 +810,24 @@ class IngestService:
                 got,
                 backoff,
             )
+            self._tick(cam.id, reconnects=1)
             self._stop.wait(backoff)
             backoff = min(backoff * 2, LIVE_BACKOFF_MAX_S)
         log.info("camera %s: live ingest stopped (%d frames)", cam.id, processed)
 
     @contextmanager
-    def _stop_signals(self):
+    def _stop_signals(self, active: bool = True):
         """Route SIGINT/SIGTERM/SIGHUP to a graceful stop (progress.py
-        convention): first signal drains in-flight frames, second aborts."""
+        convention): first signal drains in-flight frames, second aborts.
+
+        `active=False` is a no-op, for when a ProgressReporter already owns
+        these signals — it needs the interrupt to record the run.
+        """
         from siteloom.progress import STOP_SIGNALS
+
+        if not active:
+            yield
+            return
 
         def handler(signum, frame):
             if self._stop.is_set():

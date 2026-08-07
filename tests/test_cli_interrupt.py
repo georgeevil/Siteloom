@@ -117,3 +117,54 @@ def test_takeout_resume_quotes_the_path_and_keeps_no_auto_verify(Session, monkey
         "siteloom takeout import '/archives/My Photos' "
         "--config site.yaml --no-auto-verify"
     )
+
+
+# -- `siteloom run` is a job too (CLD-15) -----------------------------------
+
+
+def write_config(tmp_path, cameras: str = "") -> str:
+    """A minimal site config with no cameras, so run() returns at once."""
+    path = tmp_path / "site.yaml"
+    path.write_text(
+        f"site_id: soak\n"
+        f"storage:\n"
+        f"  db_url: sqlite:///{tmp_path}/run.db\n"
+        f"  media_dir: {tmp_path}/media\n"
+        f"identity:\n"
+        f"  enabled: false\n"
+        f"cameras: [{cameras}]\n"
+    )
+    return str(path)
+
+
+def runs_in(db_path):
+    engine = make_engine(f"sqlite:///{db_path}")
+    with get_session(engine)() as session:
+        return session.query(OperationRun).all()
+
+
+def test_run_records_a_job_row(tmp_path):
+    """A soak has to be visible to `siteloom jobs` from another terminal;
+    that means an OperationRun row, written by the CLI not the tests."""
+    config = write_config(tmp_path)
+    result = runner.invoke(cli.app, ["run", "--config", config, "--quiet"])
+    assert result.exit_code == 0, result.output
+
+    runs = runs_in(tmp_path / "run.db")
+    assert len(runs) == 1
+    assert runs[0].kind == "run"
+    assert runs[0].status == "complete"
+    assert runs[0].target == "soak"
+
+
+def test_run_resume_command_keeps_every_flag(tmp_path):
+    """Live ingest has nothing to skip on resume, but the command still has
+    to be the real invocation — a resume line that drops --quiet is the
+    CLD-11 F5 bug in a new place."""
+    config = write_config(tmp_path)
+    runner.invoke(cli.app, ["run", "--config", config, "--quiet"])
+
+    resume = runs_in(tmp_path / "run.db")[0].resume_command
+    assert resume.startswith("siteloom run")
+    assert "--quiet" in resume
+    assert config in resume
