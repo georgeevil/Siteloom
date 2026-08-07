@@ -398,12 +398,23 @@ class RecognitionApiConfig(BaseModel):
     Lets tools that already speak CompreFace (Double Take most notably)
     use Siteloom as their recognizer — same face collection the cameras
     and the photo backfill share.
+
+    This is a biometric surface (matching AND enrollment), so it is off
+    by default (NFR5), and enabling it without an api_key refuses to
+    start unless allow_open says the exposure is deliberate (CLD-47).
     """
 
-    enabled: bool = True
+    enabled: bool = False
     # If set, requests must carry it in the x-api-key header (the header
     # CompreFace clients already send).
     api_key: str = ""
+    # Explicit opt-in to serve WITHOUT authentication. Enabled with no
+    # api_key and no allow_open fails fast at startup rather than
+    # exposing face matching and gallery writes to anyone on the port.
+    allow_open: bool = False
+    # Per-client-IP request budget over a sliding minute for /api/v1/;
+    # 0 disables rate limiting.
+    rate_limit_per_minute: int = 60
     # Minimum face-detector confidence for a box to be reported.
     det_prob_threshold: float = 0.7
 

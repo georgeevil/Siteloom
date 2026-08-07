@@ -81,8 +81,15 @@ integrations:
     labels: [person, car, truck, motorcycle, bus]
     min_score: 0.6
   recognition_api:      # CompreFace-compatible /api/v1/recognition/...
-    enabled: true
-    api_key: ""         # set to require x-api-key (Double Take's "key")
+    # SECURITY: this surface serves biometric matching AND face
+    # enrollment. Off by default; when enabling, set api_key (the
+    # x-api-key / Double Take "key"). Enabled with an empty api_key
+    # refuses to start unless you also set allow_open: true — an
+    # explicit "yes, serve unauthenticated on this network" opt-in.
+    enabled: false
+    api_key: ""         # required to enable, unless allow_open below
+    # allow_open: true  # DANGEROUS: anyone reaching the port can enroll
+    # rate_limit_per_minute: 60  # per-client-IP budget; 0 disables
   webhooks: []
   # webhooks:
   #   - url: https://example.com/hook
