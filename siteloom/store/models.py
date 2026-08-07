@@ -95,6 +95,22 @@ class Event(Base):
     identities: Mapped[list["EventIdentity"]] = relationship(back_populates="event")
 
     @property
+    def active_identities(self) -> list["EventIdentity"]:
+        """The identity claims that still stand on this event.
+
+        Unlinked rows (CLD-36) keep their identity_id as the record of
+        what was wrongly claimed, so anything asking "who is this event"
+        — the triage list, search, review status — has to ask for the
+        live claims rather than iterating the relationship. Misses (null
+        identity_id) are not claims either.
+        """
+        return [
+            link
+            for link in self.identities
+            if link.identity_id is not None and link.unlinked_at is None
+        ]
+
+    @property
     def mean_confidence(self) -> float | None:
         """Average detection confidence across the event, or None when it
         cannot be computed (no detections, or a row written before
@@ -123,7 +139,13 @@ class Event(Base):
         """
         if self.reviewed_at is not None:
             return "cleared"
-        verdicts = [link.verdict for link in self.identities]
+        # An unlinked claim has already been corrected — its "wrong"
+        # verdict is history, not outstanding work, so it must not pin
+        # the event to `flagged` after the operator fixed it. Misses stay
+        # in scope; `missed_identity` below covers them.
+        verdicts = [
+            link.verdict for link in self.identities if link.unlinked_at is None
+        ]
         if self.missed_identity or "wrong" in verdicts:
             return "flagged"
         if any(v is not None for v in verdicts):
@@ -192,6 +214,16 @@ class EventIdentity(Base):
       on Event so a miss is attributable — per-identifier recall (CLD-17)
       is not computable from "something was missed".
 
+    A third state cuts across the first: `unlinked_at` set means the
+    operator repudiated the claim (CLD-36). The row keeps its
+    identity_id, similarity and matched_by — that is precisely the
+    evidence of what the system got wrong, and the negatives-are-data
+    rule applies here as much as it does to annotations — but it is no
+    longer a claim, so `Event.active_identities` and the SQL clauses
+    below skip it. Nulling identity_id instead would have collided with
+    the miss shape above: a miss is "nothing was claimed", which is a
+    different fact from "this was claimed and it was wrong".
+
     `Event.missed_identity` is maintained as a denormalized mirror of
     "this event has missed rows" so one-table accuracy queries and the
     triage status SQL stay simple; `set_missed` in the web layer is the
@@ -228,6 +260,9 @@ class EventIdentity(Base):
     # store here; resolver-side learning from verdicts is separate work.
     verdict: Mapped[str | None] = mapped_column(String, nullable=True)
     verdict_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When the operator detached this claim (CLD-36). Set by unlink and by
+    # reassign, which detaches the old claim and attaches a new one.
+    unlinked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="identities")
     identity: Mapped[Identity | None] = relationship(back_populates="events")
@@ -235,6 +270,11 @@ class EventIdentity(Base):
     @property
     def is_miss(self) -> bool:
         return self.identity_id is None
+
+    @property
+    def is_active(self) -> bool:
+        """A standing claim: an identity, not repudiated."""
+        return self.identity_id is not None and self.unlinked_at is None
 
 
 #: Review states an Event can be in, in triage order (worst first).
@@ -248,7 +288,11 @@ def status_clause(status: str):
     would count rows the operator never sees — so the triage filters have
     to be expressible in SQL. Keep in step with the property above.
     """
-    links = select(EventIdentity.id).where(EventIdentity.event_id == Event.id)
+    # Unlinked claims are excluded here too — see `review_status`: a
+    # corrected claim is not outstanding work.
+    links = select(EventIdentity.id).where(
+        EventIdentity.event_id == Event.id, EventIdentity.unlinked_at.is_(None)
+    )
     has_wrong = links.where(EventIdentity.verdict == "wrong").exists()
     has_judged = links.where(EventIdentity.verdict.is_not(None)).exists()
     signed_off = Event.reviewed_at.is_not(None)
@@ -281,13 +325,16 @@ def unmatched_clause():
 
     Only real matches count — a recorded miss (null-identity row) is an
     operator saying nothing was matched, so it must not make the event
-    look matched.
+    look matched. Nor must an unlinked claim (CLD-36): an operator who
+    detached the only match has said this event is unmatched, and the
+    triage chip that surfaces such events is where it belongs.
     """
     return not_(
         select(EventIdentity.id)
         .where(
             EventIdentity.event_id == Event.id,
             EventIdentity.identity_id.is_not(None),
+            EventIdentity.unlinked_at.is_(None),
         )
         .exists()
     )

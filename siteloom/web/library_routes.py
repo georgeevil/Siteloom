@@ -629,8 +629,8 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         moved, stats summed, and the now-empty source row deleted."""
         if identity_id == target_id:
             raise HTTPException(400, "cannot merge an identity into itself")
-        from siteloom.identity import get_shared_store
         from siteloom.store import EventIdentity
+        from siteloom.web.identity_ops import shared_store
 
         with Session() as session:
             source = session.get(Identity, identity_id)
@@ -641,23 +641,10 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 raise HTTPException(
                     400, "identities from different identifiers cannot be merged"
                 )
-            # Reuse the process-wide client — embedded Qdrant allows ONE
-            # client per path per machine (see identity/vectors.py). A
-            # RuntimeError here means a different process (a backfill,
-            # library index, or frigate job) holds the store; merging
-            # without re-pointing the vectors would strand them on a
-            # deleted identity, so refuse instead of merging halfway.
-            try:
-                vectors = get_shared_store(config.identity.vector_db_path)
-            except RuntimeError as exc:
-                raise HTTPException(
-                    503,
-                    "the vector store is locked by another process — a "
-                    "backfill, library index, or frigate job is likely "
-                    "running against the same database. Wait for it to "
-                    "finish (see /jobs), then retry the merge. "
-                    f"({exc})",
-                )
+            # Merging without re-pointing the vectors would strand them
+            # on a deleted identity, so a locked store refuses rather
+            # than merging halfway (web/identity_ops.py).
+            vectors = shared_store(config, "merge")
             moved = vectors.reassign_identity(
                 source.identifier_key, source.id, target.id
             )
@@ -682,26 +669,6 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             session.commit()
         return RedirectResponse(f"/identities/{target_id}", status_code=303)
 
-    # Embedders for split's gallery rebuild, cached per algo: re-embedding
-    # a stored crop must use the same embedder live matching used ("one
-    # crop, two jobs"), and building one is expensive (model load).
-    _split_embedders: dict = {}
-
-    def _identifier_embedder(identifier_key: str):
-        from siteloom.identity import embedders
-
-        ident = config.identity.identifiers.get(identifier_key)
-        # Auto-added classes have no configured identifier; they are
-        # generic by construction (identity/registry.py).
-        algo = ident.algo if ident else "generic"
-        if algo not in _split_embedders:
-            _split_embedders[algo] = embedders.build_embedder(
-                algo,
-                device=config.detection.device,
-                projection_path=config.identity.face_projection_path or None,
-            )
-        return _split_embedders[algo]
-
     @app.post("/identities/{identity_id}/split")
     def split_identity(identity_id: int, annotation_ids: str = Form("")):
         """Pull selected annotations out into a fresh identity.
@@ -723,8 +690,8 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         written before provenance existed — see
         VectorStore.delete_by_annotations and delete_duplicates_of.
         """
-        from siteloom.identity import get_shared_store
         from siteloom.identity.enroll import embed_annotations, enroll_embedded
+        from siteloom.web.identity_ops import identifier_embedder, shared_store
 
         tokens = [t.strip() for t in annotation_ids.split(",") if t.strip()]
         malformed = [t for t in tokens if not t.isdigit()]
@@ -764,23 +731,13 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     "annotations do not belong to this identity: "
                     + ", ".join(wrong),
                 )
-            # Reuse the process-wide client — embedded Qdrant allows ONE
-            # client per path per machine (see identity/vectors.py). A
-            # RuntimeError here means a different process holds the store;
-            # moving rows without moving vectors is exactly the bug this
-            # endpoint used to be, so refuse instead of splitting halfway.
-            try:
-                vectors = get_shared_store(config.identity.vector_db_path)
-            except RuntimeError as exc:
-                raise HTTPException(
-                    503,
-                    "the vector store is locked by another process — a "
-                    "backfill, library index, or frigate job is likely "
-                    "running against the same database. Wait for it to "
-                    "finish (see /jobs), then retry the split. "
-                    f"({exc})",
-                )
-            embedder = _identifier_embedder(source.identifier_key)
+            # Moving rows without moving vectors is exactly the bug this
+            # endpoint used to be, so a locked store refuses rather than
+            # splitting halfway (web/identity_ops.py).
+            vectors = shared_store(config, "split")
+            embedder = identifier_embedder(
+                config, source.identifier_key, app.state.embedders
+            )
             ident_cfg = config.identity.identifiers.get(source.identifier_key)
             max_vectors = ident_cfg.max_vectors_per_identity if ident_cfg else 20
             moved = [rows[i] for i in ids]
