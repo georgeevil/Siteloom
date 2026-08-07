@@ -43,8 +43,16 @@ def retag(config: Path = CONFIG_OPT):
     ingest (EventConfig.for_camera), is idempotent, and never deletes
     anything.
     """
+    from sqlalchemy import func
+
     from siteloom.config import load_config
-    from siteloom.store import Event, get_session, init_db as _init, make_engine
+    from siteloom.store import (
+        Detection,
+        Event,
+        get_session,
+        init_db as _init,
+        make_engine,
+    )
 
     cfg = load_config(config)
     engine = make_engine(cfg.storage.db_url)
@@ -75,12 +83,33 @@ def retag(config: Path = CONFIG_OPT):
             if event.significant != significant:
                 event.significant = significant
                 changed += 1
+        # Backfill confidence_sum for rows predating the column (CLD-40).
+        # A zero sum alongside recorded detections can only mean the row
+        # was written before the column existed; live sums are never
+        # overwritten. Frigate-consumed events have no Detection rows and
+        # accumulate their sums going forward instead.
+        sums = dict(
+            session.query(Detection.event_id, func.sum(Detection.confidence))
+            .group_by(Detection.event_id)
+            .all()
+        )
+        backfilled = 0
+        for event in (
+            session.query(Event)
+            .filter(Event.confidence_sum == 0.0, Event.detection_count > 0)
+            .yield_per(500)
+        ):
+            total_conf = sums.get(event.id)
+            if total_conf:
+                event.confidence_sum = total_conf
+                backfilled += 1
         session.commit()
         after = session.query(Event).filter(Event.significant.is_(True)).count()
         total = session.query(Event).count()
     typer.echo(
         f"retagged {changed} of {total} events: "
-        f"{before} -> {after} significant ({total - after} ephemeral)"
+        f"{before} -> {after} significant ({total - after} ephemeral); "
+        f"backfilled mean confidence on {backfilled}"
     )
 
 

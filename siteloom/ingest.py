@@ -46,14 +46,6 @@ LIVE_BACKOFF_S = 2.0
 LIVE_BACKOFF_MAX_S = 60.0
 LIVE_STABLE_S = 30.0
 
-# A detection only joins an existing event if that event was last seen
-# this recently (in frame time). Track ids restart at 1 whenever a
-# tracker is rebuilt — process restart, stream reconnect, the next
-# backfill clip — so track id alone would staple today's visitor onto
-# last week's event.
-EVENT_LINK_GAP_S = 120.0
-
-
 def _bbox_iou(
     a: tuple[float, float, float, float] | list[float],
     b: tuple[float, float, float, float] | list[float],
@@ -285,6 +277,7 @@ class IngestService:
                 )
                 event.last_seen = ts
                 event.detection_count += 1
+                event.confidence_sum += det["confidence"]
                 if det["confidence"] > event.best_confidence and crop_path:
                     event.best_confidence = det["confidence"]
                     event.best_crop_path = crop_path
@@ -381,6 +374,12 @@ class IngestService:
                 # Quarantined (awaiting consistent sightings) or ambiguous
                 # between known identities — no link either way (CLD-41).
                 continue
+            # Identity-aware de-fragmentation (CLD-40): the same identity
+            # moments apart on the same camera is one visit, even when the
+            # subject moved too far between samples for the IoU stitch.
+            # Merging before linking means the surviving event usually
+            # already carries the link, so the pairing publishes once.
+            event = self._merge_with_prior(session, event, resolution.identity.id, rules)
             link = (
                 session.query(EventIdentity)
                 .filter_by(event_id=event.id, identity_id=resolution.identity.id)
@@ -433,6 +432,100 @@ class IngestService:
                     payload,
                 )
 
+    def _merge_with_prior(
+        self, session, event: Event, identity_id: int, rules: EventConfig
+    ) -> Event:
+        """Fold `event` into a recent same-camera event of the same
+        identity, returning whichever event survives (CLD-40).
+
+        Both windows in the query compare frame time, symmetrically, so
+        backfill clip order and restarts cannot change the outcome —
+        `tests/test_resume_equivalence.py` holds this to account. The
+        prior event absorbs the fragment: it is the row an operator may
+        already have seen or reviewed.
+        """
+        if rules.merge_gap_s <= 0:
+            return event
+        gap = timedelta(seconds=rules.merge_gap_s)
+        prior = (
+            session.query(Event)
+            .join(EventIdentity, EventIdentity.event_id == Event.id)
+            .filter(
+                Event.camera_id == event.camera_id,
+                Event.id != event.id,
+                EventIdentity.identity_id == identity_id,
+                # Interval distance ≤ gap, whichever event came first.
+                Event.last_seen >= event.first_seen - gap,
+                Event.first_seen <= event.last_seen + gap,
+            )
+            .order_by(Event.id.desc())
+            .first()
+        )
+        if prior is None:
+            return event
+        self._merge_events(session, prior, event, rules)
+        return prior
+
+    def _merge_events(
+        self, session, target: Event, source: Event, rules: EventConfig
+    ) -> None:
+        """Move everything hanging off `source` onto `target`, combine the
+        aggregates exactly, and delete the emptied source row."""
+        for row in (
+            session.query(Detection).filter(Detection.event_id == source.id).all()
+        ):
+            row.event_id = target.id
+        for link in (
+            session.query(EventIdentity)
+            .filter(EventIdentity.event_id == source.id)
+            .all()
+        ):
+            kept = None
+            if link.identity_id is not None:
+                kept = (
+                    session.query(EventIdentity)
+                    .filter_by(event_id=target.id, identity_id=link.identity_id)
+                    .first()
+                )
+            if kept is None:
+                link.event_id = target.id
+                continue
+            kept.hit_count += link.hit_count
+            kept.similarity = max(kept.similarity, link.similarity)
+            if link.matched_by == "plate":
+                kept.matched_by = "plate"
+            elif kept.matched_by is None:
+                kept.matched_by = link.matched_by
+            kept.learned_plate = kept.learned_plate or link.learned_plate
+            # Human review survives a merge (the Annotation philosophy);
+            # the target's own verdict, if any, outranks the fragment's.
+            if kept.verdict is None:
+                kept.verdict = link.verdict
+                kept.verdict_at = link.verdict_at
+            session.delete(link)
+        target.first_seen = min(target.first_seen, source.first_seen)
+        target.last_seen = max(target.last_seen, source.last_seen)
+        target.detection_count += source.detection_count
+        target.confidence_sum += source.confidence_sum
+        if source.best_confidence > target.best_confidence:
+            target.best_confidence = source.best_confidence
+            if source.best_crop_path:
+                target.best_crop_path = source.best_crop_path
+        target.guest_window = target.guest_window or source.guest_window
+        target.missed_identity = target.missed_identity or source.missed_identity
+        if target.missed_at is None:
+            target.missed_at = source.missed_at
+        if source.track_id is not None:
+            # Adopt the fragment's track so its later frames fast-path here.
+            target.track_id = source.track_id
+        target.significant = target.significant or source.significant
+        self._update_significance(target, rules)
+        # Children are re-pointed above; flush before the delete so the
+        # ORM never tries to null their FKs on the source's behalf.
+        session.flush()
+        session.delete(source)
+        session.flush()
+
     def _find_or_create_event(
         self, session, camera_id: str, det: dict, ts: datetime, rules: EventConfig
     ) -> Event:
@@ -454,7 +547,7 @@ class IngestService:
             )
             if (
                 event is not None
-                and abs((ts - event.last_seen).total_seconds()) > EVENT_LINK_GAP_S
+                and abs((ts - event.last_seen).total_seconds()) > rules.track_link_gap_s
             ):
                 event = None
         if event is None:
@@ -495,11 +588,16 @@ class IngestService:
         gap is symmetric (abs) so backfill clip order doesn't matter, and
         it is frame time, never wall clock — resume-equivalence depends
         on that.
+
+        The top stitch_candidates events in the window are all tried and
+        the best overlap wins: with two subjects in frame the newest
+        event is usually the other subject, and a single-candidate probe
+        minted one fresh event per frame (CLD-40).
         """
         if rules.stitch_gap_s <= 0:
             return None
         gap = timedelta(seconds=rules.stitch_gap_s)
-        event = (
+        candidates = (
             session.query(Event)
             .filter(
                 Event.camera_id == camera_id,
@@ -508,24 +606,31 @@ class IngestService:
                 Event.last_seen <= ts + gap,
             )
             .order_by(Event.id.desc())
-            .first()
+            .limit(max(1, rules.stitch_candidates))
+            .all()
         )
-        if event is None:
-            return None
-        last_det = (
-            session.query(Detection)
-            .filter(Detection.event_id == event.id)
-            .order_by(Detection.id.desc())
-            .first()
-        )
-        if last_det is None:
-            return None
-        if _bbox_iou(json.loads(last_det.bbox), det["bbox"]) < rules.stitch_min_iou:
+        best: Event | None = None
+        best_iou = 0.0
+        for candidate in candidates:
+            last_det = (
+                session.query(Detection)
+                .filter(Detection.event_id == candidate.id)
+                .order_by(Detection.id.desc())
+                .first()
+            )
+            if last_det is None:
+                continue
+            iou = _bbox_iou(json.loads(last_det.bbox), det["bbox"])
+            # Strict > keeps the newest candidate on equal overlap, which
+            # keeps the choice deterministic across restarts.
+            if iou >= rules.stitch_min_iou and iou > best_iou:
+                best, best_iou = candidate, iou
+        if best is None:
             return None
         if det["track_id"] is not None:
             # Adopt the new track so its later frames hit the fast path.
-            event.track_id = det["track_id"]
-        return event
+            best.track_id = det["track_id"]
+        return best
 
     def _save_crop(self, camera_id: str, det: dict, ts: datetime) -> str | None:
         crop_jpeg = det.get("crop_jpeg")
