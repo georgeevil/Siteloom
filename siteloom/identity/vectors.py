@@ -140,6 +140,54 @@ class VectorStore:
         ]
 
     @_locked
+    def pop_matching(
+        self,
+        collection: str,
+        vector: np.ndarray,
+        threshold: float,
+        limit: int = 64,
+    ) -> list[tuple[np.ndarray, dict]]:
+        """Remove and return every point similar to `vector` at or above
+        `threshold` — the pending-pool promotion step (CLD-41): the
+        cluster's vectors move out of quarantine and into an identity's
+        collection, so they must leave here atomically with the read."""
+        if not self._client.collection_exists(collection):
+            return []
+        res = self._client.query_points(
+            collection_name=collection,
+            query=vector.astype(np.float32).tolist(),
+            limit=limit,
+            with_payload=True,
+            with_vectors=True,
+        )
+        matched = [p for p in res.points if float(p.score) >= threshold]
+        if not matched:
+            return []
+        self._client.delete(
+            collection_name=collection,
+            points_selector=[p.id for p in matched],
+        )
+        return [
+            (np.asarray(p.vector, dtype=np.float32), dict(p.payload or {}))
+            for p in matched
+        ]
+
+    @_locked
+    def prune_older_than(self, collection: str, cutoff_ts: float) -> None:
+        """Delete points whose payload "ts" is before `cutoff_ts` (epoch
+        seconds). Keeps the pending pool from accumulating one-off crops."""
+        if not self._client.collection_exists(collection):
+            return
+        from qdrant_client.models import FieldCondition, Filter, Range
+
+        self._client.delete(
+            collection_name=collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="ts", range=Range(lt=cutoff_ts))]
+            ),
+        )
+
+    @_locked
     def drop(self, collection: str) -> None:
         if self._client.collection_exists(collection):
             self._client.delete_collection(collection)

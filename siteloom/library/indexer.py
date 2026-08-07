@@ -367,7 +367,10 @@ class LibraryIndexer:
                 crop_path=annotation.crop_path,
                 threshold=ident_cfg.threshold if ident_cfg else None,
                 max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
+                quality=det.get("confidence"),
             )
+            if resolution.identity is None:
+                continue  # quarantined or ambiguous (CLD-41) — no link
             # Face identity wins the annotation link when present; it is
             # the strongest signal available for a person crop.
             if annotation.identity_id is None or emb["identifier"] == "face":

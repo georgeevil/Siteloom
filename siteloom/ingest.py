@@ -374,7 +374,13 @@ class IngestService:
                 crop_path=crop_path,
                 threshold=ident_cfg.threshold if ident_cfg else None,
                 max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
+                camera_id=cam.id,
+                quality=det["confidence"],
             )
+            if resolution.identity is None:
+                # Quarantined (awaiting consistent sightings) or ambiguous
+                # between known identities — no link either way (CLD-41).
+                continue
             link = (
                 session.query(EventIdentity)
                 .filter_by(event_id=event.id, identity_id=resolution.identity.id)
