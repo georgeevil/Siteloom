@@ -23,7 +23,7 @@ from siteloom.adapters.base import CameraAdapter, Frame
 from siteloom.config import CameraConfig, EventConfig, SiteConfig
 from siteloom.dispatch import Job, JobDispatcher, LocalBackend
 from siteloom.guests import GuestWindows
-from siteloom.identity import IdentityResolver, VectorStore
+from siteloom.identity import IdentityResolver
 from siteloom.modules.audio import AudioModule
 from siteloom.modules.detection import DetectionModule
 from siteloom.modules.identity import IdentityModule
@@ -101,8 +101,14 @@ class IngestService:
 
         self.resolver: IdentityResolver | None = None
         if config.identity.enabled:
+            # Shared store, not a private client: embedded Qdrant is one
+            # client per path per process, and the web process runs an
+            # IngestService too (UI-triggered reindex) alongside the
+            # recognition API and enrollment, which already share it.
+            from siteloom.identity.vectors import get_shared_store
+
             self.resolver = IdentityResolver(
-                config.identity, VectorStore(config.identity.vector_db_path)
+                config.identity, get_shared_store(config.identity.vector_db_path)
             )
         with self.Session() as session:
             self._guest_windows = GuestWindows(session, config.guests)

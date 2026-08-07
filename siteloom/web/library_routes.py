@@ -7,6 +7,8 @@ create_app() onto the same FastAPI instance.
 from __future__ import annotations
 
 import json
+import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
@@ -26,6 +28,14 @@ from siteloom.store import (
     OperationRun,
     TrainingRun,
 )
+
+
+log = logging.getLogger(__name__)
+
+#: The UI-triggered reindex runs as a background thread in the serve
+#: process (which is what lets it reuse the shared vector store). One at
+#: a time; observed via OperationRun like any other long job.
+_reindex_state: dict = {"thread": None}
 
 
 def _now() -> datetime:
@@ -143,6 +153,12 @@ def _class_rows(config, seen: dict) -> list[dict]:
                 "hue": _class_hue(name),
                 "identifier": identifier[0] if identifier else None,
                 "threshold": identifier[1].threshold if identifier else None,
+                # Detection minimum for this class: per-class override or
+                # the global floor. `overridden` tells the UI which.
+                "det_conf": config.detection.class_confidence.get(
+                    name, config.detection.confidence
+                ),
+                "det_conf_overridden": name in config.detection.class_confidence,
                 # Registry auto-adds a generic identifier for an unseen
                 # class when this is on, so "none configured" is not the
                 # same as "will never be identified".
@@ -501,11 +517,23 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         operator action, not an edit-the-file-and-redeploy action (NFR3).
         """
         body = await request.json()
-        classes = [c.strip() for c in body.get("classes", []) if c.strip()]
+        classes = [
+            c.strip()
+            for c in body.get("classes", [])
+            if isinstance(c, str) and c.strip()
+        ]
         if classes:
             config.detection.classes = classes
         if "confidence" in body:
             config.detection.confidence = float(body["confidence"])
+        if "class_confidence" in body:
+            # Full-replace semantics: the page always posts the complete
+            # per-class map; a class matching the global floor is omitted
+            # by the UI so it keeps following the global value.
+            config.detection.class_confidence = {
+                str(k): float(v)
+                for k, v in (body["class_confidence"] or {}).items()
+            }
         for key, values in (body.get("identifiers") or {}).items():
             ident = config.identity.identifiers.get(key)
             if ident is None:
@@ -857,8 +885,72 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         return templates.TemplateResponse(
             request,
             "jobs.html",
-            ctx(runs=payload, running=[r for r in payload if r["status"] == "running"]),
+            ctx(
+                runs=payload,
+                running=[r for r in payload if r["status"] == "running"],
+                unifi_cameras=[c for c in config.cameras if c.adapter == "unifi"],
+                reindex_running=_reindex_state["thread"] is not None
+                and _reindex_state["thread"].is_alive(),
+            ),
         )
+
+    @app.post("/jobs/reindex")
+    def start_reindex(
+        hours: float = Form(6.0),
+        cameras: list[str] = Form([]),
+    ):
+        """Drop-and-reindex a recent window from the NVR, in the background.
+
+        Purges the window's events/detections/crops and re-runs the UniFi
+        backfill through the live pipeline so current settings (stitching,
+        gating, per-class confidence) apply. Progress lands in
+        OperationRun via ProgressReporter, so this page shows it live.
+        One at a time — the pipeline holds per-camera tracker state and
+        the embedded vector store.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        thread = _reindex_state["thread"]
+        if thread is not None and thread.is_alive():
+            return JSONResponse(
+                {"error": "a reindex is already running"}, status_code=409
+            )
+        wanted = [
+            c
+            for c in config.cameras
+            if c.adapter == "unifi" and (not cameras or c.id in cameras)
+        ]
+        if not wanted:
+            return JSONResponse(
+                {"error": "no matching unifi cameras"}, status_code=400
+            )
+        hours = max(0.1, min(hours, 24 * 14))
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
+
+        def work():
+            from siteloom.ingest import IngestService
+            from siteloom.progress import ProgressReporter
+            from siteloom.reindex import reindex_window
+
+            try:
+                service = IngestService(config)
+                with ProgressReporter(
+                    Session,
+                    "reindex",
+                    target=f"last {hours:g}h · " + ", ".join(c.id for c in wanted),
+                    bar=False,
+                ) as progress:
+                    reindex_window(service, wanted, start, end, progress=progress)
+            except Exception:  # pragma: no cover — surfaced via OperationRun
+                log.exception("reindex failed")
+            finally:
+                _reindex_state["thread"] = None
+
+        thread = threading.Thread(target=work, name="siteloom-reindex", daemon=True)
+        _reindex_state["thread"] = thread
+        thread.start()
+        return RedirectResponse("/jobs", status_code=303)
 
     @app.get("/api/jobs")
     def jobs_api():

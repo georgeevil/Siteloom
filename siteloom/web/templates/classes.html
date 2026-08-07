@@ -14,10 +14,16 @@
     background: var(--panel); margin-bottom: 16px;
   }
   .crow {
-    display: grid; grid-template-columns: 1fr 116px 128px 64px;
+    display: grid; grid-template-columns: 1fr 96px 108px 128px 64px;
     align-items: center; gap: 12px; padding: 0 14px; height: 56px;
     border-bottom: 1px solid var(--row-rule);
   }
+  .dconf {
+    width: 76px; padding: 5px 7px; border-radius: 6px; font-size: 11px;
+    font-family: var(--font-mono);
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .dconf.overridden { border-color: oklch(0.55 0.1 200); }
   .crow:last-child { border-bottom: 0; }
   .crow.head {
     height: 32px; background: var(--raised);
@@ -124,7 +130,7 @@
 
 <div class="tablecard">
   <div class="crow head">
-    <div>Class</div><div>Samples</div><div>Threshold</div><div>Active</div>
+    <div>Class</div><div>Samples</div><div>Det confidence</div><div>Identity threshold</div><div>Active</div>
   </div>
   {% for r in class_rows %}
   <div class="crow">
@@ -140,6 +146,13 @@
       </span>
     </div>
     <div class="mono">{{ r.samples }}</div>
+    <div>
+      <input class="dconf{% if r.det_conf_overridden %} overridden{% endif %}"
+             type="number" min="0" max="1" step="0.05"
+             data-class="{{ r.name }}"
+             value="{{ '%.2f' | format(r.det_conf) }}"
+             title="Minimum detection confidence for {{ r.name }} (global default {{ '%.2f' | format(confidence) }})">
+    </div>
     <div class="thr">
       {% if r.threshold is not none %}
         <span class="bar"><i style="width: {{ (r.threshold * 100) | round | int }}%"></i></span>
@@ -309,17 +322,33 @@
     });
   });
 
+  var GLOBAL_CONF = {{ confidence }};
+  document.querySelectorAll(".dconf").forEach(function (input) {
+    input.addEventListener("input", function () {
+      document.getElementById("status").textContent = "unsaved changes";
+    });
+  });
+
   document.getElementById("b-save").onclick = function () {
     var classes = [];
-    document.querySelectorAll('.toggle[aria-pressed="true"]').forEach(function (t) {
+    document.querySelectorAll('.toggle[data-class][aria-pressed="true"]').forEach(function (t) {
       classes.push(t.getAttribute("data-class"));
+    });
+    // Only classes diverging from the global floor are overrides; a value
+    // equal to it keeps following the global setting.
+    var classConf = {};
+    document.querySelectorAll(".dconf").forEach(function (input) {
+      var v = Number(input.value);
+      if (input.value !== "" && !isNaN(v) && Math.abs(v - GLOBAL_CONF) > 1e-9) {
+        classConf[input.getAttribute("data-class")] = v;
+      }
     });
     var status = document.getElementById("status");
     status.textContent = "saving…";
     fetch("/classes/detection", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ classes: classes })
+      body: JSON.stringify({ classes: classes, class_confidence: classConf })
     })
       .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
       .then(function (res) {

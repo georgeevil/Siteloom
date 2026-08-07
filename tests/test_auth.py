@@ -240,3 +240,7 @@ def test_expired_session_is_rejected(tmp_path):
             row.expires_at = datetime(2020, 1, 1)
         s.commit()
     assert client.get("/").status_code == 303
+
+
+def test_reindex_requires_admin():
+    assert required_role("POST", "/jobs/reindex") == "admin"

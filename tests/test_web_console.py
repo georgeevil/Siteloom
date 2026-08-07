@@ -178,3 +178,50 @@ def test_event_rules_post_updates_live_config_and_yaml(tmp_path):
     assert again.events.min_confidence == 0.6
     assert again.events.stitch_gap_s == 8.0
     assert again.events.identify_only_significant is False
+
+
+def test_class_rows_carry_detection_confidence():
+    from siteloom.config import DetectionConfig
+
+    config = SiteConfig(
+        site_id="t",
+        detection=DetectionConfig(confidence=0.4, class_confidence={"dog": 0.7}),
+    )
+    rows = {r["name"]: r for r in _class_rows(config, seen={})}
+    assert rows["person"]["det_conf"] == 0.4
+    assert rows["person"]["det_conf_overridden"] is False
+    assert rows["dog"]["det_conf"] == 0.7
+    assert rows["dog"]["det_conf_overridden"] is True
+
+
+def test_class_confidence_post_updates_config_and_yaml(tmp_path):
+    from siteloom.config import load_config, save_config
+
+    config = SiteConfig(
+        site_id="t",
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/cc.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    path = tmp_path / "site.yaml"
+    save_config(config, path)
+    config = load_config(path)
+    client = TestClient(create_app(config))
+    r = client.post(
+        "/classes/detection",
+        json={"classes": ["person", "dog"], "class_confidence": {"dog": 0.75}},
+    )
+    assert r.status_code == 200
+    assert config.detection.class_confidence == {"dog": 0.75}
+    again = load_config(path)
+    assert again.detection.class_confidence == {"dog": 0.75}
+    # An empty map clears every override.
+    client.post("/classes/detection", json={"class_confidence": {}})
+    assert load_config(path).detection.class_confidence == {}
+
+
+def test_classes_page_renders_editable_confidence(client):
+    r = client.get("/classes")
+    assert r.status_code == 200
+    assert 'class="dconf' in r.text
+    assert "Det confidence" in r.text
