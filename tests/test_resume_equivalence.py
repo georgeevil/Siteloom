@@ -274,7 +274,7 @@ def test_resumed_takeout_does_not_duplicate_tags_or_faces(tmp_path, takeout):
 # -- ingest restart (event stitching) ---------------------------------------
 
 
-def _ingest_config(tmp_path, name: str, source: Path) -> SiteConfig:
+def _ingest_config(tmp_path, name: str, source: Path, identity: bool = False) -> SiteConfig:
     from siteloom.config import CameraConfig
 
     root = tmp_path / name
@@ -287,32 +287,50 @@ def _ingest_config(tmp_path, name: str, source: Path) -> SiteConfig:
                 adapter="file",
                 source=str(source),
                 sample_fps=5.0,
-                modules=["detection"],
+                modules=["detection", "identity"] if identity else ["detection"],
             )
         ],
-        identity=IdentityConfig(enabled=False),
+        identity=(
+            IdentityConfig(vector_db_path=str(root / "vectors"))
+            if identity
+            else IdentityConfig(enabled=False)
+        ),
         storage=StorageConfig(
             db_url=f"sqlite:///{root}/ingest.db", media_dir=str(root / "media")
         ),
     )
 
 
-def _ingest_snapshot(Session) -> list:
-    """Events by content — row and track ids differ across runs."""
-    from siteloom.store import Event
+def _ingest_snapshot(Session) -> dict:
+    """Events and identity links by content — row, track, and identity
+    ids differ across runs. confidence_sum is rounded because merge order
+    can differ float-associatively between a clean and a split run."""
+    from siteloom.store import Event, EventIdentity
 
     with Session() as session:
-        return sorted(
+        events = sorted(
             (
                 e.camera_id,
                 e.class_name,
                 e.first_seen,
                 e.last_seen,
                 e.detection_count,
+                round(e.confidence_sum, 6),
                 e.significant,
             )
             for e in session.query(Event).all()
         )
+        links = sorted(
+            (
+                link.event.first_seen,
+                link.identifier_key,
+                round(link.similarity, 6),
+                link.hit_count,
+                link.matched_by,
+            )
+            for link in session.query(EventIdentity).all()
+        )
+    return {"events": events, "links": links}
 
 
 def _make_ingest(config, tracks_per_clip):
@@ -372,5 +390,79 @@ def test_restarted_ingest_stitches_like_a_clean_run(tmp_path, sample_video):
     split_snap = _ingest_snapshot(half2.Session)
     assert clean_snap == split_snap
     # And the stitch actually happened: one event spanning both clips.
-    assert len(clean_snap) == 1
-    assert clean_snap[0][4] == 20  # detections from both clips
+    assert len(clean_snap["events"]) == 1
+    assert clean_snap["events"][0][4] == 20  # detections from both clips
+
+
+def _make_identity_ingest(config, specs):
+    """Like _make_ingest, but with the identity path live: `specs` is a
+    list of (track_id, bbox) per clip, 10 samples per clip, all resolving
+    to one constant embedding."""
+    from test_ingest import SequenceDetector, StubIdentity, _det
+
+    from siteloom.dispatch import LocalBackend
+    from siteloom.ingest import IngestService
+
+    frames = [
+        [_det(track_id=t, bbox=b)] for (t, b) in specs for _ in range(10)
+    ]
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", SequenceDetector(frames))
+    dispatcher.register("identity", StubIdentity())
+    return IngestService(config, dispatcher=dispatcher)
+
+
+def test_restarted_ingest_merges_identity_fragments_like_a_clean_run(
+    tmp_path, sample_video
+):
+    """The identity-aware merge (CLD-40) reads prior rows, so it joins
+    stitching in this harness: clip2's subject reappears elsewhere in the
+    frame (no IoU overlap) under a fresh track id, and only the shared
+    identity can fold the fragments together. Interrupted at the clip
+    boundary and resumed by a fresh process, the merge must land on the
+    same content as one uninterrupted run."""
+    import os
+    import shutil
+
+    box_a = (10.0, 10.0, 80.0, 120.0)
+    box_b = (600.0, 400.0, 700.0, 560.0)
+
+    corpus = tmp_path / "clips"
+    corpus.mkdir()
+    clip1 = corpus / "a_clip1.mp4"
+    clip2 = corpus / "b_clip2.mp4"
+    shutil.copy(sample_video, clip1)
+    shutil.copy(sample_video, clip2)
+    base = 1_754_000_000
+    os.utime(clip1, (base, base))
+    os.utime(clip2, (base + 3, base + 3))
+
+    clean = _make_identity_ingest(
+        _ingest_config(tmp_path, "clean", corpus, identity=True),
+        specs=[(1, box_a), (2, box_b)],
+    )
+    clean.run_camera(clean.config.cameras[0])
+
+    half1 = _make_identity_ingest(
+        _ingest_config(tmp_path, "split", clip1, identity=True),
+        specs=[(1, box_a)],
+    )
+    half1.run_camera(half1.config.cameras[0])
+    resumed_config = _ingest_config(tmp_path, "split-resume", clip2, identity=True)
+    resumed_config.storage = half1.config.storage  # same database...
+    resumed_config.identity = half1.config.identity  # ...same vector store
+    # Embedded Qdrant is one client per path per machine: release half1's
+    # before the resuming process opens it.
+    half1.resolver.vectors.close()
+    # Track 7: a fresh tracker's id that doesn't collide with half1's
+    # (the colliding-restart case is the stitch test above).
+    half2 = _make_identity_ingest(resumed_config, specs=[(7, box_b)])
+    half2.run_camera(half2.config.cameras[0])
+
+    clean_snap = _ingest_snapshot(clean.Session)
+    split_snap = _ingest_snapshot(half2.Session)
+    assert clean_snap == split_snap
+    # And the merge actually happened: one event, one identity pairing.
+    assert len(clean_snap["events"]) == 1
+    assert clean_snap["events"][0][4] == 20
+    assert len(clean_snap["links"]) == 1

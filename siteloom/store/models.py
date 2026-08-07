@@ -61,6 +61,12 @@ class Event(Base):
     # Highest-confidence crop for this event — the thumbnail.
     best_crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
     best_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    # Running sum of detection confidences; divided by detection_count it
+    # gives the mean, which separates sustained evidence from one lucky
+    # frame (CLD-40). Stored as a sum, not a mean, so per-frame increments
+    # and event merges stay exact. 0 on rows predating the column —
+    # `siteloom events retag` backfills them from Detection rows.
+    confidence_sum: Mapped[float] = mapped_column(Float, default=0.0)
     # True if the event falls inside a known guest arrival window
     # (booking correlation, PRD §6.7) — used to suppress false alarms.
     guest_window: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -87,6 +93,15 @@ class Event(Base):
     camera: Mapped[Camera] = relationship(back_populates="events")
     detections: Mapped[list["Detection"]] = relationship(back_populates="event")
     identities: Mapped[list["EventIdentity"]] = relationship(back_populates="event")
+
+    @property
+    def mean_confidence(self) -> float | None:
+        """Average detection confidence across the event, or None when it
+        cannot be computed (no detections, or a row written before
+        confidence_sum existed and not yet retagged)."""
+        if self.detection_count <= 0 or self.confidence_sum <= 0:
+            return None
+        return self.confidence_sum / self.detection_count
 
     @property
     def review_status(self) -> str:

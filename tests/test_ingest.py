@@ -209,6 +209,52 @@ def test_non_overlapping_detection_starts_a_new_event(sample_video, tmp_path):
         assert session.query(Event).count() == 2
 
 
+def test_stitch_tries_multiple_candidates(sample_video, tmp_path):
+    """Two trackless subjects alternating frames: the newest event is
+    always the *other* subject, so a single-candidate stitcher minted one
+    fresh event per frame (CLD-40). Trying the top-k keeps it to two."""
+    box_a = (10.0, 10.0, 80.0, 120.0)
+    box_b = (600.0, 400.0, 700.0, 560.0)
+    frames = []
+    for _ in range(3):
+        frames.append([_det(track_id=None, bbox=box_a)])
+        frames.append([_det(track_id=None, bbox=box_b)])
+    service = _sequence_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).order_by(Event.id).all()
+    assert len(events) == 2
+    assert [e.detection_count for e in events] == [3, 3]
+
+
+def test_track_link_gap_is_config(sample_video, tmp_path):
+    """The track fast-path gap (formerly the hard-coded EVENT_LINK_GAP_S)
+    honours config: a gap tighter than the sample interval splits every
+    frame of one track into its own event once stitching is off too."""
+    service = _sequence_service(
+        sample_video,
+        tmp_path,
+        [[_det(track_id=1)] for _ in range(3)],
+        events_cfg=EventConfig(track_link_gap_s=0.1, stitch_gap_s=0.0),
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Event).count() == 3
+
+
+def test_mean_confidence_separates_sustained_from_lucky(sample_video, tmp_path):
+    """One 0.9 frame among 0.5s: best_confidence says 0.9, the mean says
+    what the event actually looked like."""
+    frames = [[_det(track_id=1, confidence=0.5)] for _ in range(4)]
+    frames.append([_det(track_id=1, confidence=0.9)])
+    service = _sequence_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        event = session.query(Event).one()
+        assert event.best_confidence == pytest.approx(0.9)
+        assert event.mean_confidence == pytest.approx(0.58)
+
+
 def test_stitching_disabled_by_zero_gap(sample_video, tmp_path):
     service = _sequence_service(
         sample_video,
@@ -353,6 +399,44 @@ def _identity_service(sample_video, tmp_path, frames, events_cfg=None):
     dispatcher.register("detection", SequenceDetector(frames))
     dispatcher.register("identity", StubIdentity())
     return IngestService(config, dispatcher=dispatcher)
+
+
+def test_same_identity_fragments_merge_into_one_event(sample_video, tmp_path):
+    """The subject reappears elsewhere in the frame under a fresh track —
+    no box overlap, so stitching can't help — but resolves to the same
+    identity moments later: the fragments fold into one event (CLD-40)."""
+    box_a = (10.0, 10.0, 80.0, 120.0)
+    box_b = (600.0, 400.0, 700.0, 560.0)
+    frames = [[_det(track_id=1, bbox=box_a)] for _ in range(4)]
+    frames += [[_det(track_id=2, bbox=box_b)] for _ in range(4)]
+    service = _identity_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).all()
+        links = session.query(EventIdentity).all()
+        assert session.query(Identity).count() == 1
+    assert len(events) == 1
+    assert events[0].detection_count == 8
+    assert events[0].track_id == 2  # adopted so later frames fast-path
+    assert events[0].mean_confidence == pytest.approx(0.9)
+    # One pairing, not one per fragment: hits from frames 3-4 and 7-8.
+    assert len(links) == 1
+    assert links[0].hit_count == 4
+
+
+def test_identity_merge_disabled_by_zero_gap(sample_video, tmp_path):
+    box_a = (10.0, 10.0, 80.0, 120.0)
+    box_b = (600.0, 400.0, 700.0, 560.0)
+    frames = [[_det(track_id=1, bbox=box_a)] for _ in range(4)]
+    frames += [[_det(track_id=2, bbox=box_b)] for _ in range(4)]
+    service = _identity_service(
+        sample_video, tmp_path, frames, events_cfg=EventConfig(merge_gap_s=0.0)
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Event).count() == 2
+        assert session.query(EventIdentity).count() == 2
+        assert session.query(Identity).count() == 1
 
 
 def test_ephemeral_fragment_never_resolves_identity(sample_video, tmp_path):

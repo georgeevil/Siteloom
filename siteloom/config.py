@@ -36,6 +36,8 @@ class EventRulesOverride(BaseModel):
     min_duration_s: float | None = None
     min_confidence: float | None = None
     stitch_gap_s: float | None = None
+    track_link_gap_s: float | None = None
+    merge_gap_s: float | None = None
 
 
 class CameraConfig(BaseModel):
@@ -132,14 +134,30 @@ class EventConfig(BaseModel):
     # Event.best_confidence; the detector's own threshold stays lower so
     # weak evidence is still recorded).
     min_confidence: float = 0.5
-    # Stitch a trackless or fresh-track detection onto the most recent
-    # event of the same camera + class group seen within this many
-    # seconds, if their boxes overlap. Keep well under EVENT_LINK_GAP_S.
+    # A detection joins its track's existing event only if that event was
+    # last seen this recently (frame time, symmetric for backfill order).
+    # Track ids restart at 1 whenever a tracker is rebuilt — process
+    # restart, stream reconnect, the next backfill clip — so track id
+    # alone would staple today's visitor onto last week's event.
+    track_link_gap_s: float = 120.0
+    # Stitch a trackless or fresh-track detection onto a recent event of
+    # the same camera + class group seen within this many seconds, if
+    # their boxes overlap. Keep well under track_link_gap_s.
     stitch_gap_s: float = 15.0
     # Minimum IoU between the new detection and the candidate event's
     # last detection for the stitch to apply (guards against merging two
     # subjects crossing the same camera back-to-back).
     stitch_min_iou: float = 0.05
+    # How many recent candidate events the stitcher tries, newest first.
+    # One is not enough: with two subjects in frame the newest event is
+    # usually the *other* subject, the IoU guard rejects it, and every
+    # frame mints a fresh fragment (CLD-40).
+    stitch_candidates: int = 5
+    # After a detection resolves to an identity, fold its event into a
+    # recent event on the same camera already linked to that identity —
+    # the fragments stitching cannot catch because the subject moved too
+    # far between samples. 0 disables. Frame time, symmetric.
+    merge_gap_s: float = 60.0
     # Classes the detector flaps between mid-track; members of a group
     # share events instead of splitting them.
     class_groups: list[list[str]] = [["car", "truck", "bus"]]

@@ -27,6 +27,18 @@ storage:
   db_url: sqlite:///siteloom.db
   media_dir: media
 
+# Event consolidation & significance (defaults shown). One physical visit
+# arrives as many short samples; these rules decide what becomes one event
+# and what shows in default triage. After changing them, `siteloom events
+# retag` reapplies significance to existing rows.
+# events:
+#   min_detections: 3         # significance gate: samples needed...
+#   min_confidence: 0.5       # ...with best confidence at least this
+#   track_link_gap_s: 120.0   # max silence before a track id starts a new event
+#   stitch_gap_s: 15.0        # reattach trackless fragments seen in the same spot
+#   stitch_candidates: 5      # recent events the stitcher tries (newest first)
+#   merge_gap_s: 60.0         # fold same-identity fragments into one event (0 = off)
+
 identity:
   enabled: true
   vector_db_path: identity_db   # Qdrant embedded mode — a directory, no server

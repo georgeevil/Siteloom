@@ -43,6 +43,9 @@
   {{ event.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} &rarr; {{ event.last_seen.strftime('%H:%M:%S') }}
   · {{ event.detection_count }} detections
   · best confidence {{ '%.2f'|format(event.best_confidence) }}
+  {%- if event.mean_confidence is not none %}
+  · mean {{ '%.2f'|format(event.mean_confidence) }}
+  {%- endif %}
 </p>
 
 <div class="strip">

@@ -29,7 +29,7 @@
     <div><dt>Event</dt><dd class="mono">#{{ e.id }}</dd></div>
     <div><dt>Track</dt><dd class="mono">{{ e.track_id if e.track_id is not none else '—' }}</dd></div>
     <div><dt>Camera</dt><dd>{{ e.camera.name if e.camera else e.camera_id }}</dd></div>
-    <div><dt>Confidence</dt><dd class="mono">{{ '%.2f' | format(e.best_confidence) }}</dd></div>
+    <div><dt>Confidence</dt><dd class="mono">{{ '%.2f' | format(e.best_confidence) }}{% if e.mean_confidence is not none %} · mean {{ '%.2f' | format(e.mean_confidence) }}{% endif %}</dd></div>
     <div><dt>First seen</dt><dd class="mono">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</dd></div>
     <div><dt>Last seen</dt><dd class="mono">{{ e.last_seen.strftime('%Y-%m-%d %H:%M:%S') }}</dd></div>
     <div><dt>Zones</dt><dd>{{ rail.zones | join(', ') if rail.zones else '—' }}</dd></div>

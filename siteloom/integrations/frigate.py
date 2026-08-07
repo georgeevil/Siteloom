@@ -176,6 +176,7 @@ class FrigateConsumer:
             event = self._event_for(session, frigate_id, camera, class_name, ts)
             event.last_seen = ts
             event.detection_count += 1
+            event.confidence_sum += score
             if score > event.best_confidence:
                 event.best_confidence = score
             crop_path = self._save_snapshot(frigate_id, event, jpeg, ts)
