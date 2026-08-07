@@ -161,7 +161,19 @@ def _safe_next(next_url: str, event_id: int) -> str:
 
 def _rail_context(session, event_id: int) -> dict | None:
     """Everything the triage detail rail shows for one event."""
-    event = session.get(Event, event_id)
+    # Eager-load what the rail template touches: on the index page the
+    # template renders AFTER this session closes, so a lazy load there is
+    # a DetachedInstanceError. That bites on search deep-links
+    # (/?selected=<id>) whenever the event is not on the loaded page and
+    # thus not already in the identity map with its relations loaded.
+    event = session.scalar(
+        select(Event)
+        .options(
+            selectinload(Event.camera),
+            selectinload(Event.identities),
+        )
+        .where(Event.id == event_id)
+    )
     if event is None:
         return None
     detections = (

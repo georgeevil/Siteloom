@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -219,3 +219,64 @@ def test_rail_renders_for_a_selected_event(webenv):
     assert "triage-rail" in page
     assert "Clear event" in page
     assert webenv.client.get("/events/999/rail").status_code == 404
+
+
+@pytest.fixture
+def deep_link_env(tmp_path):
+    """More events than one page, with the interesting one the OLDEST —
+    the shape a search deep-link lands in (`/?selected=<id>` where the
+    event is not on the loaded page)."""
+    config = SiteConfig(
+        site_id="test-site",
+        site_name="Test Site",
+        cameras=[CameraConfig(id="cam1", adapter="file", source="x")],
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/deep.db", media_dir=str(tmp_path / "media")
+        ),
+    )
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    base = datetime(2026, 8, 6, 10, 0, 0)
+    with Session() as session:
+        session.add(Camera(id="cam1", site_id="test-site", name="Cam One"))
+        session.flush()
+        old = Event(
+            camera_id="cam1",
+            track_id=1,
+            class_name="truck",
+            first_seen=base,
+            last_seen=base,
+            detection_count=1,
+        )
+        session.add(old)
+        session.flush()
+        # 52 newer events fill page one (50 per page) and push `old` off it.
+        for i in range(2, 54):
+            session.add(
+                Event(
+                    camera_id="cam1",
+                    track_id=i,
+                    class_name="car",
+                    first_seen=base + timedelta(hours=i),
+                    last_seen=base + timedelta(hours=i),
+                    detection_count=1,
+                )
+            )
+        session.commit()
+        old_id = old.id
+    return SimpleNamespace(client=TestClient(create_app(config)), old_id=old_id)
+
+
+def test_rail_deep_link_to_an_event_off_the_loaded_page(deep_link_env):
+    """Regression: the rail used to 500 here with a DetachedInstanceError
+    — the selected event was fetched without eager options and the
+    template lazy-loaded its camera after the session had closed."""
+    r = deep_link_env.client.get("/", params={"selected": deep_link_env.old_id})
+    assert r.status_code == 200
+    assert "triage-rail" in r.text
+    assert "Cam One" in r.text
+    # The standalone fragment endpoint serves the same off-page event.
+    frag = deep_link_env.client.get(f"/events/{deep_link_env.old_id}/rail")
+    assert frag.status_code == 200
+    assert "Cam One" in frag.text
