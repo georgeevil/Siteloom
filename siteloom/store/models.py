@@ -75,6 +75,14 @@ class Event(Base):
     # has no verdicts to infer from and would otherwise sit in the queue
     # forever. Clearing is reversible; reopening nulls it.
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Significance gate (event noise reduction): ingest creates events as
+    # insignificant ("ephemeral") and flips this once the event accumulates
+    # enough detections/confidence/duration (EventConfig); the flip is
+    # monotonic. The default triage view hides ephemeral events; nothing is
+    # deleted. The column default is True so rows predating the column —
+    # and writers that don't gate (Frigate consumer, tests) — stay visible;
+    # `siteloom events retag` recomputes historical rows from stored counts.
+    significant: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     camera: Mapped[Camera] = relationship(back_populates="events")
     detections: Mapped[list["Detection"]] = relationship(back_populates="event")
@@ -241,6 +249,16 @@ def status_clause(status: str):
     if status == "new":
         return and_(open_, not_(flagged), not_(has_judged))
     raise ValueError(f"unknown review status: {status!r}")
+
+
+def significance_clause():
+    """Events past the significance gate — the default triage view.
+
+    An orthogonal axis to `review_status` (like `unmatched_clause`): an
+    ephemeral event still has a review status, it just isn't shown until
+    the operator asks for ephemeral events.
+    """
+    return Event.significant.is_(True)
 
 
 def unmatched_clause():

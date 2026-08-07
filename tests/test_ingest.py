@@ -7,17 +7,22 @@ import pytest
 
 from siteloom.config import (
     CameraConfig,
+    EventConfig,
     IdentityConfig,
     SiteConfig,
     StorageConfig,
 )
 from siteloom.dispatch import LocalBackend
-from siteloom.ingest import IngestService
+from siteloom.ingest import IngestService, _bbox_iou
 from siteloom.store import Detection, Event, EventIdentity, Identity
 
 
 class StubDetector:
-    """Reports one 'person' detection per frame under a fixed track id."""
+    """Reports one 'person' detection per frame under a fixed track id.
+
+    The bbox is comfortably above EventConfig.identify_min_crop_px so the
+    identity path is exercised, not gated.
+    """
 
     def process(self, job):
         return {
@@ -25,7 +30,7 @@ class StubDetector:
                 {
                     "class_name": "person",
                     "confidence": 0.9,
-                    "bbox": [10.0, 10.0, 50.0, 90.0],
+                    "bbox": [10.0, 10.0, 80.0, 120.0],
                     "track_id": 7,
                     "zones": [],
                     "crop_jpeg": b"\xff\xd8fakejpg",
@@ -105,6 +110,180 @@ def test_ingest_skips_module_not_configured(service, sample_video):
         assert session.query(Detection).count() == 0
 
 
+class SequenceDetector:
+    """Replays a scripted list of per-frame detection lists."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.calls = 0
+
+    def process(self, job):
+        dets = self.frames[self.calls] if self.calls < len(self.frames) else []
+        self.calls += 1
+        return {"detections": [dict(d) for d in dets]}
+
+
+def _det(track_id=None, bbox=(10.0, 10.0, 80.0, 120.0), class_name="person",
+         confidence=0.9):
+    return {
+        "class_name": class_name,
+        "confidence": confidence,
+        "bbox": list(bbox),
+        "track_id": track_id,
+        "zones": [],
+        "crop_jpeg": b"\xff\xd8fakejpg",
+    }
+
+
+def _sequence_service(sample_video, tmp_path, frames, events_cfg=None):
+    config = SiteConfig(
+        site_id="test-site",
+        cameras=[
+            CameraConfig(
+                id="cam1",
+                adapter="file",
+                source=str(sample_video),
+                sample_fps=5.0,
+                modules=["detection"],
+            )
+        ],
+        events=events_cfg or EventConfig(),
+        identity=IdentityConfig(enabled=False),
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/test.db", media_dir=str(tmp_path / "media")
+        ),
+    )
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", SequenceDetector(frames))
+    return IngestService(config, dispatcher=dispatcher)
+
+
+def test_bbox_iou():
+    assert _bbox_iou([0, 0, 10, 10], [0, 0, 10, 10]) == pytest.approx(1.0)
+    assert _bbox_iou([0, 0, 10, 10], [20, 20, 30, 30]) == 0.0
+    assert _bbox_iou([0, 0, 10, 10], [5, 0, 15, 10]) == pytest.approx(1 / 3)
+
+
+def test_trackless_burst_stitches_to_one_event(sample_video, tmp_path):
+    """Detections with no track id and overlapping boxes continue one
+    event instead of spawning one event per detection (the noise burst)."""
+    service = _sequence_service(
+        sample_video, tmp_path, [[_det(track_id=None)] for _ in range(6)]
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).all()
+    assert len(events) == 1
+    assert events[0].detection_count == 6
+
+
+def test_fresh_track_ids_are_adopted(sample_video, tmp_path):
+    """A tracker rebuild hands out a new id mid-visit; the overlapping box
+    stitches it onto the same event and the event adopts the new id."""
+    service = _sequence_service(
+        sample_video,
+        tmp_path,
+        [[_det(track_id=1)], [_det(track_id=1)], [_det(track_id=9)], [_det(track_id=9)]],
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).all()
+    assert len(events) == 1
+    assert events[0].track_id == 9
+    assert events[0].detection_count == 4
+
+
+def test_non_overlapping_detection_starts_a_new_event(sample_video, tmp_path):
+    """The IoU guard: same camera+class moments apart but elsewhere in the
+    frame is a different subject, not a fragment."""
+    service = _sequence_service(
+        sample_video,
+        tmp_path,
+        [
+            [_det(track_id=None, bbox=(10, 10, 80, 120))],
+            [_det(track_id=None, bbox=(600, 400, 700, 560))],
+        ],
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Event).count() == 2
+
+
+def test_stitching_disabled_by_zero_gap(sample_video, tmp_path):
+    service = _sequence_service(
+        sample_video,
+        tmp_path,
+        [[_det(track_id=None)] for _ in range(3)],
+        events_cfg=EventConfig(stitch_gap_s=0.0),
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Event).count() == 3
+
+
+def test_class_flap_shares_one_event(sample_video, tmp_path):
+    """car→truck under one track id is detector flapping, not a new
+    vehicle; the group keeps it one event, Detection rows keep the truth."""
+    service = _sequence_service(
+        sample_video,
+        tmp_path,
+        [
+            [_det(track_id=3, class_name="car")],
+            [_det(track_id=3, class_name="truck")],
+            [_det(track_id=3, class_name="car")],
+        ],
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).all()
+        classes = [d.class_name for d in session.query(Detection).order_by(Detection.id)]
+    assert len(events) == 1
+    assert events[0].class_name == "car"  # keeps its creation class
+    assert classes == ["car", "truck", "car"]
+
+
+def test_significance_flips_at_thresholds_and_sticks(sample_video, tmp_path):
+    """Events start ephemeral and earn significance monotonically."""
+    two = _sequence_service(
+        sample_video, tmp_path, [[_det(track_id=1)] for _ in range(2)]
+    )
+    two.run_camera(two.config.cameras[0])
+    with two.Session() as session:
+        assert session.query(Event).one().significant is False
+
+    (tmp_path / "b").mkdir()
+    ten = _sequence_service(
+        sample_video, tmp_path / "b", [[_det(track_id=1)] for _ in range(10)]
+    )
+    ten.run_camera(ten.config.cameras[0])
+    with ten.Session() as session:
+        assert session.query(Event).one().significant is True
+
+
+def test_low_confidence_never_becomes_significant(sample_video, tmp_path):
+    service = _sequence_service(
+        sample_video,
+        tmp_path,
+        [[_det(track_id=1, confidence=0.45)] for _ in range(10)],
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Event).one().significant is False
+
+
+def test_per_camera_override_relaxes_the_gate(sample_video, tmp_path):
+    from siteloom.config import EventRulesOverride
+
+    service = _sequence_service(
+        sample_video, tmp_path, [[_det(track_id=1)]]
+    )
+    cam = service.config.cameras[0]
+    cam.events = EventRulesOverride(min_detections=1)
+    service.run_camera(cam)
+    with service.Session() as session:
+        assert session.query(Event).one().significant is True
+
+
 def test_ingest_with_identity_pipeline(sample_video, tmp_path):
     """Full chain with stubs: detection -> identity job -> resolver ->
     Identity + EventIdentity rows and vectors in the local Qdrant."""
@@ -134,17 +313,70 @@ def test_ingest_with_identity_pipeline(sample_video, tmp_path):
         identities = session.query(Identity).all()
         links = session.query(EventIdentity).all()
 
-    # Constant embedding -> one identity, re-matched every frame.
+    # Constant embedding -> one identity, re-matched every frame once the
+    # event passes the significance gate (frames 1-2 of 10 are skipped:
+    # identity resolution waits for min_detections=3).
     assert len(identities) == 1
     identity = identities[0]
     assert identity.identifier_key == "person"
     assert identity.label is None  # unknown until labeled
-    assert identity.appearance_count == 10
-    # One event (single track) -> one link, hit-counted per frame.
+    assert identity.appearance_count == 8
+    # One event (single track) -> one link, hit-counted per identified frame.
     assert len(links) == 1
-    assert links[0].hit_count == 10
+    assert links[0].hit_count == 8
     # Match provenance is persisted at ingest — it cannot be
     # reconstructed afterwards (CLD-17's plate-vs-visual split).
     assert links[0].identifier_key == "person"
     assert links[0].matched_by == "visual"
     assert links[0].learned_plate is False
+
+
+def _identity_service(sample_video, tmp_path, frames, events_cfg=None):
+    config = SiteConfig(
+        site_id="test-site",
+        cameras=[
+            CameraConfig(
+                id="cam1",
+                adapter="file",
+                source=str(sample_video),
+                sample_fps=5.0,
+                modules=["detection", "identity"],
+            )
+        ],
+        events=events_cfg or EventConfig(),
+        identity=IdentityConfig(vector_db_path=str(tmp_path / "vectors")),
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/test.db", media_dir=str(tmp_path / "media")
+        ),
+    )
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", SequenceDetector(frames))
+    dispatcher.register("identity", StubIdentity())
+    return IngestService(config, dispatcher=dispatcher)
+
+
+def test_ephemeral_fragment_never_resolves_identity(sample_video, tmp_path):
+    """A short fragment stays below the significance gate, so identity
+    never runs and no unknown-identity row is minted for it."""
+    service = _identity_service(
+        sample_video, tmp_path, [[_det(track_id=1)] for _ in range(2)]
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Identity).count() == 0
+        assert session.query(EventIdentity).count() == 0
+
+
+def test_weak_or_tiny_detections_skip_identity(sample_video, tmp_path):
+    """Low-confidence and small-bbox crops are skipped by the identity
+    quality gates even on a significant event."""
+    frames = [[_det(track_id=1)] for _ in range(4)]
+    frames += [[_det(track_id=1, confidence=0.3)]]  # below identify_min_confidence
+    frames += [[_det(track_id=1, bbox=(10.0, 10.0, 40.0, 40.0))]]  # below min crop px
+    service = _identity_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        links = session.query(EventIdentity).all()
+    # Frames 1-2 pre-gate, 3-4 identify, 5-6 fail the quality gates.
+    assert len(links) == 1
+    assert links[0].hit_count == 2

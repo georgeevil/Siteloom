@@ -246,17 +246,20 @@
 <div class="filterbar">
   <a class="chip{% if chips.needs_review %} on{% endif %}" href="{{ chip_urls.needs_review }}">Needs review</a>
   <a class="chip{% if chips.unmatched %} on{% endif %}" href="{{ chip_urls.unmatched }}">Unmatched</a>
+  <a class="chip{% if chips.show_ephemeral %} on{% endif %}" href="{{ chip_urls.show_ephemeral }}"
+     title="Include events below the significance gate (short/weak fragments)">Ephemeral</a>
   <span class="chip-sep"></span>
   {% for key, label in kind_labels.items() %}
     <a class="chip{% if key in chips.kinds %} on{% endif %}" href="{{ chip_urls[key] }}">{{ label }}</a>
   {% endfor %}
 
   <details class="advanced-wrap">
-  <summary class="chip{% if filters.camera or filters['class'] or filters.since or filters.until %} on{% endif %}">More filters</summary>
+  <summary class="chip{% if filters.camera or filters['class'] or filters.since or filters.until or filters.min_conf != '' or filters.min_count != '' %} on{% endif %}">More filters</summary>
   <form class="advanced" method="get" action="/">
     {% for k in chips.kinds %}<input type="hidden" name="kind" value="{{ k }}">{% endfor %}
     {% if chips.needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
     {% if chips.unmatched %}<input type="hidden" name="unmatched" value="1">{% endif %}
+    {% if chips.show_ephemeral %}<input type="hidden" name="show_ephemeral" value="1">{% endif %}
     <select name="camera">
       <option value="">All cameras</option>
       {% for cam in cameras %}
@@ -271,13 +274,17 @@
     </select>
     <input type="datetime-local" name="since" value="{{ filters.since }}" title="Since">
     <input type="datetime-local" name="until" value="{{ filters.until }}" title="Until">
+    <input type="number" name="min_conf" value="{{ filters.min_conf }}" title="Min confidence"
+           placeholder="min conf" min="0" max="1" step="0.05" style="width:6.5em">
+    <input type="number" name="min_count" value="{{ filters.min_count }}" title="Min detections"
+           placeholder="min det" min="1" step="1" style="width:6em">
     <button type="submit">Apply</button>
     <a class="clear-link" href="{{ clear_url }}">Clear</a>
   </form>
   </details>
 
   <span class="count">
-    {{ matched }} of {{ total }} events{% if chip_count %} · {{ chip_count }} filter{{ '' if chip_count == 1 else 's' }}{% endif %}
+    {{ matched }} of {{ total }} events{% if hidden %} · <a href="{{ chip_urls.show_ephemeral }}" title="Show ephemeral events">{{ hidden }} ephemeral hidden</a>{% endif %}{% if chip_count %} · {{ chip_count }} filter{{ '' if chip_count == 1 else 's' }}{% endif %}
   </span>
 </div>
 

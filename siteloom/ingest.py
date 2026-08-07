@@ -20,7 +20,7 @@ import cv2
 
 from siteloom.adapters import ADAPTERS
 from siteloom.adapters.base import CameraAdapter, Frame
-from siteloom.config import CameraConfig, SiteConfig
+from siteloom.config import CameraConfig, EventConfig, SiteConfig
 from siteloom.dispatch import Job, JobDispatcher, LocalBackend
 from siteloom.guests import GuestWindows
 from siteloom.identity import IdentityResolver, VectorStore
@@ -54,6 +54,22 @@ LIVE_STABLE_S = 30.0
 EVENT_LINK_GAP_S = 120.0
 
 
+def _bbox_iou(
+    a: tuple[float, float, float, float] | list[float],
+    b: tuple[float, float, float, float] | list[float],
+) -> float:
+    """Intersection-over-union of two pixel-space xyxy boxes."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
 def build_dispatcher(config: SiteConfig) -> JobDispatcher:
     if config.backend.kind == "local":
         dispatcher: JobDispatcher = LocalBackend()
@@ -85,6 +101,10 @@ class IngestService:
         self.Session = get_session(self.engine)
         self.media_dir = Path(config.storage.media_dir)
         self.media_dir.mkdir(parents=True, exist_ok=True)
+        # Effective per-camera event rules (site defaults + overrides).
+        # Filled lazily so backfill's synthetic file cameras — which are
+        # not in config.cameras — get rules too (PRD §6.6 parity).
+        self._event_rules: dict[str, EventConfig] = {}
         self._sync_cameras()
 
         self.resolver: IdentityResolver | None = None
@@ -247,9 +267,10 @@ class IngestService:
     ) -> None:
         # SQLite DateTime columns are naive; store UTC without tzinfo.
         ts = timestamp.replace(tzinfo=None)
+        rules = self._rules_for(cam)
         with self.Session() as session:
             for det in detections:
-                event = self._find_or_create_event(session, cam.id, det, ts)
+                event = self._find_or_create_event(session, cam.id, det, ts, rules)
                 crop_path = self._save_crop(cam.id, det, ts)
                 session.add(
                     Detection(
@@ -267,8 +288,36 @@ class IngestService:
                 if det["confidence"] > event.best_confidence and crop_path:
                     event.best_confidence = det["confidence"]
                     event.best_crop_path = crop_path
-                self._identify(session, cam, event, det, ts, crop_path)
+                # Flip significance before identifying so the frame that
+                # crosses the gate still gets identity resolution.
+                self._update_significance(event, rules)
+                self._identify(session, cam, event, det, ts, crop_path, rules)
             session.commit()
+
+    def _rules_for(self, cam: CameraConfig) -> EventConfig:
+        rules = self._event_rules.get(cam.id)
+        if rules is None:
+            rules = self.config.events.for_camera(cam)
+            self._event_rules[cam.id] = rules
+        return rules
+
+    @staticmethod
+    def _update_significance(event: Event, rules: EventConfig) -> None:
+        """Flip `significant` once the gate is met — monotonic, never unset."""
+        if event.significant:
+            return
+        if event.detection_count < rules.min_detections:
+            return
+        if event.best_confidence < rules.min_confidence:
+            return
+        # Only gate on duration when configured: out-of-order frame
+        # timestamps can leave last_seen before first_seen, and a negative
+        # duration must not veto an otherwise-qualified event.
+        if rules.min_duration_s > 0:
+            duration = (event.last_seen - event.first_seen).total_seconds()
+            if duration < rules.min_duration_s:
+                return
+        event.significant = True
 
     def _identify(
         self,
@@ -278,6 +327,7 @@ class IngestService:
         det: dict,
         ts: datetime,
         crop_path: str | None,
+        rules: EventConfig,
     ) -> None:
         """Second-pass identification on a detection crop (PRD §6.3/6.4).
 
@@ -289,6 +339,16 @@ class IngestService:
             return
         if "identity" not in cam.modules:
             return  # per-camera module selection (NFR3)
+        # Quality gates: an ephemeral fragment or a weak/tiny crop makes a
+        # useless embedding — and every unresolved one mints a fresh
+        # unknown identity, which is exactly the churn being gated out.
+        if rules.identify_only_significant and not event.significant:
+            return
+        if det["confidence"] < rules.identify_min_confidence:
+            return
+        x1, y1, x2, y2 = det["bbox"]
+        if min(x2 - x1, y2 - y1) < rules.identify_min_crop_px:
+            return
         result = self.dispatcher.submit_and_wait(
             Job(
                 module="identity",
@@ -368,16 +428,20 @@ class IngestService:
                 )
 
     def _find_or_create_event(
-        self, session, camera_id: str, det: dict, ts: datetime
+        self, session, camera_id: str, det: dict, ts: datetime, rules: EventConfig
     ) -> Event:
+        # Class groups absorb detector flapping (car↔truck mid-track):
+        # any class in the group continues the event; per-frame truth is
+        # on the Detection rows.
+        group = rules.group_for(det["class_name"])
         event = None
         if det["track_id"] is not None:
             event = (
                 session.query(Event)
-                .filter_by(
-                    camera_id=camera_id,
-                    track_id=det["track_id"],
-                    class_name=det["class_name"],
+                .filter(
+                    Event.camera_id == camera_id,
+                    Event.track_id == det["track_id"],
+                    Event.class_name.in_(group),
                 )
                 .order_by(Event.id.desc())
                 .first()
@@ -388,6 +452,8 @@ class IngestService:
             ):
                 event = None
         if event is None:
+            event = self._stitch_event(session, camera_id, det, ts, group, rules)
+        if event is None:
             event = Event(
                 camera_id=camera_id,
                 track_id=det["track_id"],
@@ -395,9 +461,64 @@ class IngestService:
                 first_seen=ts,
                 last_seen=ts,
                 guest_window=self._guest_windows.contains(ts),
+                # Events start ephemeral and earn significance
+                # (_update_significance); the model default stays True for
+                # rows written by ungated writers and pre-column rows.
+                significant=False,
             )
             session.add(event)
             session.flush()  # assign event.id for the Detection FK
+        return event
+
+    def _stitch_event(
+        self,
+        session,
+        camera_id: str,
+        det: dict,
+        ts: datetime,
+        group: list[str],
+        rules: EventConfig,
+    ) -> Event | None:
+        """Reattach a trackless or fresh-track detection to a recent event.
+
+        Sampled streams fragment one visit into many events: trackless
+        detections have no track id at all, and tracker rebuilds hand out
+        fresh ids mid-visit. If the same camera saw the same class group
+        moments ago *in the same place* (IoU with that event's last
+        detection), continue that event instead of starting another. The
+        gap is symmetric (abs) so backfill clip order doesn't matter, and
+        it is frame time, never wall clock — resume-equivalence depends
+        on that.
+        """
+        if rules.stitch_gap_s <= 0:
+            return None
+        gap = timedelta(seconds=rules.stitch_gap_s)
+        event = (
+            session.query(Event)
+            .filter(
+                Event.camera_id == camera_id,
+                Event.class_name.in_(group),
+                Event.last_seen >= ts - gap,
+                Event.last_seen <= ts + gap,
+            )
+            .order_by(Event.id.desc())
+            .first()
+        )
+        if event is None:
+            return None
+        last_det = (
+            session.query(Detection)
+            .filter(Detection.event_id == event.id)
+            .order_by(Detection.id.desc())
+            .first()
+        )
+        if last_det is None:
+            return None
+        if _bbox_iou(json.loads(last_det.bbox), det["bbox"]) < rules.stitch_min_iou:
+            return None
+        if det["track_id"] is not None:
+            # Adopt the new track so its later frames hit the fast path.
+            event.track_id = det["track_id"]
         return event
 
     def _save_crop(self, camera_id: str, det: dict, ts: datetime) -> str | None:

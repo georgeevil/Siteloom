@@ -133,3 +133,48 @@ def test_classes_page_never_claims_a_precision_it_cannot_measure(client):
     assert body.count(">Precision<") == 0
     # And it must not imply sub-classes involve a training run.
     assert "there is no training run" in body
+
+
+def test_classes_page_shows_event_rules(client):
+    r = client.get("/classes")
+    assert r.status_code == 200
+    assert "Event rules" in r.text
+    assert 'id="er-min_detections"' in r.text
+    assert 'id="er-identify_only_significant"' in r.text
+
+
+def test_event_rules_post_updates_live_config_and_yaml(tmp_path):
+    from siteloom.config import save_config
+
+    config = SiteConfig(
+        site_id="t",
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/er.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    path = tmp_path / "site.yaml"
+    save_config(config, path)  # gives the config a _source_path
+    from siteloom.config import load_config
+
+    config = load_config(path)
+    client = TestClient(create_app(config))
+    r = client.post(
+        "/classes/events",
+        json={
+            "min_detections": 5,
+            "min_confidence": 0.6,
+            "stitch_gap_s": 8,
+            "identify_only_significant": False,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["written_to"] == str(path)
+    # Live object updated...
+    assert config.events.min_detections == 5
+    assert config.events.identify_only_significant is False
+    # ...and the YAML round-trips for the next process start.
+    again = load_config(path)
+    assert again.events.min_detections == 5
+    assert again.events.min_confidence == 0.6
+    assert again.events.stitch_gap_s == 8.0
+    assert again.events.identify_only_significant is False

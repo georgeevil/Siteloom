@@ -16,7 +16,12 @@ from sqlalchemy import select
 
 from siteloom.store import Camera, Event, EventIdentity, Identity
 from siteloom.store.db import get_session, init_db, make_engine
-from siteloom.store.models import REVIEW_STATUSES, status_clause, unmatched_clause
+from siteloom.store.models import (
+    REVIEW_STATUSES,
+    significance_clause,
+    status_clause,
+    unmatched_clause,
+)
 
 # Every combination an event's identity links can be in, up to two links.
 VERDICT_SHAPES = [
@@ -41,9 +46,13 @@ def session(tmp_path):
     with Session() as s:
         s.add(Camera(id="cam1", site_id="site", name="Cam One"))
         t = datetime(2026, 8, 6, 9, 0, 0)
-        # One event per (verdict shape × missed flag × signed-off) combination.
-        for i, (shape, missed, signed_off) in enumerate(
-            itertools.product(VERDICT_SHAPES, [False, True], [False, True])
+        # One event per (verdict shape × missed × signed-off × significant)
+        # combination — significance is an orthogonal axis and must never
+        # perturb the review-status partition.
+        for i, (shape, missed, signed_off, significant) in enumerate(
+            itertools.product(
+                VERDICT_SHAPES, [False, True], [False, True], [False, True]
+            )
         ):
             event = Event(
                 camera_id="cam1",
@@ -54,6 +63,7 @@ def session(tmp_path):
                 detection_count=1,
                 missed_identity=missed,
                 reviewed_at=t if signed_off else None,
+                significant=significant,
             )
             s.add(event)
             s.flush()
@@ -135,6 +145,18 @@ def test_an_unmatched_event_can_still_be_cleared(session):
     ]
     assert unmatched
     assert {e.review_status for e in unmatched} == {"new", "cleared"}
+
+
+def test_significance_clause_matches_attribute(session):
+    """The SQL gate and the stored flag select exactly the same rows."""
+    by_sql = {
+        e.id for e in session.scalars(select(Event).where(significance_clause()))
+    }
+    by_python = {e.id for e in session.scalars(select(Event)) if e.significant}
+    assert by_sql == by_python
+    assert by_sql, "fixture should include significant events"
+    all_ids = {e.id for e in session.scalars(select(Event))}
+    assert by_sql < all_ids, "fixture should include ephemeral events too"
 
 
 def test_unmatched_means_no_identity_links(session):

@@ -151,6 +151,7 @@ def test_edit_can_judge_but_not_reconfigure(tmp_path):
         "/classes/detection", json={"classes": ["person"]}
     )
     assert r.status_code == 403
+    assert client.post("/classes/events", json={"min_detections": 2}).status_code == 403
 
 
 def test_admin_can_reconfigure(tmp_path):
@@ -161,6 +162,7 @@ def test_admin_can_reconfigure(tmp_path):
         client.post("/classes/detection", json={"classes": ["person"]}).status_code
         == 200
     )
+    assert client.post("/classes/events", json={"min_detections": 2}).status_code == 200
 
 
 def test_disabled_user_cannot_sign_in(tmp_path):
@@ -225,6 +227,7 @@ def test_role_ladder_for_paths():
     assert required_role("GET", "/") == "view"
     assert required_role("POST", "/events/1/review") == "edit"
     assert required_role("POST", "/classes/detection") == "admin"
+    assert required_role("POST", "/classes/events") == "admin"
     assert required_role("POST", "/users/anything") == "admin"
 
 
