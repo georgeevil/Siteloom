@@ -118,3 +118,17 @@ cameras:
   #   zones:
   #     - name: driveway-entrance
   #       points: [[0.1, 0.5], [0.9, 0.5], [0.9, 1.0], [0.1, 1.0]]
+  #   # Per-camera tuning (NFR3: config, never code). Only the fields
+  #   # named here override the site-wide values above.
+  #   events:
+  #     min_detections: 5             # busier view, demand more evidence
+  #     stitch_min_iou: 0.1
+  #     identify_min_confidence: 0.6  # identity gates are per-camera too
+  #     identify_min_crop_px: 96
+  #     identify_only_significant: true
+  #   identity:
+  #     # Cosine thresholds, per identifier and on that identifier's own
+  #     # scale (face ≈0.36, generic ≈0.80 — not comparable numbers).
+  #     thresholds:
+  #       face: 0.40
+  #       vehicle: 0.85

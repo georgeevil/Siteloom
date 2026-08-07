@@ -80,6 +80,98 @@ def test_event_rules_per_camera_override_merges_only_set_fields():
     assert cfg.events.for_camera(plain) is cfg.events
 
 
+def test_event_rules_override_reaches_the_identify_gates():
+    """CLD-39: the gates that actually control identity churn are
+    per-camera, not just the significance four."""
+    from siteloom.config import EventRulesOverride
+
+    cfg = SiteConfig(
+        site_id="s",
+        cameras=[
+            CameraConfig(
+                id="doorway",
+                source="x",
+                events=EventRulesOverride(
+                    stitch_min_iou=0.2,
+                    stitch_candidates=9,
+                    identify_min_confidence=0.75,
+                    identify_min_crop_px=96,
+                    identify_only_significant=False,
+                ),
+            )
+        ],
+    )
+    eff = cfg.events.for_camera(cfg.cameras[0])
+    assert eff.stitch_min_iou == 0.2
+    assert eff.stitch_candidates == 9
+    assert eff.identify_min_confidence == 0.75
+    assert eff.identify_min_crop_px == 96
+    # False is a value, not "unset" — the merge must not skip it.
+    assert eff.identify_only_significant is False
+    assert cfg.events.identify_only_significant is True  # site untouched
+
+
+def test_identity_threshold_prefers_the_camera_then_the_identifier():
+    from siteloom.config import CameraIdentityOverride
+
+    cfg = SiteConfig(
+        site_id="s",
+        cameras=[
+            CameraConfig(
+                id="doorway",
+                source="x",
+                identity=CameraIdentityOverride(thresholds={"face": 0.44}),
+            ),
+            CameraConfig(id="quiet", source="x"),
+        ],
+    )
+    doorway, quiet = cfg.cameras
+    assert cfg.identity.threshold_for("face", doorway) == 0.44
+    # Only the named identifier moves; the others keep their own scale.
+    assert cfg.identity.threshold_for("person", doorway) == 0.80
+    assert cfg.identity.threshold_for("face", quiet) == 0.36
+    assert cfg.identity.threshold_for("face") == 0.36
+    # An identifier the YAML never named (auto-added class) has no
+    # site-wide value here — the registry's default applies — but a
+    # camera may still pin one.
+    assert cfg.identity.threshold_for("deer", quiet) is None
+    doorway.identity.thresholds["deer"] = 0.9
+    assert cfg.identity.threshold_for("deer", doorway) == 0.9
+
+
+def test_camera_identity_thresholds_must_be_similarities():
+    from siteloom.config import CameraIdentityOverride
+
+    with pytest.raises(ValueError):
+        CameraIdentityOverride(thresholds={"face": 42})
+
+
+def test_per_camera_overrides_round_trip_through_yaml(tmp_path):
+    from siteloom.config import (
+        CameraIdentityOverride,
+        EventRulesOverride,
+        save_config,
+    )
+
+    cfg = SiteConfig(
+        site_id="s",
+        cameras=[
+            CameraConfig(
+                id="doorway",
+                source="x",
+                events=EventRulesOverride(identify_min_crop_px=96),
+                identity=CameraIdentityOverride(thresholds={"face": 0.44}),
+            )
+        ],
+    )
+    path = tmp_path / "site.yaml"
+    save_config(cfg, path)
+    cam = load_config(path).cameras[0]
+    assert cam.events.identify_min_crop_px == 96
+    assert cam.events.min_detections is None  # unset stays unset
+    assert cam.identity.thresholds == {"face": 0.44}
+
+
 def test_event_rules_round_trip_through_yaml(tmp_path):
     from siteloom.config import save_config
 
