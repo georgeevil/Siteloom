@@ -18,6 +18,10 @@ detection:
   model: yolo11n.pt
   device: mps
   confidence: 0.4
+  # Context kept around each detection crop, as a fraction of the box on
+  # each side. Changing it changes what the embedders see: re-enroll and
+  # `siteloom classes rebuild` afterwards.
+  crop_margin: 0.12
 
 storage:
   db_url: sqlite:///siteloom.db
