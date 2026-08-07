@@ -17,11 +17,12 @@
   }
   .hit:hover { border-color: oklch(0.5 0.06 200); color: inherit; }
   .hit .thumb {
-    width: 44px; height: 44px; flex: 0 0 auto; border-radius: 5px; object-fit: cover;
+    width: 42px; height: 50px; flex: 0 0 auto; border-radius: 5px; object-fit: contain;
     background:
       repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 5px, transparent 5px 11px),
       oklch(0.26 0.01 250);
   }
+  img.thumb { background: oklch(0.2 0.008 250); }
   .hit .nm { font-size: 13px; font-weight: 600; }
   .hit .nm.unknown { color: oklch(0.82 0.12 30); }
   .hit .sub { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
