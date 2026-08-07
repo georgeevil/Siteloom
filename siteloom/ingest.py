@@ -360,7 +360,8 @@ class IngestService:
         if not result.ok:
             log.error("identity job failed on %s: %s", cam.id, result.error)
             return
-        registry = self.config.identity.identifiers
+        identity_cfg = self.config.identity
+        registry = identity_cfg.identifiers
         for emb in result.result["embeddings"]:
             ident_cfg = registry.get(emb["identifier"])
             resolution = self.resolver.resolve(
@@ -371,7 +372,11 @@ class IngestService:
                 plate=emb["plate"],
                 timestamp=ts,
                 crop_path=crop_path,
-                threshold=ident_cfg.threshold if ident_cfg else None,
+                # Per-camera threshold if this camera names one, else the
+                # identifier's site-wide value (CLD-39). The resolver
+                # already takes a threshold per call, so tuning one noisy
+                # doorway is config, not a resolver change.
+                threshold=identity_cfg.threshold_for(emb["identifier"], cam),
                 max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
                 camera_id=cam.id,
                 quality=det["confidence"],

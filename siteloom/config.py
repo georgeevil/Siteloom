@@ -30,14 +30,54 @@ class ZoneConfig(BaseModel):
 
 
 class EventRulesOverride(BaseModel):
-    """Per-camera overrides for EventConfig — only non-None fields apply."""
+    """Per-camera overrides for EventConfig — only non-None fields apply.
+
+    Every scalar gate on EventConfig is overridable: a busy doorway and a
+    quiet driveway disagree about what counts as significant *and* about
+    which crops are worth identifying, and the identify gates are where
+    the unknown-identity churn is actually controlled (CLD-39). Structural
+    fields (`class_groups`) stay site-wide — they describe the detector's
+    class flapping, not the camera.
+    """
 
     min_detections: int | None = None
     min_duration_s: float | None = None
     min_confidence: float | None = None
     stitch_gap_s: float | None = None
+    stitch_min_iou: float | None = None
+    stitch_candidates: int | None = None
     track_link_gap_s: float | None = None
     merge_gap_s: float | None = None
+    identify_min_confidence: float | None = None
+    identify_min_crop_px: int | None = None
+    identify_only_significant: bool | None = None
+
+
+class CameraIdentityOverride(BaseModel):
+    """Per-camera identity gates (CLD-39).
+
+    `thresholds` is keyed by *identifier* (face/person/vehicle/an
+    auto-added class), never by algorithm or by camera-wide scalar: each
+    identifier's cosine similarity distribution is its own world (face
+    lives around 0.36, generic around 0.80), so one number per camera
+    would be meaningless. A key absent here follows the site-wide
+    `IdentifierConfig.threshold`; a key with no configured identifier is
+    still honoured, because `auto_add_classes` mints identifiers at
+    runtime that the YAML never named.
+    """
+
+    thresholds: dict[str, float] = {}
+
+    @field_validator("thresholds")
+    @classmethod
+    def _in_range(cls, values: dict[str, float]) -> dict[str, float]:
+        for key, value in values.items():
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(
+                    f"identity threshold for {key!r} must be a cosine "
+                    "similarity in 0..1"
+                )
+        return values
 
 
 class CameraConfig(BaseModel):
@@ -60,6 +100,8 @@ class CameraConfig(BaseModel):
     # Per-camera overrides of the site-wide event rules (a busy doorway
     # and a quiet driveway want different stitching/significance gates).
     events: "EventRulesOverride | None" = None
+    # Per-camera identity gates — per-identifier similarity thresholds.
+    identity: "CameraIdentityOverride | None" = None
 
 
 class UniFiConfig(BaseModel):
@@ -299,6 +341,25 @@ class IdentityConfig(BaseModel):
     # sightings" means within this horizon, and a one-off blurry crop
     # must not linger as a promotion seed forever.
     pending_ttl_s: float = 3600.0
+
+    def threshold_for(
+        self, identifier_key: str, camera: "CameraConfig | None" = None
+    ) -> float | None:
+        """Effective cosine threshold for one identifier on one camera.
+
+        Camera override first, then the identifier's site-wide value.
+        None means "nothing configured here" — the resolver then falls
+        back to the identifier config the registry holds, which is where
+        an auto-added class's default lives. The counterpart of
+        `EventConfig.for_camera`: one place decides, so ingest and any
+        future replay can never disagree.
+        """
+        if camera is not None and camera.identity is not None:
+            value = camera.identity.thresholds.get(identifier_key)
+            if value is not None:
+                return value
+        ident = self.identifiers.get(identifier_key)
+        return ident.threshold if ident is not None else None
 
 
 class AudioConfig(BaseModel):

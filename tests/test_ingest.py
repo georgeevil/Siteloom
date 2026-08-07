@@ -401,6 +401,68 @@ def _identity_service(sample_video, tmp_path, frames, events_cfg=None):
     return IngestService(config, dispatcher=dispatcher)
 
 
+def test_per_camera_identify_gate_overrides_the_site_rule(sample_video, tmp_path):
+    """CLD-39: the identify gates are per-camera, not site-wide only.
+
+    Site-wide, identity waits for the event to turn significant (frames
+    1-2 of 10 are skipped). A camera that wants everything identified
+    says so in its own override — and gets all ten.
+    """
+    from siteloom.config import EventRulesOverride
+
+    service = _identity_service(
+        sample_video, tmp_path, [[_det(track_id=1)] for _ in range(10)]
+    )
+    cam = service.config.cameras[0]
+    cam.events = EventRulesOverride(identify_only_significant=False)
+    service.run_camera(cam)
+    with service.Session() as session:
+        identity = session.query(Identity).one()
+        assert identity.appearance_count == 10
+    assert service.config.events.identify_only_significant is True  # site untouched
+
+
+def test_per_camera_identity_threshold_reaches_the_resolver(sample_video, tmp_path):
+    """CLD-39: a per-camera threshold is plumbed to the resolver call
+    that already takes one — per identifier, on its own scale."""
+    from siteloom.config import CameraIdentityOverride
+
+    service = _identity_service(
+        sample_video, tmp_path, [[_det(track_id=1)] for _ in range(4)]
+    )
+    cam = service.config.cameras[0]
+    cam.identity = CameraIdentityOverride(thresholds={"person": 0.95})
+    seen: list[float | None] = []
+    original = service.resolver.resolve
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("threshold"))
+        return original(*args, **kwargs)
+
+    service.resolver.resolve = spy
+    service.run_camera(cam)
+    assert seen and set(seen) == {0.95}
+    # The identifier's own value is untouched — the camera overrides the
+    # call, not the config.
+    assert service.config.identity.identifiers["person"].threshold == 0.80
+
+
+def test_identity_threshold_defaults_to_the_identifier(sample_video, tmp_path):
+    service = _identity_service(
+        sample_video, tmp_path, [[_det(track_id=1)] for _ in range(4)]
+    )
+    seen: list[float | None] = []
+    original = service.resolver.resolve
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("threshold"))
+        return original(*args, **kwargs)
+
+    service.resolver.resolve = spy
+    service.run_camera(service.config.cameras[0])
+    assert seen and set(seen) == {0.80}
+
+
 def test_same_identity_fragments_merge_into_one_event(sample_video, tmp_path):
     """The subject reappears elsewhere in the frame under a fresh track —
     no box overlap, so stitching can't help — but resolves to the same
