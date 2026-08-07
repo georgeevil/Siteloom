@@ -32,6 +32,7 @@ from siteloom.web.auth import (
     LoginThrottle,
     failed_actor,
     hash_password,
+    purge_expired_sessions,
     required_role,
     safe_next,
     verify_password,
@@ -469,3 +470,74 @@ def test_throttled_attempts_do_not_grow_the_audit_log(tmp_path):
         client.post("/login", data={"username": "ana", "password": "no", "next": "/"})
     with Session() as s:
         assert len(s.scalars(select(AuditLog)).all()) == LOGIN_FREE_ATTEMPTS + 1
+
+
+# -- session lifecycle (CLD-65) --------------------------------------------
+
+
+def test_purge_deletes_only_expired_sessions(tmp_path):
+    client, Session = make_env(tmp_path)
+    add_user(Session, "ana", "admin")
+    login(client, "ana")
+    with Session() as s:
+        s.add(
+            WebSession(
+                token="stale",
+                user_id=s.scalar(select(User.id)),
+                created_at=datetime(2020, 1, 1),
+                expires_at=datetime(2020, 1, 15),
+            )
+        )
+        s.commit()
+        assert purge_expired_sessions(s) == 1
+        s.commit()
+        rows = s.scalars(select(WebSession)).all()
+        assert len(rows) == 1 and rows[0].token != "stale"
+
+
+def test_expired_sessions_do_not_accumulate(tmp_path):
+    """Rows are only created by signing in, so signing in is where the
+    dead ones get cleared: the table cannot grow unattended."""
+    client, Session = make_env(tmp_path)
+    add_user(Session, "ana", "admin")
+    for _ in range(3):
+        login(client, "ana")
+        with Session() as s:
+            for row in s.scalars(select(WebSession)):
+                row.expires_at = datetime(2020, 1, 1)
+            s.commit()
+    assert client.get("/").status_code == 303  # the expired cookie is rejected
+    login(client, "ana")
+    with Session() as s:
+        rows = s.scalars(select(WebSession)).all()
+        assert len(rows) == 1
+        assert rows[0].expires_at > datetime(2026, 8, 6)
+
+
+def test_logout_clears_expired_rows_too(tmp_path):
+    client, Session = make_env(tmp_path)
+    add_user(Session, "ana", "admin")
+    login(client, "ana")
+    with Session() as s:
+        s.add(
+            WebSession(
+                token="stale",
+                user_id=s.scalar(select(User.id)),
+                created_at=datetime(2020, 1, 1),
+                expires_at=datetime(2020, 1, 15),
+            )
+        )
+        s.commit()
+    client.post("/logout")
+    with Session() as s:
+        assert s.scalars(select(WebSession)).all() == []
+
+
+def test_enabling_auth_takes_effect_on_a_running_console(tmp_path):
+    """auth_enabled is cached, and only ever in the "on" direction: a
+    cached "off" would leave the console open after `siteloom users add`,
+    which is the one moment staleness would matter."""
+    client, Session = make_env(tmp_path)
+    assert client.get("/").status_code == 200  # open mode, answer cached
+    add_user(Session, "ana", "admin")
+    assert client.get("/").status_code == 303

@@ -31,7 +31,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from siteloom.store import AuditLog, User, WebSession
 
@@ -121,6 +121,27 @@ def auth_enabled(session) -> bool:
     return session.scalar(select(User.id).limit(1)) is not None
 
 
+class AuthGate:
+    """Per-app cache of `auth_enabled` (CLD-65).
+
+    Only the "on" answer is cached, and deliberately so. Auth turns on
+    when the first User row appears — usually from a *different* process
+    (`siteloom users add`) — and there is no supported way back to open
+    mode, so a True answer can never go stale while a False one would
+    leave the console open for the cache lifetime after the operator
+    enabled it. That is the one moment staleness would matter, which
+    makes a TTL exactly the wrong shape here.
+    """
+
+    def __init__(self) -> None:
+        self._enabled = False
+
+    def enabled(self, session) -> bool:
+        if not self._enabled:
+            self._enabled = auth_enabled(session)
+        return self._enabled
+
+
 def create_session(session, user: User) -> str:
     token = secrets.token_urlsafe(32)
     session.add(
@@ -132,6 +153,20 @@ def create_session(session, user: User) -> str:
         )
     )
     return token
+
+
+def purge_expired_sessions(session, now: datetime | None = None) -> int:
+    """Delete web sessions whose TTL has passed (CLD-65).
+
+    Called where a row is *created* — sign-in and sign-out — so every
+    login pays for the sessions it obsoletes and the table cannot grow
+    without someone logging in. Deliberately not in the request path:
+    `resolve_user` runs on every hit and must stay a read.
+    """
+    result = session.execute(
+        delete(WebSession).where(WebSession.expires_at < (now or _now()))
+    )
+    return result.rowcount or 0
 
 
 def resolve_user(session, token: str | None) -> User | None:

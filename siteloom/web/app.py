@@ -210,6 +210,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     Session = get_session(engine)
     media_root = Path(config.storage.media_dir).resolve()
     #: Per-app so a second app in the same process (tests) starts clean.
+    auth_gate = auth.AuthGate()
     login_throttle = auth.LoginThrottle()
 
     @app.middleware("http")
@@ -221,7 +222,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         """
         path = request.url.path
         with Session() as session:
-            enabled = auth.auth_enabled(session)
+            enabled = auth_gate.enabled(session)
             user = auth.resolve_user(
                 session, request.cookies.get(auth.SESSION_COOKIE)
             )
@@ -311,6 +312,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     request, next, "Wrong username or password.", 401
                 )
             login_throttle.record_success(caller)
+            auth.purge_expired_sessions(session)
             token = auth.create_session(session, user)
             auth.record_audit(session, user, "POST", "/login", 303)
             session.commit()
@@ -332,7 +334,8 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 row = session.get(WebSession, token)
                 if row is not None:
                     session.delete(row)
-                    session.commit()
+                auth.purge_expired_sessions(session)
+                session.commit()
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie(auth.SESSION_COOKIE)
         return response
