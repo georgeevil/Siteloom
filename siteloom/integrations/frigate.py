@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -67,6 +69,24 @@ class ConsumerStats:
     def skip(self, reason: str) -> None:
         self.skipped += 1
         self.by_reason[reason] = self.by_reason.get(reason, 0) + 1
+
+
+# MQTT payloads are untrusted input (CLD-48): the event id is
+# interpolated into a Frigate API URL, the camera id becomes a media_dir
+# subpath and a Camera row, and the label feeds detection-class routing.
+# `.` is in the class because Frigate ids look like "1712345678.123-abc",
+# so the regex alone does not stop `..` — dotted traversal is rejected
+# explicitly in _safe_id.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _safe_id(value: Any) -> str | None:
+    """`value` if it is a string safe for URL/path/row use, else None."""
+    if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
+        return None
+    if value.startswith(".") or ".." in value:
+        return None
+    return value
 
 
 def _now() -> datetime:
@@ -122,9 +142,15 @@ class FrigateConsumer:
 
         kind = message.get("type")
         after = message.get("after") or message.get("before") or {}
+        if not isinstance(after, dict):
+            self.stats.skip("bad-input")
+            return False
         frigate_id = after.get("id")
         if not frigate_id:
             self.stats.skip("no-id")
+            return False
+        if _safe_id(frigate_id) is None:
+            self.stats.skip("bad-input")
             return False
         if kind == "end":
             self._finalize(after)
@@ -135,14 +161,29 @@ class FrigateConsumer:
             return False
 
         label = after.get("label", "")
+        if _safe_id(label) is None:
+            self.stats.skip("bad-input")
+            return False
         if self.cfg.labels and label not in self.cfg.labels:
             self.stats.skip("label")
             return False
         camera = after.get("camera", "")
+        if _safe_id(camera) is None:
+            self.stats.skip("bad-input")
+            return False
         if self.cfg.cameras and camera not in self.cfg.cameras:
             self.stats.skip("camera")
             return False
-        score = float(after.get("top_score") or after.get("score") or 0.0)
+        try:
+            score = float(after.get("top_score") or after.get("score") or 0.0)
+        except (TypeError, ValueError):
+            self.stats.skip("bad-input")
+            return False
+        # Frigate scores are confidences in [0, 1]; anything else (NaN,
+        # inf, negative, huge) is a hostile or corrupt payload.
+        if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+            self.stats.skip("bad-input")
+            return False
         if score < self.cfg.min_score:
             self.stats.skip("score")
             return False
@@ -307,24 +348,42 @@ class FrigateConsumer:
         end_time = after.get("end_time")
         if not frigate_id or not end_time:
             return
+        try:
+            end_ts = float(end_time)
+        except (TypeError, ValueError):
+            self.stats.skip("bad-input")
+            return
+        if not math.isfinite(end_ts):
+            self.stats.skip("bad-input")
+            return
         with self.Session() as session:
             event = session.scalar(select(Event).filter_by(external_id=frigate_id))
             if event is not None:
                 event.last_seen = datetime.fromtimestamp(
-                    float(end_time), tz=timezone.utc
+                    end_ts, tz=timezone.utc
                 ).replace(tzinfo=None)
                 session.commit()
 
     def _save_snapshot(self, frigate_id, event, jpeg: bytes, ts) -> str | None:
         from pathlib import Path
 
-        day_dir = (
-            Path(self.config.storage.media_dir)
+        media_dir = Path(self.config.storage.media_dir).resolve()
+        path = (
+            media_dir
             / event.camera_id
             / ts.strftime("%Y-%m-%d")
-        )
-        day_dir.mkdir(parents=True, exist_ok=True)
-        path = day_dir / f"frigate_{frigate_id}_{event.detection_count}.jpg"
+            / f"frigate_{frigate_id}_{event.detection_count}.jpg"
+        ).resolve()
+        # Defense in depth behind _safe_id: whatever the ids contained,
+        # the *resolved* path must stay inside media_dir (is_relative_to
+        # on resolved paths, not a string-prefix check — "media-x" must
+        # not pass for "media").
+        if not path.is_relative_to(media_dir):
+            log.warning(
+                "refusing snapshot write outside media_dir for event %s", frigate_id
+            )
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(jpeg)
         return str(path)
 
