@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -195,6 +196,21 @@ class UniFiProtectAdapter(CameraAdapter):
     ) -> FrameSource:
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
-        path = Path(tempfile.mkstemp(suffix=".mp4", prefix="siteloom-clip-")[1])
-        self.download_clip(stream_id, start, end, path)
-        return FrameSource(str(path), source_id=stream_id, is_file=True, base_time=start)
+        # mkstemp is only used for a collision-free name: close its fd
+        # immediately (uiprotect writes the file itself) and hand the
+        # file to the FrameSource, which deletes it once consumed/closed.
+        fd, name = tempfile.mkstemp(suffix=".mp4", prefix="siteloom-clip-")
+        os.close(fd)
+        path = Path(name)
+        try:
+            self.download_clip(stream_id, start, end, path)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return FrameSource(
+            str(path),
+            source_id=stream_id,
+            is_file=True,
+            base_time=start,
+            owns_file=True,
+        )
