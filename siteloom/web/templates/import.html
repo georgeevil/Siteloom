@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+{% block title %}Import library{% endblock %}
+
+{#
+  Import wizard (CLD-27). Three things are load-bearing rather than
+  decorative:
+
+  * Steps go forward and back only, and nothing auto-advances — the
+    expensive step is started by a deliberate click, never by arriving.
+  * Scan and index are presented as the different things they are: scan
+    decodes nothing and finishes now; index is a long, resumable job that
+    reports through OperationRun like every other one.
+  * `failed` is never folded into `pending`. Nothing retries a failed
+    item on its own, so a screen that adds them together tells the
+    operator work is queued when it is stalled.
+#}
+
+{% block content %}
+<style>
+  .wiz { max-width: 880px; margin: 0 auto; }
+  .wiz-card {
+    background: var(--panel); border: 1px solid var(--hairline);
+    border-radius: 10px; overflow: hidden;
+  }
+  .wiz-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 20px; border-bottom: 1px solid var(--hairline);
+  }
+  .wiz-head h2 { font-size: 1rem; margin: 0; flex: 1; }
+  .steps { display: flex; gap: 6px; font-family: var(--font-mono); font-size: 10px; }
+  .steps span {
+    padding: 3px 9px; border-radius: 20px; border: 1px solid var(--control-border);
+    color: var(--faint); text-transform: uppercase; letter-spacing: .06em;
+  }
+  .steps span.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .steps span.done { border-color: var(--accent); color: var(--accent); }
+  .wiz-body { padding: 20px; }
+  .wiz-foot {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; border-top: 1px solid var(--hairline);
+    background: var(--toolbar);
+  }
+  .wiz-foot .note { flex: 1; font-size: 11.5px; color: var(--muted); }
+  .fld { margin-bottom: 16px; }
+  .fld label { display: block; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); margin-bottom: 5px; }
+  .fld input[type=text] {
+    width: 100%; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid var(--control-border); background: var(--canvas);
+    color: var(--text); font-family: var(--font-mono); font-size: 12px;
+  }
+  .seg { display: inline-flex; border: 1px solid var(--control-border); border-radius: 6px; overflow: hidden; }
+  .seg label { margin: 0; padding: 7px 12px; font-size: 12px; cursor: pointer;
+    text-transform: none; letter-spacing: 0; color: var(--muted); }
+  .seg input { display: none; }
+  .seg input:checked + span { background: var(--accent); color: var(--on-accent); }
+  .seg span { display: block; margin: -7px -12px; padding: 7px 12px; }
+  .facts { display: flex; gap: 10px; margin-top: 4px; }
+  .fact { flex: 1; background: var(--raised); border: 1px solid var(--hairline);
+    border-radius: 7px; padding: 10px 12px; }
+  .fact b { display: block; font-family: var(--font-mono); font-size: 17px; font-weight: 700; }
+  .fact span { font-size: 11px; color: var(--muted); }
+  .fact.warn b { color: var(--amber); }
+  .roots { font-family: var(--font-mono); font-size: 11px; color: var(--faint); }
+  .err { background: oklch(0.31 0.08 30); color: oklch(0.92 0.06 30);
+    border-radius: 6px; padding: 9px 12px; font-size: 12.5px; margin-bottom: 14px; }
+  .amber { border: 1px solid var(--amber); border-radius: 7px; padding: 10px 12px;
+    font-size: 12px; color: var(--muted); margin-top: 14px; }
+  .files { margin-top: 16px; font-family: var(--font-mono); font-size: 11px; }
+  .files div { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--row-rule); }
+  .files .k { color: var(--accent); }
+  .files .p { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .disc { width: 46px; height: 46px; border-radius: 50%; background: oklch(0.3 0.08 145);
+    color: oklch(0.85 0.14 145); display: flex; align-items: center;
+    justify-content: center; font-size: 22px; margin-bottom: 12px; }
+  /* A checkbox label is a sentence, not one of the uppercase micro-labels
+     `.fld label` styles — without this it inherits them. */
+  .fld label.toggle-row {
+    display: flex; align-items: center; gap: 9px; font-size: 12.5px;
+    text-transform: none; letter-spacing: 0; color: var(--text);
+    margin-bottom: 0; cursor: pointer;
+  }
+</style>
+
+<div class="wiz">
+  <div class="wiz-card">
+    <div class="wiz-head">
+      <h2>Import labelled library</h2>
+      <div class="steps">
+        {% for key, label in [('source','1 Source'), ('scan','2 Scan'), ('done','3 Index')] %}
+          <span class="{{ 'on' if step == key }}">{{ label }}</span>
+        {% endfor %}
+      </div>
+    </div>
+
+    {# ---------------------------------------------------- step 1 #}
+    {% if step == 'source' %}
+    <form method="post" action="/library/import/source">
+      <div class="wiz-body">
+        {% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+        {% if not enabled %}
+          <p class="muted" style="font-size:13px;">
+            Importing from the web is off until <code>library.import_roots</code>
+            lists at least one directory. That is the default on purpose: this
+            form would otherwise let anyone who can reach the console register —
+            and index — any directory on the host.
+          </p>
+          <pre class="roots" style="margin-top:12px;">library:
+  import_roots:
+    - /mnt/photos</pre>
+          <p class="muted" style="font-size:12.5px;">
+            <code>siteloom library add &lt;path&gt;</code> still works — a shell
+            already has the filesystem, so it has nothing to give away.
+          </p>
+        {% else %}
+          <div class="fld">
+            <label for="path">Directory</label>
+            <input type="text" id="path" name="path" value="{{ path | default('') }}"
+                   placeholder="{{ roots[0] }}/…" autofocus>
+            <p class="roots" style="margin-top:6px;">
+              must be inside: {{ roots | join(' · ') }}
+            </p>
+          </div>
+
+          <div class="fld">
+            <label>Source kind</label>
+            <div class="seg">
+              {% for value, text in [('directory','Directory'), ('takeout','Google Takeout')] %}
+              <label>
+                <input type="radio" name="kind" value="{{ value }}"
+                       {{ 'checked' if (kind | default('directory')) == value }}>
+                <span>{{ text }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <p class="roots" style="margin-top:6px;">
+              Takeout reads the sidecar JSON for people tags and capture times.
+            </p>
+          </div>
+
+          <div class="fld">
+            <label>What indexing will use</label>
+            <div class="facts">
+              <div class="fact"><b>{{ video_frames }}</b><span>frames sampled per video</span></div>
+              <div class="fact"><b>{{ batch_size }}</b><span>items committed per batch</span></div>
+            </div>
+          </div>
+        {% endif %}
+      </div>
+      <div class="wiz-foot">
+        <span class="note">Nothing is decoded during scan — it only registers files as pending.</span>
+        {% if enabled %}<button type="submit" class="btn-primary">Scan &rarr;</button>{% endif %}
+      </div>
+    </form>
+
+    {# ---------------------------------------------------- step 2 #}
+    {% elif step == 'scan' %}
+    <form method="post" action="/library/import/index">
+      <input type="hidden" name="source_id" value="{{ source.id }}">
+      <div class="wiz-body">
+        {% if error %}<div class="err">{{ error }}</div>{% endif %}
+        <p style="font-size:13px;margin:0 0 4px;">
+          <strong>{{ source.name }}</strong>
+          <span class="roots">{{ source.path }}</span>
+        </p>
+        <div class="facts" style="margin-top:14px;">
+          <div class="fact"><b>{{ result.added }}</b><span>added</span></div>
+          <div class="fact"><b>{{ result.updated }}</b><span>changed</span></div>
+          <div class="fact"><b>{{ result.skipped }}</b><span>skipped</span></div>
+          <div class="fact"><b>{{ result.total_pending }}</b><span>now pending</span></div>
+        </div>
+
+        <div class="fld" style="margin-top:18px;">
+          <label>Identification</label>
+          <label class="toggle-row">
+            <input type="hidden" name="identify" value="0">
+            <input type="checkbox" name="identify" value="1"
+                   {{ 'checked' if identify_default }}>
+            Identify while indexing
+          </label>
+          <p class="roots" style="margin-top:6px;">
+            Off is faster on a first pass; <code>siteloom train enroll</code>
+            can attach embeddings later.
+          </p>
+        </div>
+
+        {% if sample %}
+        <div class="files">
+          {% for item in sample %}
+          <div><span class="k">{{ item.kind }}</span><span class="p">{{ item.path }}</span></div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="wiz-foot">
+        <span class="note">
+          Indexing is long and resumable — it runs as a job you can watch or stop.
+        </span>
+        <a class="btn-outline sm" href="/library/import">&larr; Back</a>
+        <button type="submit" class="btn-primary"
+                {{ 'disabled' if indexing }}>Index {{ result.total_pending }} items &rarr;</button>
+      </div>
+    </form>
+
+    {# ---------------------------------------------------- step 3 #}
+    {% else %}
+    <div class="wiz-body">
+      <div class="disc">&#10003;</div>
+      <h3 style="margin:0 0 6px;font-size:15px;">Source added, indexing started</h3>
+      <p style="font-size:13px;color:var(--muted);margin:0;">
+        <strong>{{ source.name }}</strong> <span class="roots">{{ source.path }}</span>
+      </p>
+      <div class="facts" style="margin-top:16px;">
+        <div class="fact"><b>{{ counts.get('indexed', 0) }}</b><span>indexed</span></div>
+        <div class="fact"><b>{{ counts.get('pending', 0) }}</b><span>pending</span></div>
+        <div class="fact {{ 'warn' if counts.get('failed', 0) }}">
+          <b>{{ counts.get('failed', 0) }}</b><span>failed</span></div>
+        <div class="fact"><b>{{ counts.values() | sum }}</b><span>items</span></div>
+      </div>
+      {% if counts.get('failed', 0) %}
+      <div class="amber">
+        Failed items are <strong>not</strong> pending — nothing picks them up
+        again on its own. Re-queue them with
+        <code>siteloom library index --retry-failed</code>; it is opt-in because
+        a corrupt file fails identically on every pass.
+      </div>
+      {% endif %}
+    </div>
+    <div class="wiz-foot">
+      <span class="note">Progress, ETA and interruption live on the jobs screen.</span>
+      <a class="btn-outline sm" href="/library">Library</a>
+      <a class="btn-primary" href="/jobs">Watch the job &rarr;</a>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
