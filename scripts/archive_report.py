@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Read-only aggregate report over a Siteloom database.
+
+Written for the access problem: the real archive lives on one machine and
+the people reasoning about it often do not. This prints the *shape* of a
+database — counts, distributions, gates — and deliberately never prints a
+name, a path, or a box. The output is safe to paste into an issue.
+
+Stdlib only, so it runs against any system Python 3 with no venv and no
+install. Opens the file read-only; it cannot modify the database even if
+something else holds it open.
+
+    python3 scripts/archive_report.py ~/dev/Siteloom-data/archive.db
+
+The one question it exists to answer directly is the CLD-10 gate: how many
+people have cleared the 5-verified-face-sample floor that fine-tuning
+needs. That is a labelling-volume fact, and it is invisible from anywhere
+except this file.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import sys
+from pathlib import Path
+
+# training/dataset.py counts only verified, non-rejected face annotations;
+# config.py's default floor is 5 per person.
+FACE_SAMPLE_FLOOR = 5
+
+
+def connect(path: Path) -> sqlite3.Connection:
+    if not path.exists():
+        sys.exit(f"no such database: {path}")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def tables(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    return {r["name"] for r in rows}
+
+
+def rule(title: str) -> None:
+    print(f"\n{title}\n{'-' * len(title)}")
+
+
+def counts(conn: sqlite3.Connection, table: str, column: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        f"SELECT {column} AS k, COUNT(*) AS n FROM {table} "
+        f"GROUP BY {column} ORDER BY n DESC"
+    ).fetchall()
+
+
+def show_counts(conn: sqlite3.Connection, table: str, column: str, label: str) -> None:
+    rows = counts(conn, table, column)
+    total = sum(r["n"] for r in rows)
+    print(f"  {label}: {total} total")
+    for r in rows:
+        key = r["k"] if r["k"] is not None else "(null)"
+        print(f"      {str(key)[:40]:<40} {r['n']:>8}")
+
+
+def report_sources(conn: sqlite3.Connection, present: set[str]) -> None:
+    if "library_sources" not in present:
+        return
+    rule("Library sources")
+    rows = conn.execute(
+        "SELECT id, kind, added_at, last_indexed_at FROM library_sources ORDER BY id"
+    ).fetchall()
+    if not rows:
+        print("  none registered")
+        return
+    # Path and name omitted on purpose — a directory layout is personal.
+    for r in rows:
+        print(
+            f"  source {r['id']}: kind={r['kind']} added={r['added_at']} "
+            f"last_indexed={r['last_indexed_at'] or 'never'}"
+        )
+
+
+def report_items(conn: sqlite3.Connection, present: set[str]) -> None:
+    if "library_items" not in present:
+        return
+    rule("Library items")
+    show_counts(conn, "library_items", "status", "by status")
+    show_counts(conn, "library_items", "kind", "by kind")
+
+    # `failed` is not `pending` — nothing picks a failed item up again, so
+    # the two must never be read as one number.
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM library_items WHERE status='failed'"
+    ).fetchone()
+    if row["n"]:
+        print(f"\n  {row['n']} failed — these are NOT retried without --retry-failed.")
+        errors = conn.execute(
+            "SELECT substr(error, 1, 60) AS e, COUNT(*) AS n FROM library_items "
+            "WHERE status='failed' AND error IS NOT NULL "
+            "GROUP BY e ORDER BY n DESC LIMIT 10"
+        ).fetchall()
+        for r in errors:
+            print(f"      {r['n']:>6}  {r['e']}")
+
+    attempts = conn.execute(
+        "SELECT attempts, COUNT(*) AS n FROM library_items "
+        "GROUP BY attempts ORDER BY attempts"
+    ).fetchall()
+    if len(attempts) > 1:
+        print("\n  attempts distribution:")
+        for r in attempts:
+            print(f"      tried {r['attempts']}x: {r['n']}")
+
+    span = conn.execute(
+        "SELECT MIN(taken_at) AS lo, MAX(taken_at) AS hi, "
+        "COUNT(taken_at) AS n FROM library_items"
+    ).fetchone()
+    if span["n"]:
+        print(f"\n  capture times: {span['n']} known, {span['lo']} .. {span['hi']}")
+
+
+def report_annotations(conn: sqlite3.Connection, present: set[str]) -> None:
+    if "annotations" not in present:
+        return
+    rule("Annotations")
+    show_counts(conn, "annotations", "class_name", "by class")
+    show_counts(conn, "annotations", "source", "by provenance")
+
+    row = conn.execute(
+        "SELECT SUM(verified) AS verified, SUM(rejected) AS rejected, "
+        "SUM(enrolled) AS enrolled, COUNT(*) AS total FROM annotations"
+    ).fetchone()
+    print(
+        f"\n  verified={row['verified'] or 0}  rejected={row['rejected'] or 0}  "
+        f"enrolled={row['enrolled'] or 0}  of {row['total']}"
+    )
+
+    # Proposals: how many, on what basis, over how many distinct names.
+    # The names themselves stay on the machine that owns them.
+    prop = conn.execute(
+        "SELECT COUNT(*) AS n, COUNT(DISTINCT proposed_name) AS names "
+        "FROM annotations WHERE proposed_name IS NOT NULL"
+    ).fetchone()
+    if prop["n"]:
+        print(
+            f"  {prop['n']} proposals over {prop['names']} distinct names "
+            f"(names not printed)"
+        )
+        basis = counts(conn, "annotations", "proposal_basis")
+        for r in basis:
+            if r["k"] is not None:
+                print(f"      basis {r['k']:<20} {r['n']:>8}")
+
+
+def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
+    """The CLD-10 gate, as a distribution rather than a roster."""
+    if "annotations" not in present:
+        return
+    rule(f"Face training readiness (floor: {FACE_SAMPLE_FLOOR} verified per person)")
+
+    # Verified, non-rejected, face-class annotations grouped per person.
+    # identity_id is the real ground truth; proposed_name is a guess and
+    # is counted separately so the two are never conflated.
+    for column, caption in (("identity_id", "confirmed identities"),
+                            ("proposed_name", "unconfirmed proposals")):
+        rows = conn.execute(
+            f"SELECT {column} AS who, COUNT(*) AS n FROM annotations "
+            f"WHERE {column} IS NOT NULL AND class_name='face' "
+            f"AND verified=1 AND rejected=0 GROUP BY {column}"
+        ).fetchall()
+        if not rows:
+            print(f"  {caption}: none")
+            continue
+        clearing = [r for r in rows if r["n"] >= FACE_SAMPLE_FLOOR]
+        noun = "person" if len(rows) == 1 else "people"
+        print(
+            f"  {caption}: {len(rows)} {noun}, {len(clearing)} clear the floor, "
+            f"{sum(r['n'] for r in rows)} samples total"
+        )
+        if clearing:
+            sizes = sorted((r["n"] for r in clearing), reverse=True)
+            print(f"      sample counts, largest first: {sizes[:20]}")
+
+    print(
+        "\n  Only the confirmed-identity row is training data — training/dataset.py\n"
+        "  reads verified, non-rejected annotations and never reads proposals."
+    )
+
+
+def report_identities(conn: sqlite3.Connection, present: set[str]) -> None:
+    if "identities" not in present:
+        return
+    rule("Identities")
+    rows = conn.execute(
+        "SELECT identifier_key, COUNT(*) AS n, "
+        "SUM(CASE WHEN label IS NOT NULL THEN 1 ELSE 0 END) AS labeled, "
+        "SUM(CASE WHEN vector_count > 0 THEN 1 ELSE 0 END) AS with_vectors "
+        "FROM identities GROUP BY identifier_key ORDER BY n DESC"
+    ).fetchall()
+    if not rows:
+        print("  none")
+        return
+    print(f"  {'identifier':<16} {'total':>8} {'labeled':>8} {'vectors':>8}")
+    for r in rows:
+        print(
+            f"  {r['identifier_key']:<16} {r['n']:>8} {r['labeled']:>8} "
+            f"{r['with_vectors']:>8}"
+        )
+    # A label without vectors is a name the system cannot see.
+    blind = conn.execute(
+        "SELECT COUNT(*) AS n FROM identities "
+        "WHERE label IS NOT NULL AND vector_count = 0"
+    ).fetchone()
+    if blind["n"]:
+        print(
+            f"\n  {blind['n']} labeled identities have no vectors — recognition\n"
+            f"  cannot return them as subjects. `siteloom train enroll` fixes this."
+        )
+
+
+def report_events(conn: sqlite3.Connection, present: set[str]) -> None:
+    if "events" not in present:
+        return
+    row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
+    if not row["n"]:
+        return
+    rule("Events")
+    print(f"  {row['n']} events")
+    show_counts(conn, "events", "class_name", "by class")
+    if "event_identities" in present:
+        verdicts = counts(conn, "event_identities", "verdict")
+        print("  identity claims by verdict:")
+        for r in verdicts:
+            print(f"      {str(r['k'] or '(unjudged)'):<20} {r['n']:>8}")
+
+
+def report_runs(conn: sqlite3.Connection, present: set[str]) -> None:
+    if "operation_runs" not in present:
+        return
+    rule("Operation runs")
+    rows = counts(conn, "operation_runs", "status")
+    if not rows:
+        print("  none recorded — no long-running job has ever heartbeated here.")
+        return
+    for r in rows:
+        print(f"      {str(r['k']):<20} {r['n']:>8}")
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        sys.exit(f"usage: {sys.argv[0]} <path-to.db>")
+    path = Path(sys.argv[1]).expanduser()
+    conn = connect(path)
+    present = tables(conn)
+
+    size_mb = path.stat().st_size / (1024 * 1024)
+    print(f"Siteloom database report: {path.name} ({size_mb:.1f} MB)")
+    print(f"tables: {len(present)}")
+
+    for report in (
+        report_sources,
+        report_items,
+        report_annotations,
+        report_training_gate,
+        report_identities,
+        report_events,
+        report_runs,
+    ):
+        report(conn, present)
+
+    print("\nNo names, paths, or boxes are printed above — this output is")
+    print("safe to paste into an issue or a chat.")
+
+
+if __name__ == "__main__":
+    main()

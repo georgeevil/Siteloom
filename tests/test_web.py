@@ -265,6 +265,40 @@ def test_review_redirect_cannot_leave_the_site(webenv):
     assert r.headers["location"] == "/events/1"
 
 
+def test_verdict_returns_to_the_list_being_worked(webenv):
+    """Verdicts are filed in runs — the soak runbook's scenario B is
+    "work the needs-review chip" — so a verdict must return the operator
+    to their filtered list, not strand them on the event."""
+    r = webenv.client.post(
+        "/events/1/identity/1/verdict",
+        data={"verdict": "confirmed", "next_url": "/?needs_review=1"},
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == "/?needs_review=1"
+
+
+def test_verdict_redirect_cannot_leave_the_site(webenv):
+    """Same attacker-supplied path as the review form beside it."""
+    r = webenv.client.post(
+        "/events/1/identity/1/verdict",
+        data={"verdict": "confirmed", "next_url": "//evil.example/x"},
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == "/events/1"
+
+
+def test_verdict_without_a_next_url_still_works(webenv):
+    """Older clients and direct POSTs omit the field entirely."""
+    r = webenv.client.post(
+        "/events/1/identity/1/verdict",
+        data={"verdict": "confirmed"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    with webenv.Session() as session:
+        assert session.get(EventIdentity, 1).verdict == "confirmed"
+
+
 def test_unmatched_chip_selects_events_with_no_identity(webenv):
     # The seeded event has an identity link, so Unmatched must exclude it.
     assert "No events match" in webenv.client.get("/", params={"unmatched": 1}).text

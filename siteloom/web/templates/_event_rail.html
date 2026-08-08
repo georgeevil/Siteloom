@@ -65,6 +65,7 @@
           {# Was this claim right? A verdict judges; the row below edits. #}
           <form class="verdict" method="post"
                 action="/events/{{ e.id }}/identity/{{ link.id }}/verdict">
+            <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
             <button name="verdict" value="{{ 'clear' if link.verdict == 'confirmed' else 'confirmed' }}"
                     class="ok{% if link.verdict == 'confirmed' %} on{% endif %}"
                     title="Correct identification">&#10003;</button>
