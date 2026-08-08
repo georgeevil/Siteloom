@@ -163,7 +163,14 @@
     border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
     margin-bottom: 12px;
   }
-  .ccrow { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .ccrow { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  /* The chips are buttons now (CLD-29), not labels — they need to look
+     pressable, and the reset for <button> has to be undone. */
+  .chip.cc { cursor: pointer; font: inherit; font-size: 12px; line-height: 1; }
+  .cc-note {
+    font-size: 11px; color: var(--faint); line-height: 1.55;
+    margin: 0 0 12px; padding-left: 2px;
+  }
   .summary {
     padding: 10px; border-radius: 7px; background: var(--raised);
     border: 1px solid var(--hairline); font-size: 11.5px; color: var(--muted);
@@ -381,17 +388,28 @@
 
       {% if custom_classes %}
       <div class="sec-head"><h2>Custom classes</h2></div>
-      <div class="ccrow">
+      <div class="ccrow" id="cclist">
         {% for c in custom_classes %}
-          <span class="chip">{{ c.name }} · {{ c.example_count }}</span>
+          <button type="button" class="chip cc" data-class="{{ c.name }}"
+                  title="{{ c.description or c.name }}">{{ c.name }} · {{ c.example_count }}</button>
         {% endfor %}
       </div>
+      {# Custom classes are k-NN over the appearance embeddings, so an
+         example counts the moment it is saved. Saying so matters: the
+         word "training" everywhere else on this screen implies a run
+         that has to finish before anything improves. #}
+      <p class="cc-note">
+        Assigning takes effect immediately — examples are matched by
+        similarity, so there is no training run to wait for. This does not
+        touch anyone's face gallery.
+      </p>
       {% endif %}
 
       <div class="summary" id="summary"></div>
 
       <div class="insp-actions">
         <button class="btn-primary" id="do-verify" disabled>Verify &amp; enrol</button>
+        <button class="btn-outline" id="do-classify" disabled>Assign class</button>
         <button class="btn-outline btn-danger" id="do-reject">Reject</button>
       </div>
     </div>
@@ -424,12 +442,25 @@
 
     var name = (nameInput.value || chosenName || "").trim();
     document.getElementById("do-verify").disabled = !(n && name);
-    document.getElementById("summary").innerHTML = n
-      ? "<b>" + n + "</b> crop" + (n === 1 ? "" : "s") + " → <b>" +
-        (name || "(no name yet)") + "</b><br>" +
-        "<b>" + n + "</b> face vector" + (n === 1 ? "" : "s") +
-        " will be added, up to the " + MAX_VECTORS + "-vector cap per identity."
-      : "";
+    var classifyBtn = document.getElementById("do-classify");
+    if (classifyBtn) classifyBtn.disabled = !(n && chosenClass);
+
+    // Two different destinations, so the summary says which one is armed
+    // rather than describing enrolment while the class button is lit.
+    var lines = [];
+    if (n) {
+      if (chosenClass) {
+        lines.push("<b>" + n + "</b> crop" + (n === 1 ? "" : "s") +
+          " → class <b>" + chosenClass + "</b>");
+        lines.push("Added as examples immediately. No face vectors are written.");
+      } else {
+        lines.push("<b>" + n + "</b> crop" + (n === 1 ? "" : "s") + " → <b>" +
+          (name || "(no name yet)") + "</b>");
+        lines.push("<b>" + n + "</b> face vector" + (n === 1 ? "" : "s") +
+          " will be added, up to the " + MAX_VECTORS + "-vector cap per identity.");
+      }
+    }
+    document.getElementById("summary").innerHTML = lines.join("<br>");
   }
 
   wrap.addEventListener("click", function (ev) {
@@ -471,13 +502,34 @@
 
   nameInput.addEventListener("input", function () { chosenName = ""; render(); });
 
+  var chosenClass = "";
+  var cclist = document.getElementById("cclist");
+  if (cclist) {
+    cclist.addEventListener("click", function (ev) {
+      var chip = ev.target.closest(".cc");
+      if (!chip) return;
+      // Toggle: clicking the selected class again clears it, so an
+      // accidental pick is undone without reloading.
+      var name = chip.getAttribute("data-class");
+      var already = chip.classList.contains("on");
+      cclist.querySelectorAll(".cc.on").forEach(function (c) { c.classList.remove("on"); });
+      chosenClass = already ? "" : name;
+      if (!already) chip.classList.add("on");
+      render();
+    });
+  }
+
   function apply(action) {
     var name = (nameInput.value || chosenName || "").trim();
     var decisions = [];
     selected.forEach(function (id) {
-      decisions.push(action === "confirm"
-        ? { id: Number(id), action: "confirm", name: name }
-        : { id: Number(id), action: "reject" });
+      if (action === "classify") {
+        decisions.push({ id: Number(id), action: "classify", custom_class: chosenClass });
+      } else if (action === "confirm") {
+        decisions.push({ id: Number(id), action: "confirm", name: name });
+      } else {
+        decisions.push({ id: Number(id), action: "reject" });
+      }
     });
     if (!decisions.length) return;
     fetch("/api/training/review", {
@@ -492,6 +544,10 @@
 
   document.getElementById("do-verify").addEventListener("click", function () { apply("confirm"); });
   document.getElementById("do-reject").addEventListener("click", function () { apply("reject"); });
+  var doClassify = document.getElementById("do-classify");
+  if (doClassify) {
+    doClassify.addEventListener("click", function () { apply("classify"); });
+  }
 
   window.addEventListener("resize", render);
   render();

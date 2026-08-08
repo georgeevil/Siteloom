@@ -1548,6 +1548,29 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             )
         return _enroll_state["vectors"], _enroll_state["embedder"]
 
+    def _class_resources():
+        """Vector store + the *generic* embedder, for custom classes.
+
+        Not the face embedder `_enroll_resources` hands out: custom
+        classes are k-NN over the shared appearance embedding
+        (identity/classes.py), and `classes rebuild` re-derives every
+        example with GenericEmbedder. Mixing the two would put live
+        assignment in a different vector space from the rebuild that is
+        supposed to reproduce it — voting would degrade silently, with
+        nothing to show for it but worse answers.
+        """
+        if "class_embedder" not in _enroll_state:
+            from siteloom.identity import get_shared_store
+            from siteloom.identity.embedders import GenericEmbedder
+
+            _enroll_state["vectors"] = get_shared_store(
+                config.identity.vector_db_path
+            )
+            _enroll_state["class_embedder"] = GenericEmbedder(
+                device=config.detection.device
+            )
+        return _enroll_state["vectors"], _enroll_state["class_embedder"]
+
     @app.post("/api/training/review")
     async def review_proposals(request: Request):
         """Bulk confirm / reject / rename face proposals.
@@ -1562,11 +1585,46 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         body = await request.json()
         decisions = body.get("decisions", [])
         confirmed = rejected = enrolled = 0
+        classified = examples = skipped = 0
+        touched_classes: set[str] = set()
         max_vectors = 20
         face_cfg = config.identity.identifiers.get("face")
         if face_cfg:
             max_vectors = face_cfg.max_vectors_per_identity
+
+        # Built on first use, and only if a classify decision arrives —
+        # loading the generic embedder costs a model load, and the common
+        # case here is a face review that never needs one.
+        _classifier: list = []
+
+        def classifier():
+            if not _classifier:
+                from siteloom.identity.classes import CustomClassifier
+
+                vectors, _ = _class_resources()
+                _classifier.append(CustomClassifier(vectors))
+            return _classifier[0]
+
+        def _embed_crop(path: str):
+            import cv2
+
+            # Read before building the embedder, not after: a crop whose
+            # file is gone must not cost a ResNet load. That also keeps
+            # this path reachable in tests, which may not have weights.
+            image = cv2.imread(path)
+            if image is None:
+                return None
+            _, embedder = _class_resources()
+            return embedder.embed(image)
+
         with Session() as session:
+            # An unknown class name must not become one by being typed —
+            # CustomClass rows carry the threshold and parent class that
+            # make a name mean anything, so assignment picks from what
+            # exists rather than creating on the fly.
+            known_classes = {
+                c.name for c in session.scalars(select(CustomClass)).all()
+            }
             for decision in decisions:
                 annotation = session.get(Annotation, int(decision["id"]))
                 if annotation is None:
@@ -1587,6 +1645,27 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                         session, annotation, vectors, embedder, max_vectors
                     ):
                         enrolled += 1
+                elif action == "classify":
+                    # Assigning a custom class is not enrolment (CLD-29).
+                    # Examples live in the `class-examples` collection with
+                    # the class name in the payload; nothing here may touch
+                    # an identity's gallery, and identity_id is left exactly
+                    # as it was — a crop can be both "Alice" and
+                    # "delivery-van" without either claim moving the other.
+                    name = (decision.get("custom_class") or "").strip()
+                    if not name or name not in known_classes:
+                        skipped += 1
+                        continue
+                    annotation.custom_class = name
+                    annotation.verified = True
+                    annotation.rejected = False
+                    classified += 1
+                    touched_classes.add(name)
+                    if annotation.crop_path:
+                        vector = _embed_crop(annotation.crop_path)
+                        if vector is not None:
+                            classifier().add_example(vector, name)
+                            examples += 1
                 elif action == "reject":
                     annotation.rejected = True
                     annotation.verified = False
@@ -1594,6 +1673,32 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 elif action == "unset":
                     annotation.verified = False
                     annotation.rejected = False
+            # Keep the chips' counts honest. Derived from the annotations
+            # rather than incremented, so re-assigning an already
+            # classified crop cannot inflate them.
+            #
+            # `crop_path is not null` is part of the definition, not an
+            # optimisation: this must agree with CustomClassifier.rebuild,
+            # which skips crops it cannot embed. The chip therefore counts
+            # examples that can actually vote, which is the number worth
+            # showing — a class whose examples cannot be embedded does not
+            # discriminate better for having been labelled.
+            for name in touched_classes:
+                custom = session.scalar(select(CustomClass).filter_by(name=name))
+                if custom is not None:
+                    custom.example_count = (
+                        session.scalar(
+                            select(func.count())
+                            .select_from(Annotation)
+                            .filter(
+                                Annotation.custom_class == name,
+                                Annotation.verified.is_(True),
+                                Annotation.rejected.is_(False),
+                                Annotation.crop_path.is_not(None),
+                            )
+                        )
+                        or 0
+                    )
             session.commit()
         return JSONResponse(
             {
@@ -1601,6 +1706,12 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 "confirmed": confirmed,
                 "rejected": rejected,
                 "enrolled": enrolled,
+                "classified": classified,
+                # Assigned but not embedded — a crop with no file on disk
+                # still carries the label, but cannot vote. Reported so a
+                # caller is never told N examples landed when fewer did.
+                "examples": examples,
+                "skipped": skipped,
             }
         )
 
