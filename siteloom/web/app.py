@@ -23,6 +23,7 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
@@ -46,6 +47,7 @@ from siteloom.store.models import significance_clause, status_clause, unmatched_
 log = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 # Triage's class-kind chips. "other" is the residual rather than a fixed
 # list, so a class added to detection.classes (or auto-added by the
@@ -239,6 +241,11 @@ def _identity_candidates(session) -> list[Identity]:
 def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     app = FastAPI(title="Siteloom")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Vendored fonts and anything else the console needs to render without
+    # reaching the internet (CLD-86). Mounted rather than routed: this
+    # serves a fixed directory shipped with the package, not user paths,
+    # so it needs none of the containment /media does.
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     # Embedders are built lazily and cached for the app's lifetime (model
     # load is expensive); on the app rather than the module so the cache
     # cannot outlive the config it was built from.
