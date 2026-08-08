@@ -14,10 +14,12 @@
     background: var(--panel); margin-bottom: 16px;
   }
   .crow {
-    display: grid; grid-template-columns: 1fr 96px 108px 128px 64px;
+    display: grid; grid-template-columns: 1fr 96px 108px 128px 96px 64px;
     align-items: center; gap: 12px; padding: 0 14px; height: 56px;
     border-bottom: 1px solid var(--row-rule);
   }
+  .prec .den { font-size: 10px; color: var(--faint); margin-left: 3px; }
+  .prec .none { font-size: 11px; color: var(--faint); }
   .dconf {
     width: 76px; padding: 5px 7px; border-radius: 6px; font-size: 11px;
     font-family: var(--font-mono);
@@ -142,7 +144,7 @@
 
 <div class="tablecard">
   <div class="crow head">
-    <div>Class</div><div>Samples</div><div>Det confidence</div><div>Identity threshold</div><div>Active</div>
+    <div>Class</div><div>Samples</div><div>Det confidence</div><div>Identity threshold</div><div>Precision</div><div>Active</div>
   </div>
   {% for r in class_rows %}
   <div class="crow">
@@ -172,6 +174,20 @@
         <span class="mono">{{ '%.2f' | format(r.threshold) }}</span>
       {% else %}
         <span class="mono">—</span>
+      {% endif %}
+    </div>
+    {# Precision over operator verdicts (CLD-87). Never a bare number:
+       operators review suspicious matches more than obvious ones, so the
+       count it was computed over is part of the reading, and an
+       identifier nobody has judged is unknown rather than perfect. #}
+    <div class="prec">
+      {% if r.precision is none %}
+        <span class="mono">—</span>
+      {% elif r.precision.wrong_rate is none %}
+        <span class="none" title="{{ r.precision.claims }} claim{{ '' if r.precision.claims == 1 else 's' }}, none judged yet">no verdicts</span>
+      {% else %}
+        <span class="mono">{{ '%.0f' | format((1 - r.precision.wrong_rate) * 100) }}%</span>
+        <span class="den">of {{ r.precision.reviewed }}</span>
       {% endif %}
     </div>
     <div>

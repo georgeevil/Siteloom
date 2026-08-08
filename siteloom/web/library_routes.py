@@ -126,12 +126,17 @@ def _library_url(base: dict, **overrides) -> str:
     return "/library?" + urlencode(params) if params else "/library"
 
 
-def _class_rows(config, seen: dict) -> list[dict]:
+def _class_rows(config, seen: dict, precision: dict | None = None) -> list[dict]:
     """One row per class the operator can track.
 
     "Active" is not a new flag: it is membership of `detection.classes`,
     which is what actually decides whether the detector reports the class.
-    Precision has no source in the schema yet, so no column claims one.
+
+    Precision arrives as `{identifier_key: IdentifierStat}` (CLD-87) and
+    is deliberately carried as the whole stat, not a float: an identifier
+    with nothing reviewed has a `wrong_rate` of None, and flattening that
+    to a number here is exactly how a page ends up printing "100%" over
+    zero verdicts. The row keeps the denominator so the template cannot.
     """
     active = list(config.detection.classes)
     names = active + [c for c in CLASS_CATALOG if c not in active]
@@ -163,6 +168,11 @@ def _class_rows(config, seen: dict) -> list[dict]:
                 # class when this is on, so "none configured" is not the
                 # same as "will never be identified".
                 "auto": identifier is None and config.identity.auto_add_classes,
+                # None when the class has no identifier at all — there is
+                # nothing whose precision this would be.
+                "precision": (precision or {}).get(identifier[0])
+                if identifier
+                else None,
             }
         )
     return rows
@@ -624,6 +634,13 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     )
                 ).all()
             )
+            # Precision per identifier (CLD-87). Unwindowed on purpose:
+            # /stats answers "how did last night go", this column answers
+            # "is this threshold any good", and the second question wants
+            # every verdict ever filed rather than a 24 h slice.
+            from siteloom import stats as stats_mod
+
+            precision = {s.key: s for s in stats_mod.identifier_stats(session)}
         return templates.TemplateResponse(
             request,
             "classes.html",
@@ -636,7 +653,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 auto_add_threshold=config.identity.auto_add_threshold,
                 confidence=config.detection.confidence,
                 event_rules=config.events,
-                class_rows=_class_rows(config, seen),
+                class_rows=_class_rows(config, seen, precision),
                 identifier_rows=_identifier_rows(config),
                 camera_rows=_camera_override_rows(config),
                 model_line=(
