@@ -107,6 +107,31 @@
   .st-chip.st-cleared { background: oklch(0.27 0.02 250); color: oklch(0.72 0.01 250); }
 
   .r-cam, .r-conf { display: none; }
+
+  /* Phone tier (CLD-25). The narrowest column set still wants ~452px
+     (70+130+104+84 plus gaps and padding), so on a 390px screen the
+     Status column ran off the edge — the chip saying whether an event
+     needs looking at was the part you could not see. Below 600px the row
+     stops being a table row and becomes a card, which is what the
+     handoff specifies and what makes the chip fit.
+
+     Two lines rather than four columns: identity and time drop under the
+     detection block instead of competing with it for width. */
+  @container (max-width: 599px) {
+    .rowhead { display: none; }
+    .row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas: "det status" "id time";
+      height: auto; min-height: 76px; padding: 11px 14px;
+      align-items: center; row-gap: 3px;
+    }
+    .r-det { grid-area: det; }
+    .r-thumb { width: 52px; height: 60px; }
+    .r-name { font-size: 14px; font-weight: 700; }
+    .r-id { grid-area: id; font-size: 12.5px; }
+    .r-time { grid-area: time; justify-self: end; }
+    .row > div:last-child { grid-area: status; justify-self: end; }
+  }
   @container (min-width: 600px) {
     .row { grid-template-columns: 78px minmax(150px, 1fr) 104px 100px 84px; }
     .r-cam { display: block; }
