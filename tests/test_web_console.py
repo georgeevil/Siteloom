@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import pytest
@@ -60,7 +61,11 @@ def client(tmp_path):
             ]
         )
         s.commit()
-    return TestClient(create_app(config))
+    client = TestClient(create_app(config))
+    # Tests that need to seed rows after the app is built reach the same
+    # database through here rather than rebuilding the config.
+    client.sessionmaker = Session
+    return client
 
 
 def cards(client, **params) -> int:
@@ -128,11 +133,76 @@ def test_class_colours_are_stable_per_name():
     assert all(a[name] == b[name] for name in a)
 
 
-def test_classes_page_never_claims_a_precision_it_cannot_measure(client):
+def precision_cells(client) -> list[str]:
+    """Just the Precision column. The whole page is full of "100%" in its
+    CSS, so an assertion about what the column claims has to read the
+    column."""
     body = client.get("/classes").text
-    assert body.count(">Precision<") == 0
+    return [
+        " ".join(re.sub(r"<[^>]+>", " ", cell).split())
+        for cell in re.findall(r'<div class="prec">(.*?)</div>\s*<div>', body, re.S)
+    ]
+
+
+def test_classes_page_never_claims_a_precision_it_cannot_measure(client):
+    """The column exists now that /stats supplies it (CLD-87). An
+    identifier that has never claimed anything has no precision to show —
+    and must not borrow a reassuring number from the empty set."""
+    body = client.get("/classes").text
+    assert body.count(">Precision<") == 1
+    cells = precision_cells(client)
+    assert cells and all(c == "—" for c in cells), cells
     # And it must not imply sub-classes involve a training run.
     assert "there is no training run" in body
+
+
+def _claim(session, ident, verdict):
+    from siteloom.store import Event, EventIdentity
+
+    ev = Event(
+        camera_id="c", class_name="person",
+        first_seen=TS, last_seen=TS, detection_count=1,
+    )
+    session.add(ev)
+    session.flush()
+    session.add(EventIdentity(
+        event_id=ev.id, identity_id=ident.id, identifier_key="face",
+        matched_by="visual", similarity=0.4, verdict=verdict,
+    ))
+
+
+def test_classes_precision_says_so_when_nothing_was_judged(client):
+    """Claims exist but no operator judged them. That is unknown, not
+    perfect — the exact reading a bare 100% would invite."""
+    from siteloom.store import Camera
+
+    with client.sessionmaker() as s:
+        s.add(Camera(id="c", site_id="t", name="C"))
+        ident = s.query(Identity).filter_by(label="Ana").one()
+        _claim(s, ident, None)
+        _claim(s, ident, None)
+        s.commit()
+
+    cells = precision_cells(client)
+    assert "no verdicts" in cells, cells
+    assert not any("%" in c for c in cells), cells
+
+
+def test_classes_precision_carries_its_denominator(client):
+    """One wrong of two reviewed is 50% — but 50% alone is the misleading
+    number, so the reviewed count rides along with it."""
+    from siteloom.store import Camera
+
+    with client.sessionmaker() as s:
+        s.add(Camera(id="c", site_id="t", name="C"))
+        ident = s.query(Identity).filter_by(label="Ana").one()
+        _claim(s, ident, "confirmed")
+        _claim(s, ident, "wrong")
+        s.commit()
+
+    assert "50% of 2" in precision_cells(client), precision_cells(client)
+
+
 
 
 def test_classes_page_shows_event_rules(client):
