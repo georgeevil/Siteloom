@@ -810,7 +810,12 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         )
 
     @app.post("/events/{event_id}/identity/{link_id}/verdict")
-    def set_identity_verdict(event_id: int, link_id: int, verdict: str = Form(...)):
+    def set_identity_verdict(
+        event_id: int,
+        link_id: int,
+        verdict: str = Form(...),
+        next_url: str = Form("/"),
+    ):
         """Record a human verdict on one identity claim (CLD-16).
 
         A verdict is a judgment, not an edit: it must not touch the
@@ -836,7 +841,12 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             if verdict == "wrong":
                 identity_ops.revert_learned_plate(session, link, event_id)
             session.commit()
-        return RedirectResponse(f"/events/{event_id}", status_code=303)
+        # Back to the filtered list, like the clear/reopen form beside it.
+        # Verdicts are filed in runs — the runbook's scenario B is "work
+        # the needs-review chip" — and a fixed /events/{id} redirect drops
+        # the operator's filters and their place in the queue on every
+        # single click.
+        return RedirectResponse(_safe_next(next_url, event_id), status_code=303)
 
     def _resolve_target(
         session, event: Event, identity_id: str, identifier: str, label: str
