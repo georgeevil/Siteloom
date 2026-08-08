@@ -148,14 +148,30 @@ def run(
     setup_logging(level="INFO", log_file=log_file)
     cfg = load_config(config)
     service = IngestService(cfg)
-    with ProgressReporter(
-        service.Session,
-        "run",
-        target=cfg.site_id,
-        resume_command=_resume_command(ctx),
-        bar=not quiet,
-    ) as progress:
-        service.run(max_frames=max_frames, progress=progress)
+    try:
+        with ProgressReporter(
+            service.Session,
+            "run",
+            target=cfg.site_id,
+            resume_command=_resume_command(ctx),
+            bar=not quiet,
+        ) as progress:
+            service.run(max_frames=max_frames, progress=progress)
+    finally:
+        # Release the embedded Qdrant client deterministically. Left to
+        # the interpreter, QdrantClient.__del__ runs during shutdown and
+        # dies on an import that can no longer resolve, printing a
+        # traceback immediately below "Progress saved. Resume with:" —
+        # which reads as though the save failed. It did not, but an
+        # operator ending a soak has no way to tell.
+        #
+        # This is the "deliberate shutdown" that VectorStore.close()
+        # documents, and it belongs here rather than in IngestService:
+        # `run` owns its whole process, whereas the web process shares
+        # one store with the recognition API and enrollment and must
+        # never have it closed out from under them.
+        if service.resolver is not None:
+            service.resolver.vectors.close()
     if service.stopped:
         raise typer.Exit(INTERRUPTED_EXIT)
 
