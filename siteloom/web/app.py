@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import (
@@ -36,7 +36,6 @@ from siteloom.store import (
     EventIdentity,
     Identity,
     NoiseEvent,
-    User,
     WebSession,
     get_session,
     init_db,
@@ -147,20 +146,13 @@ def _identity_rail(session, identity_id: int) -> dict | None:
 
 
 def _safe_next(next_url: str, event_id: int) -> str:
-    """Confine a form-supplied redirect target to this site.
+    """The triage rail's redirect target, confined to this site.
 
-    The triage rail round-trips the operator back to the filtered list
-    they were working, so the target comes from the page. That makes it
-    attacker-supplied: anything not a plain absolute path on this origin
-    (scheme, host, protocol-relative `//evil`) falls back to the event.
+    One validator (`auth.safe_next`) decides what "on this site" means
+    for every redirect in the console; this only supplies the rail's
+    fallback, which is the event the operator was judging.
     """
-    if (
-        next_url.startswith("/")
-        and not next_url.startswith("//")
-        and "\\" not in next_url
-    ):
-        return next_url
-    return f"/events/{event_id}"
+    return auth.safe_next(next_url, f"/events/{event_id}")
 
 
 def _rail_context(session, event_id: int) -> dict | None:
@@ -255,6 +247,9 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     init_db(engine)
     Session = get_session(engine)
     media_root = Path(config.storage.media_dir).resolve()
+    #: Per-app so a second app in the same process (tests) starts clean.
+    auth_gate = auth.AuthGate()
+    login_throttle = auth.LoginThrottle()
 
     @app.middleware("http")
     async def auth_and_audit(request: Request, call_next):
@@ -265,7 +260,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         """
         path = request.url.path
         with Session() as session:
-            enabled = auth.auth_enabled(session)
+            enabled = auth_gate.enabled(session)
             user = auth.resolve_user(
                 session, request.cookies.get(auth.SESSION_COOKIE)
             )
@@ -276,7 +271,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         if enabled and not exempt:
             if user is None:
                 if request.method in ("GET", "HEAD"):
-                    return RedirectResponse(f"/login?next={path}", status_code=303)
+                    # Quoted so a crafted path cannot smuggle extra query
+                    # parameters into the login URL it is pasted into.
+                    target = quote(path, safe="/")
+                    return RedirectResponse(f"/login?next={target}", status_code=303)
                 return JSONResponse({"detail": "login required"}, status_code=401)
             if not auth.has_role(user, auth.required_role(request.method, path)):
                 return JSONResponse({"detail": "insufficient role"}, status_code=403)
@@ -292,17 +290,24 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     session.commit()
         return response
 
-    @app.get("/login", response_class=HTMLResponse)
-    def login_form(request: Request, next: str = "/"):
+    def _login_page(request: Request, next: str, error: str | None, status: int):
         return templates.TemplateResponse(
             request,
             "login.html",
             {
                 "site_name": config.site_name or config.site_id,
-                "next": _safe_next(next, 0) if next != "/" else "/",
-                "error": None,
+                # Sanitized on the way in as well as on the way out: the
+                # value is echoed into the form's hidden field, so an
+                # unchecked one survives the round trip to the redirect.
+                "next": auth.safe_next(next),
+                "error": error,
             },
+            status_code=status,
         )
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request, next: str = "/"):
+        return _login_page(request, next, None, 200)
 
     @app.post("/login", response_class=HTMLResponse)
     def login_submit(
@@ -311,31 +316,45 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         password: str = Form(...),
         next: str = Form("/"),
     ):
-        with Session() as session:
-            user = session.scalar(
-                select(User).filter_by(username=username.strip())
+        caller = request.client.host if request.client else "unknown"
+        wait = login_throttle.retry_after(caller)
+        if wait > 0:
+            # Not audited: nothing was attempted, and a row per hammered
+            # request would turn the defence into unbounded table growth.
+            response = _login_page(
+                request,
+                next,
+                f"Too many sign-in attempts. Try again in {int(wait) + 1}s.",
+                429,
             )
-            if (
-                user is None
-                or user.disabled
-                or not auth.verify_password(password, user.password_hash)
-            ):
-                # One message for both failures — do not confirm usernames.
-                return templates.TemplateResponse(
-                    request,
-                    "login.html",
-                    {
-                        "site_name": config.site_name or config.site_id,
-                        "next": next,
-                        "error": "Wrong username or password.",
-                    },
-                    status_code=401,
+            response.headers["Retry-After"] = str(int(wait) + 1)
+            return response
+
+        with Session() as session:
+            user = auth.authenticate(session, username, password)
+            if user is None:
+                login_throttle.record_failure(caller)
+                # A failed sign-in is an event even though nothing
+                # happened — it is the only trace a guessing run leaves.
+                auth.record_audit(
+                    session,
+                    None,
+                    "POST",
+                    "/login",
+                    401,
+                    username=auth.failed_actor(username),
                 )
+                session.commit()
+                # One message for both failures — do not confirm usernames.
+                return _login_page(
+                    request, next, "Wrong username or password.", 401
+                )
+            login_throttle.record_success(caller)
+            auth.purge_expired_sessions(session)
             token = auth.create_session(session, user)
             auth.record_audit(session, user, "POST", "/login", 303)
             session.commit()
-        target = next if next.startswith("/") and not next.startswith("//") else "/"
-        response = RedirectResponse(target, status_code=303)
+        response = RedirectResponse(auth.safe_next(next), status_code=303)
         response.set_cookie(
             auth.SESSION_COOKIE,
             token,
@@ -353,7 +372,8 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 row = session.get(WebSession, token)
                 if row is not None:
                     session.delete(row)
-                    session.commit()
+                auth.purge_expired_sessions(session)
+                session.commit()
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie(auth.SESSION_COOKIE)
         return response
