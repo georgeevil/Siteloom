@@ -73,6 +73,7 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 - **The reporter swallows `Interrupted`** so it can record the run, which leaves anything assigned inside the `with` block unbound. Every caller pre-binds its result to `None` and exits `INTERRUPTED_EXIT` (130) instead of formatting a summary of work that never happened.
 - `bar=False` hides the progress bar; `enabled=False` switches the whole reporter off. Never conflate them — a user asking for a quieter terminal must not silently lose the heartbeat and the signal handler.
 - **The resume command is rebuilt from the invocation** (`_resume_command(ctx)`), never composed from a couple of interesting fields — that dropped every other flag, so resuming a `--no-auto-verify` import started auto-verifying, writing unreviewed annotations that `training/dataset.py` reads as ground truth. New long-running commands take `ctx: typer.Context` and pass `_resume_command(ctx)`.
+- **A daemon still needs the row** (CLD-15): `siteloom run` heartbeats one, so a 24 h soak is watchable from another terminal and a crash at hour 3 reads as stale instead of healthy. It has no skip-what's-done query because live ingest has no unit of done-ness — frames missed while stopped are gone — so its resume command is the same invocation and "resume" means reconnect; bounded catch-up over the gap is `backfill-unifi`. The reporter is ticked from one worker thread per camera, which is why its counters and heartbeat are lock-serialized. Plain `siteloom backfill` is still uncovered — it is the last gap in the claim above (CLD-12).
 
 ### Manageability (`siteloom/health.py`, `siteloom doctor`, `jobs cancel|reap`)
 
@@ -87,9 +88,18 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 - The audit row's `username` is denormalized on purpose: it must still say who acted after the account is renamed or deleted. Denied requests are not audited — nothing happened.
 - User management is CLI-only (`siteloom users add|list|passwd|disable`) by design: there is no web path to create the first account.
 
+### Accuracy readout (`siteloom/stats.py`, `/stats`)
+
+Pure query functions over columns that already existed and were never read in aggregate — `EventIdentity.matched_by`, `.learned_plate`, `.verdict`, `.identifier_key`, and the null-`identity_id` rows that record a miss. Kept out of the web layer because the arithmetic is the testable part. Three rules live in the data shapes rather than in the caller:
+
+- **A rate never travels without its denominator.** Operators review suspicious matches more than obvious ones, so precision over reviewed links is a biased sample; `wrong_rate` is None when nothing was reviewed (an unreviewed identifier has not been shown to be perfect, and 0.0 reads exactly like that) and `reviewed`/`claims` ride alongside so no renderer can print a bare percentage. `coverage` *is* 0.0 at zero reviewed — that one is a real measurement.
+- **Similarity histograms are per identifier, never pooled** (face ≈0.36, generic ≈0.8+), and **exclude plate matches** — a plate match carries a synthetic similarity, which would spike the chart at a made-up value right where the cutoff is read.
+- **Threshold trade-offs are computed from raw similarities, not bin edges.** A 0.05 bin straddles 0.36 far more often than it aligns to it, so bin-edge arithmetic silently answers a question about 0.35 or 0.40.
+- **"Cleared without a verdict" is a first-class stat**: clearing needs no verdict by design, so a soak can be worked to zero while producing no accuracy data. Keep clearing cheap; report the gap.
+
 ### Audio, backfill, guests
 
-- `modules/audio.py`: loud-duration episodes only (dBFS RMS threshold + min duration + release gap) — classification/transcription intentionally absent (NFR5). `detect_episodes` is a pure function; test changes there.
+- `modules/audio.py`: loud-duration episodes only (dBFS RMS threshold + min duration + release gap) — classification/transcription intentionally absent (NFR5). `detect_episodes` is a pure function; test changes there. **Audio never reaches this module on a live stream**: `Frame` carries only an image, OpenCV's FFmpeg backend discards audio streams, and ingest calls `_process_audio` only for `adapter == "file"`. `backfill-unifi` (downloaded MP4s) is the one camera-derived path that produces `NoiseEvent` rows — setting `audio.enabled: true` on a UniFi camera changes nothing.
 - Backfill (`siteloom backfill`) builds a synthetic file-adapter CameraConfig and runs `IngestService.run_camera` — it must always reuse the live pipeline (PRD §6.6).
 - `guests.py`: iCal → Booking rows; `GuestWindows.contains()` stamps `Event.guest_window` at ingest to suppress unknown-vehicle alarms during arrival windows (the PRD §12 success metric).
 

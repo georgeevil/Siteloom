@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}Accuracy{% endblock %}
+
+{#
+  Accuracy readout (CLD-17). Two presentation rules are structural here,
+  not stylistic:
+
+  * No bare percentages. Operators review suspicious matches more than
+    obvious ones, so precision over reviewed links is a biased sample —
+    every rate is rendered with the N it was computed over and the share
+    of all claims that N represents.
+  * One histogram per identifier, never pooled. Face matches live near
+    0.36 and generic ones near 0.8+; a shared axis would describe the
+    configuration rather than the data.
+#}
+
+{% macro rate(value, reviewed, total) -%}
+  {%- if value is none -%}
+    <span class="muted">no verdicts yet</span>
+  {%- else -%}
+    {{ '%.0f'|format(value * 100) }}%
+    <span class="muted">of {{ reviewed }} reviewed
+    {%- if total %} ({{ '%.0f'|format(reviewed / total * 100) }}% of {{ total }}){% endif %}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+<style>
+  .st-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+  .st-head h2 { font-size: 1.05rem; margin: 0; }
+  .st-win { display: flex; gap: 6px; font-family: var(--font-mono); font-size: 12px; }
+  .st-win a {
+    padding: 2px 8px; border: 1px solid var(--control-border);
+    border-radius: 4px; color: var(--muted); text-decoration: none;
+  }
+  .st-win a.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .st-tiles { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0 22px; }
+  .st-tile {
+    background: var(--panel); border: 1px solid var(--hairline); border-radius: 6px;
+    padding: 10px 14px; min-width: 128px;
+  }
+  .st-tile b { display: block; font-family: var(--font-mono); font-size: 20px; font-weight: 600; }
+  .st-tile span { font-size: 11px; color: var(--muted); }
+  .st-tile.warn b { color: var(--amber); }
+  table.st { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.st th, table.st td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--row-rule); }
+  table.st th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+  table.st td.n { font-family: var(--font-mono); }
+  .st-hist { margin: 18px 0 26px; }
+  .st-bars { display: flex; align-items: flex-end; gap: 2px; height: 96px; margin: 8px 0 0; }
+  .st-bar { flex: 1; position: relative; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
+  .st-bar i { display: block; background: var(--accent); border-radius: 1px 1px 0 0; min-height: 1px; }
+  .st-bar i.wrong { background: var(--red); }
+  .st-bar.over { outline: 1px dashed var(--amber); outline-offset: 1px; }
+  .st-axis { display: flex; gap: 2px; font-family: var(--font-mono); font-size: 9px; color: var(--faint); margin-top: 3px; }
+  .st-axis span { flex: 1; text-align: center; }
+  .st-note { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+</style>
+
+<div class="st-head">
+  <h2>Accuracy</h2>
+  <div class="st-win">
+    {% for d, label in [(1, '24h'), (7, '7d'), (30, '30d')] %}
+    <a href="/stats?days={{ d }}" class="{{ 'on' if days == d }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+</div>
+<p class="muted" style="font-size:0.85rem;">
+  Identity claims over the last {{ days }} day{{ 's' if days != 1 }}, judged against operator verdicts.
+</p>
+
+<div class="st-tiles">
+  <div class="st-tile">
+    <b>{{ coverage.events }}</b><span>events</span>
+  </div>
+  <div class="st-tile">
+    <b>{{ coverage.open }}</b><span>still open</span>
+  </div>
+  <div class="st-tile">
+    <b>{{ coverage.reviewed_links }}<span style="font-size:13px;color:var(--muted)">/{{ coverage.total_links }}</span></b>
+    <span>claims judged</span>
+  </div>
+  <div class="st-tile {{ 'warn' if coverage.cleared_without_verdict }}">
+    <b>{{ coverage.cleared_without_verdict }}</b><span>cleared, no verdict</span>
+  </div>
+  <div class="st-tile {{ 'warn' if coverage.flagged }}">
+    <b>{{ coverage.flagged }}</b><span>flagged as missed</span>
+  </div>
+</div>
+
+{% if coverage.cleared_without_verdict %}
+<p class="st-note">
+  {{ coverage.cleared_without_verdict }} event{{ 's' if coverage.cleared_without_verdict != 1 }}
+  {{ 'were' if coverage.cleared_without_verdict != 1 else 'was' }} cleared without a verdict —
+  worked through, but producing no accuracy data. Clearing stays deliberately cheap; this is
+  the resulting blind spot, not an error.
+</p>
+{% endif %}
+
+<h3 style="font-size:0.9rem;margin:26px 0 6px;">Per identifier</h3>
+{% if identifiers %}
+<table class="st">
+  <tr>
+    <th>Identifier</th><th>Claims</th><th>Confirmed</th><th>Wrong</th>
+    <th>Wrong rate</th><th>Misses</th><th>Plate / visual</th>
+  </tr>
+  {% for stat in identifiers %}
+  <tr>
+    <td><b>{{ stat.key }}</b>
+      {% if thresholds.get(stat.key) %}
+      <span class="muted" style="font-family:var(--font-mono);font-size:11px;">
+        @ {{ '%.2f'|format(thresholds[stat.key]) }}</span>
+      {% endif %}
+    </td>
+    <td class="n">{{ stat.claims }}</td>
+    <td class="n">{{ stat.confirmed }}</td>
+    <td class="n">{{ stat.wrong }}</td>
+    <td>{{ rate(stat.wrong_rate, stat.reviewed, stat.claims) }}</td>
+    <td class="n">{{ stat.misses }}{% if stat.misses %}
+      <span class="muted" style="font-size:11px;">of {{ stat.recall_denominator }}</span>{% endif %}</td>
+    <td class="n">{{ stat.plate_matches }} / {{ stat.visual_matches }}
+      {%- if stat.learned_plates %}
+      <span class="muted" style="font-size:11px;">· {{ stat.learned_plates }} learned</span>
+      {%- endif %}
+      {%- if stat.unattributed %}
+      <span class="muted" style="font-size:11px;">· {{ stat.unattributed }} unattributed</span>
+      {%- endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No identity claims in this window.</p>
+{% endif %}
+
+<h3 style="font-size:0.9rem;margin:26px 0 6px;">Similarity against the threshold</h3>
+{% if histograms %}
+<p class="st-note">
+  Visual matches only — a plate match carries a synthetic similarity, so including it
+  would put a spike at a made-up value right where the cutoff is read.
+  Dashed bins sit at or above the configured threshold; red is the wrong-verdict share.
+</p>
+{% for h in histograms %}
+<div class="st-hist">
+  <div style="font-family:var(--font-mono);font-size:12px;">
+    <b>{{ h.key }}</b> · {{ h.total }} visual match{{ 'es' if h.total != 1 }}
+    {%- if h.threshold %} · threshold {{ '%.2f'|format(h.threshold) }}{% endif %}
+  </div>
+  <div class="st-bars">
+    {% for b in h.bins %}
+    <div class="st-bar {{ 'over' if h.threshold and b.high > h.threshold }}"
+         title="{{ '%.2f'|format(b.low) }}–{{ '%.2f'|format(b.high) }}: {{ b.count }} ({{ b.confirmed }} confirmed, {{ b.wrong }} wrong)">
+      {% if b.wrong %}
+      <i class="wrong" style="height:{{ (b.wrong / h.peak * 100) | round(1) }}%"></i>
+      {% endif %}
+      {% if b.count - b.wrong %}
+      <i style="height:{{ ((b.count - b.wrong) / h.peak * 100) | round(1) }}%"></i>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <div class="st-axis">
+    {% for b in h.bins %}<span>{{ b.label if loop.index0 % 4 == 0 else '' }}</span>{% endfor %}
+  </div>
+  {% if h.threshold %}
+  <p class="st-note">
+    Raising the cutoff from {{ '%.2f'|format(h.threshold) }} would remove
+    <b>{{ h.wrong_above }}</b> known-wrong match{{ 'es' if h.wrong_above != 1 }}
+    and risk <b>{{ h.confirmed_near }}</b> confirmed one{{ 's' if h.confirmed_near != 1 }}
+    sitting just above it.
+  </p>
+  {% endif %}
+</div>
+{% endfor %}
+{% else %}
+<p class="muted">No visual matches in this window.</p>
+{% endif %}
+
+<h3 style="font-size:0.9rem;margin:26px 0 6px;">Per camera</h3>
+{% if cameras %}
+<table class="st">
+  <tr><th>Camera</th><th>Events</th><th>Matched</th><th>Unmatched</th><th>Misses</th></tr>
+  {% for cam in cameras %}
+  <tr>
+    <td>{{ cam.name }} <span class="muted" style="font-size:11px;">{{ cam.camera_id }}</span></td>
+    <td class="n">{{ cam.events }}</td>
+    <td class="n">{{ cam.matched_events }}</td>
+    <td class="n">{{ cam.unmatched_events }}</td>
+    <td class="n">{{ cam.misses }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No events in this window.</p>
+{% endif %}
+{% endblock %}

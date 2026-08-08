@@ -31,6 +31,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -119,6 +120,11 @@ class ProgressReporter:
         self._last_log = 0.0
         self._started = time.monotonic()
         self._prev_handlers: dict[int, object] = {}
+        # One reporter, many tickers: live ingest runs a worker thread per
+        # camera (CLD-15) and they all advance the same counters. Reentrant
+        # because advance() -> _beat() re-enters, and held across the
+        # heartbeat write so a run's row never shows a half-applied tick.
+        self._lock = threading.RLock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -208,21 +214,28 @@ class ProgressReporter:
 
     @contextmanager
     def phase(self, name: str, total: int = 0):
-        self._close_phase()
-        self._phase_name = name
-        self._phase_started = time.monotonic()
-        self._current, self._total = 0, total
-        if self._progress is not None:
-            self._task_id = self._progress.add_task(name, total=total or None, extra="")
-        else:
-            log.info("%s: starting (%s items)", name, total or "unknown")
-        self._beat(force=True)
+        with self._lock:
+            self._close_phase_locked()
+            self._phase_name = name
+            self._phase_started = time.monotonic()
+            self._current, self._total = 0, total
+            if self._progress is not None:
+                self._task_id = self._progress.add_task(
+                    name, total=total or None, extra=""
+                )
+            else:
+                log.info("%s: starting (%s items)", name, total or "unknown")
+            self._beat(force=True)
         try:
             yield self
         finally:
             self._close_phase()
 
     def _close_phase(self) -> None:
+        with self._lock:
+            self._close_phase_locked()
+
+    def _close_phase_locked(self) -> None:
         if not self._phase_name:
             return
         elapsed = time.monotonic() - self._phase_started
@@ -243,26 +256,31 @@ class ProgressReporter:
         self._task_id = None
 
     def set_total(self, total: int) -> None:
-        self._total = total
-        if self._progress is not None and self._task_id is not None:
-            self._progress.update(self._task_id, total=total or None)
+        with self._lock:
+            self._total = total
+            if self._progress is not None and self._task_id is not None:
+                self._progress.update(self._task_id, total=total or None)
 
     # -- ticking -----------------------------------------------------------
 
     def advance(self, n: int = 1, **counters: int) -> None:
-        self._current += n
-        for key, value in counters.items():
-            self.counters[key] += value
-        extra = self._extra_text()
-        if self._progress is not None and self._task_id is not None:
-            self._progress.update(self._task_id, completed=self._current, extra=extra)
-        self._beat()
-        self._maybe_log()
+        with self._lock:
+            self._current += n
+            for key, value in counters.items():
+                self.counters[key] += value
+            extra = self._extra_text()
+            if self._progress is not None and self._task_id is not None:
+                self._progress.update(
+                    self._task_id, completed=self._current, extra=extra
+                )
+            self._beat()
+            self._maybe_log()
 
     def bump(self, **counters: int) -> None:
         """Update counters without advancing the item count."""
-        for key, value in counters.items():
-            self.counters[key] += value
+        with self._lock:
+            for key, value in counters.items():
+                self.counters[key] += value
 
     def _extra_text(self) -> str:
         if not self.counters:
@@ -296,28 +314,33 @@ class ProgressReporter:
     def _beat(self, force: bool = False) -> None:
         if self.run_id is None:
             return
-        now = time.monotonic()
-        if not force and now - self._last_beat < HEARTBEAT_S:
-            return
-        self._last_beat = now
-        try:
-            with self.Session() as session:
-                run = session.get(OperationRun, self.run_id)
-                if run is None:
-                    return
-                run.phase = self._phase_name
-                run.current = self._current
-                run.total = self._total
-                run.counters = json.dumps(dict(self.counters))
-                run.phase_timings = json.dumps(self.phase_timings)
-                run.updated_at = _now()
-                session.commit()
-        except Exception as exc:  # never let telemetry break the job
-            log.debug("progress heartbeat failed: %s", exc)
+        with self._lock:
+            now = time.monotonic()
+            if not force and now - self._last_beat < HEARTBEAT_S:
+                return
+            self._last_beat = now
+            try:
+                with self.Session() as session:
+                    run = session.get(OperationRun, self.run_id)
+                    if run is None:
+                        return
+                    run.phase = self._phase_name
+                    run.current = self._current
+                    run.total = self._total
+                    run.counters = json.dumps(dict(self.counters))
+                    run.phase_timings = json.dumps(self.phase_timings)
+                    run.updated_at = _now()
+                    session.commit()
+            except Exception as exc:  # never let telemetry break the job
+                log.debug("progress heartbeat failed: %s", exc)
 
     def finish(self, status: str, message: str = "") -> None:
         if self.run_id is None:
             return
+        with self._lock:
+            self._finish_locked(status, message)
+
+    def _finish_locked(self, status: str, message: str) -> None:
         try:
             with self.Session() as session:
                 run = session.get(OperationRun, self.run_id)
