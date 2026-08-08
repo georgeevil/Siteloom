@@ -249,6 +249,54 @@ def test_split_moves_annotations_and_their_vectors(split_env):
         assert owner == split_env.source_id and score > 0.99
 
 
+def test_split_removes_an_enrolled_vector_by_provenance_not_by_re_embedding(
+    split_env,
+):
+    """The CLD-84 payoff: a vector enrolled from an annotation records
+    which annotation it came from, so split takes it out by origin.
+
+    The numeric pass can only find a vector by re-embedding its crop, so
+    it fails exactly when the crop file is gone (archived, pruned,
+    re-indexed) — and the polluted vector would stay on the source
+    gallery, still attracting the wrong matches, which is the one thing
+    split exists to stop. Provenance makes the removal independent of
+    whether the image still exists.
+    """
+    from pathlib import Path
+
+    store = get_shared_store(split_env.config.identity.vector_db_path)
+    red_annotation = split_env.annotation_ids["red"]
+    # Re-seed the red vector the way enrollment writes it today.
+    store.delete_identity("vehicle", split_env.source_id)
+    for name in ("blue", "green"):
+        store.add("vehicle", COLOURS[name][1], split_env.source_id)
+    store.add(
+        "vehicle",
+        COLOURS["red"][1],
+        split_env.source_id,
+        source="enrolled",
+        annotation_id=red_annotation,
+        crop_path=split_env.crop_paths["red"],
+    )
+    Path(split_env.crop_paths["red"]).unlink()  # the crop is gone
+
+    r = split_env.client.post(
+        f"/identities/{split_env.source_id}/split",
+        data={"annotation_ids": str(red_annotation)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    new_id = int(r.headers["location"].split("/identities/")[1].split("?")[0])
+
+    assert store.count_identity("vehicle", split_env.source_id) == 2
+    # Nothing can rebuild a vector from a crop that no longer exists, so
+    # the fresh identity starts empty — but the source is clean.
+    assert store.count_identity("vehicle", new_id) == 0
+    # Nothing on the source answers to the split-off vehicle any more.
+    _, score = _vector_owner(split_env.config, COLOURS["red"][1])
+    assert score < 0.5
+
+
 def test_split_keeps_live_matched_vectors_it_cannot_rebuild(split_env):
     """The gallery is two disjoint populations and only one of them is
     reconstructible: live camera matching adds vectors directly with no

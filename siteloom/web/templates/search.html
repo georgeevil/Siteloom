@@ -84,7 +84,7 @@
   {% if results.events %}
   <h3 class="sec">Events · {{ results.events | length }}</h3>
   {% for e in results.events %}
-  {% set link = e.identities | selectattr('identity_id') | first %}
+  {% set link = e.active_identities | first %}
   <a class="hit" href="/?selected={{ e.id }}">
     {% if e.best_crop_path %}
       <img class="thumb" src="/media/{{ e.best_crop_path }}" alt="" loading="lazy">

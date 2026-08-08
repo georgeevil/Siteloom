@@ -296,10 +296,12 @@ class FrigateConsumer:
             if resolution.identity is None:
                 # Quarantined or ambiguous (CLD-41) — no link, no publish.
                 continue
+            # Skip claims an operator unlinked (CLD-36): a later `update`
+            # message must not revive a correction by incrementing it.
             link = session.scalar(
-                select(EventIdentity).filter_by(
-                    event_id=event.id, identity_id=resolution.identity.id
-                )
+                select(EventIdentity)
+                .filter_by(event_id=event.id, identity_id=resolution.identity.id)
+                .filter(EventIdentity.unlinked_at.is_(None))
             )
             if link is None:
                 session.add(

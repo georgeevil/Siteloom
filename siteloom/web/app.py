@@ -28,7 +28,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.web import auth
+from siteloom.web import auth, identity_ops
 from siteloom.store import (
     Camera,
     Detection,
@@ -116,6 +116,10 @@ def _identity_rail(session, identity_id: int) -> dict | None:
             select(EventIdentity)
             .options(selectinload(EventIdentity.event).selectinload(Event.camera))
             .filter_by(identity_id=identity_id)
+            # Claims an operator detached (CLD-36) are not this identity's
+            # visits — showing them here would put the wrong person's
+            # events back in front of whoever is reviewing the gallery.
+            .filter(EventIdentity.unlinked_at.is_(None))
             .order_by(EventIdentity.id.desc())
             .limit(12)
         )
@@ -192,8 +196,14 @@ def _rail_context(session, event_id: int) -> dict | None:
         .unique()
         .all()
     )
-    links = [r for r in rows if r.identity_id is not None]
+    links = [r for r in rows if r.is_active]
     misses = [r for r in rows if r.identity_id is None]
+    # Repudiated claims (CLD-36) are shown, not hidden: the operator
+    # needs to see that this event was once called someone else, and
+    # re-attaching is how a correction gets corrected.
+    unlinked = [
+        r for r in rows if r.identity_id is not None and r.unlinked_at is not None
+    ]
     zones: list[str] = []
     for d in detections:
         for zone in json.loads(d.zones):
@@ -205,14 +215,42 @@ def _rail_context(session, event_id: int) -> dict | None:
         "detections": detections,
         "identity_links": links,
         "misses": misses,
+        "unlinked": unlinked,
+        "candidates": _identity_candidates(session),
         "zones": zones,
         "status": event.review_status,
     }
 
 
+def _identity_candidates(session) -> list[Identity]:
+    """Who this event could be — the picker's options (CLD-36).
+
+    Not filtered to one identifier: the operator, not the resolver, is
+    deciding, and the face identifier missing someone is exactly when
+    they need to attach the person identity by hand. Labeled identities
+    sort first because naming a visit is the common case; the unknown
+    buckets stay reachable for merging two sightings of one stranger.
+    """
+    return list(
+        session.scalars(
+            select(Identity)
+            .order_by(
+                Identity.label.is_(None), Identity.label, Identity.last_seen.desc()
+            )
+            .limit(200)
+        )
+        .unique()
+        .all()
+    )
+
+
 def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     app = FastAPI(title="Siteloom")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Embedders are built lazily and cached for the app's lifetime (model
+    # load is expensive); on the app rather than the module so the cache
+    # cannot outlive the config it was built from.
+    app.state.embedders = {}
     engine = make_engine(config.storage.db_url)
     init_db(engine)
     Session = get_session(engine)
@@ -601,7 +639,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .all()
             )
             camera = session.get(Camera, event.camera_id)
-            identity_links = (
+            rows = (
                 session.scalars(
                     select(EventIdentity)
                     .options(selectinload(EventIdentity.identity))
@@ -613,6 +651,9 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .unique()
                 .all()
             )
+            identity_links = [r for r in rows if r.unlinked_at is None]
+            unlinked = [r for r in rows if r.unlinked_at is not None]
+            candidates = _identity_candidates(session)
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -629,6 +670,9 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     for d in detections
                 ],
                 "identity_links": identity_links,
+                "unlinked": unlinked,
+                "candidates": candidates,
+                "identifier_keys": list(config.identity.identifiers.keys()),
             },
         )
 
@@ -705,6 +749,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                         selectinload(EventIdentity.event).selectinload(Event.camera)
                     )
                     .filter_by(identity_id=identity_id)
+                    .filter(EventIdentity.unlinked_at.is_(None))
                     .order_by(EventIdentity.id.desc())
                     .limit(100)
                 )
@@ -748,12 +793,14 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def set_identity_verdict(event_id: int, link_id: int, verdict: str = Form(...)):
         """Record a human verdict on one identity claim (CLD-16).
 
-        A wrong verdict must not touch the vector store — resolver-side
-        learning from embeddings is separate work — but it does revert a
-        plate this very match taught the identity: plate matches win
-        outright (PRD §6.4), so a mis-learned plate would poison every
-        future sighting of that number. That is correction, not learning,
-        and it is scoped to exactly the evidence being repudiated."""
+        A verdict is a judgment, not an edit: it must not touch the
+        vector store — resolver-side learning from embeddings is separate
+        work, and correcting the gallery is what link/unlink/reassign
+        below are for. It does revert a plate this very match taught the
+        identity: plate matches win outright (PRD §6.4), so a mis-learned
+        plate would poison every future sighting of that number. That is
+        correction, not learning, and it is scoped to exactly the
+        evidence being repudiated."""
         if verdict not in ("confirmed", "wrong", "clear"):
             raise HTTPException(400, "verdict must be confirmed, wrong, or clear")
         with Session() as session:
@@ -766,18 +813,251 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             else:
                 link.verdict = verdict
                 link.verdict_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            if verdict == "wrong" and link.learned_plate:
-                identity = session.get(Identity, link.identity_id)
-                if identity is not None and identity.plate:
-                    log.info(
-                        "reverting plate %s learned on event %s from identity %s",
-                        identity.plate,
-                        event_id,
-                        identity.id,
-                    )
-                    identity.plate = None
+            if verdict == "wrong":
+                identity_ops.revert_learned_plate(session, link, event_id)
             session.commit()
         return RedirectResponse(f"/events/{event_id}", status_code=303)
+
+    def _resolve_target(
+        session, event: Event, identity_id: str, identifier: str, label: str
+    ) -> Identity:
+        """The identity an attach/reassign names: an existing one, or a
+        new one minted here.
+
+        "New identity" is not a convenience — it is the answer when the
+        resolver merged two people into one row, and the correct target
+        does not exist yet. It starts unlabeled unless the operator typed
+        a name, which is the same label-and-learn shape as everywhere
+        else (PRD §6.3).
+        """
+        if identity_id == "new":
+            if identifier not in config.identity.identifiers:
+                raise HTTPException(
+                    400,
+                    f"unknown identifier {identifier!r}; expected one of "
+                    + ", ".join(sorted(config.identity.identifiers)),
+                )
+            identity = Identity(
+                identifier_key=identifier,
+                class_name=event.class_name,
+                label=label.strip() or None,
+                first_seen=event.first_seen,
+                last_seen=event.last_seen,
+                best_crop_path=event.best_crop_path,
+            )
+            session.add(identity)
+            session.flush()
+            return identity
+        if not identity_id.isdigit():
+            raise HTTPException(400, "identity_id must be an integer or 'new'")
+        identity = session.get(Identity, int(identity_id))
+        if identity is None:
+            raise HTTPException(404, f"no identity {identity_id}")
+        return identity
+
+    def _attach(session, vectors, event: Event, identity: Identity, enroll: bool):
+        """Create (or revive) the operator's claim that this event is
+        this identity, and make the claim visible to matching.
+
+        A manual link is `matched_by="human"` and `verdict="confirmed"`
+        by construction: the provenance of a correction matters as much
+        as the provenance of a match (CLD-32), and an operator saying who
+        someone is has already reviewed it. `similarity` stays 0.0 — a
+        human link has no cosine score, and inventing one would corrupt
+        the plate-vs-visual accuracy numbers that read this column.
+
+        `vectors` is None when the caller never opened the store (an
+        attach with enrollment off); nothing here reads or writes it
+        then, and the identity's vector count is left as it was.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        link = (
+            session.query(EventIdentity)
+            .filter_by(event_id=event.id, identity_id=identity.id)
+            .order_by(EventIdentity.id.desc())
+            .first()
+        )
+        if link is None:
+            link = EventIdentity(
+                event_id=event.id,
+                identity_id=identity.id,
+                identifier_key=identity.identifier_key,
+                similarity=0.0,
+                matched_by="human",
+            )
+            session.add(link)
+            new_claim = True
+        else:
+            # Re-attaching a previously unlinked claim revives that row
+            # rather than stacking a second one: the operator changed
+            # their mind about this pairing, which is one decision, not
+            # two. Re-affirming a claim that already stands is not a new
+            # sighting at all — counting it again, or enrolling the same
+            # crop a second time, would let a stuck refresh inflate both.
+            new_claim = link.unlinked_at is not None
+        link.unlinked_at = None
+        link.verdict = "confirmed"
+        link.verdict_at = now
+        enrolled = False
+        if not new_claim:
+            return link, enrolled
+        if enroll and vectors is not None:
+            enrolled = identity_ops.enroll_event_crop(
+                config, vectors, event, identity, app.state.embedders
+            )
+        identity.last_seen = max(identity.last_seen, event.last_seen)
+        identity.first_seen = min(identity.first_seen, event.first_seen)
+        identity.appearance_count += 1
+        if not identity.best_crop_path:
+            identity.best_crop_path = event.best_crop_path
+        if vectors is not None:
+            identity_ops.refresh_vector_count(session, vectors, identity)
+        return link, enrolled
+
+    @app.post("/events/{event_id}/identity")
+    def attach_identity(
+        event_id: int,
+        identity_id: str = Form(...),
+        identifier: str = Form("face"),
+        label: str = Form(""),
+        enroll: str = Form("1"),
+        next_url: str = Form(""),
+    ):
+        """Say who this event actually was (CLD-36).
+
+        The other half of the verdict buttons: an operator could say a
+        claim was wrong but never say what was right, so a wrong name
+        kept rendering forever and the system learned nothing from the
+        correction.
+
+        Enrollment is on by default because a link the matcher cannot see
+        fixes one event and leaves the next one to go wrong the same way
+        — "a label without vectors is a name the system cannot see". It
+        is still optional: a crop can be too poor to want in a gallery.
+        """
+        want_enroll = enroll == "1"
+        with Session() as session:
+            event = session.get(Event, event_id)
+            if event is None:
+                raise HTTPException(404)
+            # Only reach for the store when enrollment needs it, so a
+            # console with a backfill running can still record who
+            # someone was — with enrollment off, which the operator sees.
+            vectors = (
+                identity_ops.shared_store(config, "link") if want_enroll else None
+            )
+            identity = _resolve_target(session, event, identity_id, identifier, label)
+            _attach(session, vectors, event, identity, enroll=want_enroll)
+            session.commit()
+            target = identity.id
+        return RedirectResponse(
+            _safe_next(next_url, event_id) if next_url else f"/identities/{target}",
+            status_code=303,
+        )
+
+    @app.post("/events/{event_id}/identity/{link_id}/unlink")
+    def unlink_identity(event_id: int, link_id: int, next_url: str = Form("")):
+        """Detach a claim this event should never have carried (CLD-36).
+
+        The row survives with its identity, similarity and matched_by
+        intact — that is the record of what the system got wrong, and
+        negatives are data (the Annotation philosophy). What does not
+        survive is the claim's effect on matching: the vectors this
+        event taught that identity are removed from its gallery, because
+        a polluted gallery keeps re-attracting the same wrong match, and
+        a plate learned from this claim is reverted.
+
+        This is the deliberate difference from a "wrong" verdict, which
+        judges without editing: unlink is the operator asserting the
+        pairing never held.
+        """
+        with Session() as session:
+            link = session.get(EventIdentity, link_id)
+            if link is None or link.event_id != event_id or link.identity_id is None:
+                raise HTTPException(404)
+            event = session.get(Event, event_id)
+            identity = session.get(Identity, link.identity_id)
+            vectors = identity_ops.shared_store(config, "unlink")
+            removed = vectors.delete_by_crops(
+                identity.identifier_key,
+                identity.id,
+                identity_ops.event_crop_paths(session, event),
+            )
+            log.info(
+                "unlinked identity %s from event %s (%s vectors removed)",
+                identity.id,
+                event_id,
+                removed,
+            )
+            link.unlinked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            link.verdict = "wrong"
+            link.verdict_at = link.unlinked_at
+            identity_ops.revert_learned_plate(session, link, event_id)
+            identity.appearance_count = max(identity.appearance_count - 1, 0)
+            identity_ops.refresh_vector_count(session, vectors, identity)
+            session.commit()
+        return RedirectResponse(
+            _safe_next(next_url, event_id) if next_url else f"/events/{event_id}",
+            status_code=303,
+        )
+
+    @app.post("/events/{event_id}/identity/{link_id}/reassign")
+    def reassign_identity(
+        event_id: int,
+        link_id: int,
+        identity_id: str = Form(...),
+        identifier: str = Form("face"),
+        label: str = Form(""),
+        next_url: str = Form(""),
+    ):
+        """Point a wrong claim at the right person, vectors and all.
+
+        Unlink + attach as one decision, which is what makes it more
+        than the sum: the vectors this event contributed *move* from the
+        wrong gallery to the right one (they are traceable by the crop
+        they came from — CLD-84), so the same correction that fixes the
+        record also stops the wrong identity re-matching and starts the
+        right one matching. Where nothing could be moved — a legacy
+        vector with no provenance, or an event whose crops never entered
+        a gallery — the event's best crop is enrolled instead, so the
+        new claim is never invisible to matching.
+        """
+        with Session() as session:
+            link = session.get(EventIdentity, link_id)
+            if link is None or link.event_id != event_id or link.identity_id is None:
+                raise HTTPException(404)
+            event = session.get(Event, event_id)
+            vectors = identity_ops.shared_store(config, "reassign")
+            target = _resolve_target(session, event, identity_id, identifier, label)
+            if target.id == link.identity_id:
+                raise HTTPException(400, "that identity is already linked")
+            old = session.get(Identity, link.identity_id)
+            crops = identity_ops.event_crop_paths(session, event)
+            moved = 0
+            if old.identifier_key == target.identifier_key:
+                # Across identifiers a vector cannot move: a face
+                # embedding is not a vehicle embedding, and dropping one
+                # into the other's collection would be a dimension
+                # mismatch at best and silent nonsense at worst. Strip it
+                # from the wrong gallery and let the attach enroll fresh.
+                moved = vectors.move_by_crops(
+                    old.identifier_key, old.id, target.id, crops
+                )
+            else:
+                vectors.delete_by_crops(old.identifier_key, old.id, crops)
+            link.unlinked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            link.verdict = "wrong"
+            link.verdict_at = link.unlinked_at
+            identity_ops.revert_learned_plate(session, link, event_id)
+            old.appearance_count = max(old.appearance_count - 1, 0)
+            identity_ops.refresh_vector_count(session, vectors, old)
+            _attach(session, vectors, event, target, enroll=moved == 0)
+            session.commit()
+            new_id = target.id
+        return RedirectResponse(
+            _safe_next(next_url, event_id) if next_url else f"/identities/{new_id}",
+            status_code=303,
+        )
 
     @app.post("/events/{event_id}/missed")
     def set_missed_identity(

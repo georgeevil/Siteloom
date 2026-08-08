@@ -258,7 +258,12 @@ class RecognitionService:
 
         with self.Session() as session:
             identity = self._subject_identity(session, subject, create=True)
-            self.vectors.add("face", embedding, identity.id)
+            from siteloom.identity.vectors import SOURCE_API
+
+            # No annotation and no stored crop — an API enrollment posts
+            # its image and keeps nothing, so `source` is all the
+            # provenance there is to record (CLD-84).
+            self.vectors.add("face", embedding, identity.id, source=SOURCE_API)
             identity.vector_count += 1
             identity.appearance_count += 1
             identity.last_seen = _now()

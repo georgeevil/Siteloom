@@ -115,11 +115,23 @@ def enroll_embedded(vectors, identity, embedded, max_vectors: int = 20) -> int:
     prevent. `identity.vector_count` is left to the caller, which reads
     it back from the store.
     """
+    from siteloom.identity.vectors import SOURCE_ENROLLED
+
     added = 0
     for annotation, embedding in embedded:
         if identity.vector_count + added >= max_vectors:
             break
-        vectors.add(identity.identifier_key, embedding, identity.id)
+        # Provenance (CLD-84): the annotation this vector came from is
+        # what lets a later split take it back out by origin instead of
+        # re-embedding the crop and matching on numeric identity.
+        vectors.add(
+            identity.identifier_key,
+            embedding,
+            identity.id,
+            source=SOURCE_ENROLLED,
+            annotation_id=annotation.id,
+            crop_path=annotation.crop_path,
+        )
         annotation.enrolled = True
         added += 1
     return added
@@ -162,7 +174,16 @@ def enroll_annotation(
         annotation.enrolled = True  # do not retry a hopeless crop
         return False
 
-    vectors.add("face", embedding, identity.id)
+    from siteloom.identity.vectors import SOURCE_ENROLLED
+
+    vectors.add(
+        "face",
+        embedding,
+        identity.id,
+        source=SOURCE_ENROLLED,
+        annotation_id=annotation.id,
+        crop_path=annotation.crop_path,
+    )
     identity.vector_count += 1
     identity.appearance_count += 1
     identity.last_seen = _now()

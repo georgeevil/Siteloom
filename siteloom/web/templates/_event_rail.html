@@ -1,6 +1,14 @@
 {# Triage detail rail (CLD-20). Rendered both inside index.html and on its
    own from /events/{id}/rail, so it must not extend base.html. #}
 {% set e = rail.event %}
+{# The picker's options, shared by attach and reassign (CLD-36). Labeled
+   identities come first from the query; the unknown buckets stay listed
+   because merging two sightings of one stranger is a real correction. #}
+{% macro identity_options(candidates, exclude_id=None) %}
+  {% for i in candidates if i.id != exclude_id %}
+    <option value="{{ i.id }}">{{ i.display_name }}{% if i.plate %} · {{ i.plate }}{% endif %}</option>
+  {% endfor %}
+{% endmacro %}
 <div class="rail-inner">
   <div class="rail-head">
     <div class="rail-media">
@@ -54,7 +62,7 @@
             {{ link.identity.identifier_key }} · sim {{ '%.2f' | format(link.similarity) }}
             {%- if link.identity.plate %} · {{ link.identity.plate }}{% endif %}
           </div>
-          {# The real review action this system has: was this claim right? #}
+          {# Was this claim right? A verdict judges; the row below edits. #}
           <form class="verdict" method="post"
                 action="/events/{{ e.id }}/identity/{{ link.id }}/verdict">
             <button name="verdict" value="{{ 'clear' if link.verdict == 'confirmed' else 'confirmed' }}"
@@ -67,6 +75,25 @@
         </div>
         <a class="btn-outline sm" href="/identities/{{ link.identity_id }}">Open</a>
       </div>
+      {# Correcting the claim, not just grading it (CLD-36). Reassign
+         moves what this event taught the wrong identity onto the right
+         one; unlink strips it and leaves no name behind. #}
+      <form class="id-edit" method="post"
+            action="/events/{{ e.id }}/identity/{{ link.id }}/reassign">
+        <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
+        <input type="hidden" name="identifier" value="{{ link.identifier_key or link.identity.identifier_key }}">
+        <select name="identity_id" aria-label="Reassign to">
+          {{ identity_options(rail.candidates, exclude_id=link.identity_id) }}
+          <option value="new">+ new identity</option>
+        </select>
+        <button type="submit" class="btn-outline sm">Reassign</button>
+      </form>
+      <form class="id-edit" method="post"
+            action="/events/{{ e.id }}/identity/{{ link.id }}/unlink">
+        <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
+        <button type="submit" class="btn-outline sm on-amber"
+                title="This event was not this identity">Unlink</button>
+      </form>
       {% endfor %}
     {% else %}
       <p class="rail-empty">
@@ -76,6 +103,36 @@
         {% endif %}
       </p>
     {% endif %}
+
+    {% for link in rail.unlinked %}
+      <p class="rail-unlinked">
+        Unlinked from <strong>{{ link.identity.display_name }}</strong>
+        <span class="mono">{{ link.unlinked_at.strftime('%m-%d %H:%M') if link.unlinked_at }}</span>
+      </p>
+    {% endfor %}
+
+    {# Attaching the right name is the half CLD-16's verdicts were missing. #}
+    <form class="id-attach" method="post" action="/events/{{ e.id }}/identity">
+      <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
+      <select name="identity_id" aria-label="Attach identity">
+        {{ identity_options(rail.candidates) }}
+        <option value="new">+ new identity</option>
+      </select>
+      <select name="identifier" aria-label="Identifier for a new identity">
+        {% for key in identifier_keys | default(['face', 'vehicle']) %}
+          <option value="{{ key }}">{{ key }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="label" placeholder="name (new identity)">
+      {# An unchecked checkbox submits nothing, which would silently
+         enroll against the operator's wish; the hidden field ahead of it
+         is the value that survives when the box is clear. #}
+      <input type="hidden" name="enroll" value="0">
+      <label class="enroll-opt" title="Add this event's crop to the identity's gallery so future events match it">
+        <input type="checkbox" name="enroll" value="1" checked> learn
+      </label>
+      <button type="submit" class="btn-outline sm">Attach identity</button>
+    </form>
 
     {% if rail.misses %}
       {% for m in rail.misses %}

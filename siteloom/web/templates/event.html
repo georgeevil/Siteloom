@@ -25,10 +25,52 @@
               class="bad {% if l.verdict == 'wrong' %}on{% endif %}"
               title="{% if l.verdict == 'wrong' %}marked wrong — click to clear{% else %}mark wrong{% endif %}">&#10007;</button>
     </form>
+    {# Fixing the claim rather than grading it (CLD-36). #}
+    <form class="verdict" method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/reassign">
+      <input type="hidden" name="identifier" value="{{ l.identifier_key or l.identity.identifier_key }}">
+      <select name="identity_id" aria-label="Reassign to">
+        {% for i in candidates if i.id != l.identity_id %}
+          <option value="{{ i.id }}">{{ i.display_name }}</option>
+        {% endfor %}
+        <option value="new">+ new identity</option>
+      </select>
+      <button type="submit" title="This event was someone else">reassign</button>
+    </form>
+    <form class="verdict" method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/unlink">
+      <button type="submit" title="This event was not this identity">unlink</button>
+    </form>
     </span>
   {% endfor %}
 </p>
 {% endif %}
+
+{% for l in unlinked %}
+<p class="muted" style="font-size:0.85rem;">
+  unlinked from {{ l.identity.display_name }}
+  {% if l.unlinked_at %}({{ l.unlinked_at.strftime('%Y-%m-%d %H:%M') }}){% endif %}
+</p>
+{% endfor %}
+
+{# Say who this event actually was — the half verdicts never had. #}
+<form class="verdict" method="post" action="/events/{{ event.id }}/identity"
+      style="margin:0.3rem 0 0.6rem;">
+  <select name="identity_id" aria-label="Attach identity">
+    {% for i in candidates %}
+      <option value="{{ i.id }}">{{ i.display_name }}</option>
+    {% endfor %}
+    <option value="new">+ new identity</option>
+  </select>
+  <select name="identifier" aria-label="Identifier for a new identity">
+    {% for key in identifier_keys %}<option value="{{ key }}">{{ key }}</option>{% endfor %}
+  </select>
+  <input type="text" name="label" placeholder="name (new identity)">
+  {# An unchecked box submits nothing; the hidden field is what survives. #}
+  <input type="hidden" name="enroll" value="0">
+  <label title="Add this event's crop to the identity's gallery so future events match it">
+    <input type="checkbox" name="enroll" value="1" checked> learn
+  </label>
+  <button type="submit">attach identity</button>
+</form>
 
 <form class="verdict" method="post" action="/events/{{ event.id }}/missed" style="margin:0.3rem 0 0.6rem;">
   {% if event.missed_identity %}

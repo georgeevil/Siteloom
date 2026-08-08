@@ -526,3 +526,45 @@ def test_weak_or_tiny_detections_skip_identity(sample_video, tmp_path):
     # Frames 1-2 pre-gate, 3-4 identify, 5-6 fail the quality gates.
     assert len(links) == 1
     assert links[0].hit_count == 2
+
+
+def test_ingest_does_not_revive_a_claim_the_operator_unlinked(
+    sample_video, tmp_path
+):
+    """An unlinked claim (CLD-36) is an operator saying this event was
+    never that identity. A later matching frame must not quietly restore
+    it by incrementing the row's hit count — the correction would vanish
+    with no trace that ingest overruled a human. A fresh claim is made
+    instead: visible, and correctable in turn.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    service = _identity_service(sample_video, tmp_path, [])
+    cam = service.config.cameras[0]
+    base = datetime(2026, 8, 7, 10, 0, 0)
+    for i in range(4):  # past min_detections, so identity resolution runs
+        service._store_detections(cam, base + timedelta(seconds=i), [_det(track_id=1)])
+
+    with service.Session() as session:
+        link = session.query(EventIdentity).one()
+        link.unlinked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        link.verdict = "wrong"
+        session.commit()
+        event_id, identity_id, link_id = link.event_id, link.identity_id, link.id
+
+    # The subject is still in frame and still matches the same identity.
+    service._store_detections(cam, base + timedelta(seconds=4), [_det(track_id=1)])
+
+    with service.Session() as session:
+        assert session.query(Event).count() == 1  # same visit, one event
+        rows = (
+            session.query(EventIdentity)
+            .filter_by(event_id=event_id, identity_id=identity_id)
+            .all()
+        )
+        detached = next(r for r in rows if r.id == link_id)
+        assert detached.unlinked_at is not None
+        assert detached.verdict == "wrong"
+        fresh = [r for r in rows if r.id != link_id]
+        assert len(fresh) == 1
+        assert fresh[0].unlinked_at is None and fresh[0].hit_count == 1

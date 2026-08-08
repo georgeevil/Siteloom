@@ -427,9 +427,14 @@ class IngestService:
             # Merging before linking means the surviving event usually
             # already carries the link, so the pairing publishes once.
             event = self._merge_with_prior(session, event, resolution.identity.id, rules)
+            # An unlinked claim is one an operator repudiated (CLD-36);
+            # a later frame matching the same identity must not revive it
+            # by incrementing its hit count. It makes a fresh claim
+            # instead, leaving the correction intact for review.
             link = (
                 session.query(EventIdentity)
                 .filter_by(event_id=event.id, identity_id=resolution.identity.id)
+                .filter(EventIdentity.unlinked_at.is_(None))
                 .first()
             )
             first_link = link is None
@@ -528,10 +533,16 @@ class IngestService:
             .all()
         ):
             kept = None
-            if link.identity_id is not None:
+            if link.is_active:
+                # Only standing claims fold together. An unlinked row
+                # (CLD-36) rides along to the survivor untouched — it is
+                # a closed record of a repudiated claim, and merging it
+                # into a live one would resurrect what an operator
+                # detached.
                 kept = (
                     session.query(EventIdentity)
                     .filter_by(event_id=target.id, identity_id=link.identity_id)
+                    .filter(EventIdentity.unlinked_at.is_(None))
                     .first()
                 )
             if kept is None:

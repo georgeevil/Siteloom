@@ -8,6 +8,18 @@ to a central platform (V1 multi-site) is a config change.
 One collection per identifier key ("face", "person", "vehicle", plus any
 dynamically added class). Collections are created on demand — this is
 what lets new classes appear at runtime without a schema migration.
+
+Every point carries provenance (CLD-84): which writer added it and what
+it was made from. An identity's gallery is several disjoint populations
+— live camera matches, enrolled library annotations, operator
+corrections, API enrollments — and without a marker on the payload they
+are indistinguishable, which forces every surgical edit (split, unlink,
+reassign) to reason numerically about vectors instead of by origin. With
+it, "delete the vectors this annotation contributed" and "move the
+vectors this event contributed" are exact queries. Points written before
+provenance existed carry no marker; they are reachable only through
+`delete_duplicates_of`, and acquire provenance on the next re-enroll
+(already a documented re-enroll event, like changing the embedder).
 """
 
 from __future__ import annotations
@@ -38,6 +50,15 @@ def _locked(method):
             return method(self, *args, **kwargs)
 
     return wrapper
+
+
+#: Payload `source` markers — who wrote the vector (CLD-84).
+#: "live" is the only population with no on-disk record to rebuild it
+#: from, which is why it must never be swept up by a wholesale rebuild.
+SOURCE_LIVE = "live"  # identity/resolver.py, during camera matching
+SOURCE_ENROLLED = "enrolled"  # identity/enroll.py, from a verified annotation
+SOURCE_MANUAL = "manual"  # an operator correction in the console (CLD-36)
+SOURCE_API = "api"  # the CompreFace-compatible enrollment endpoint
 
 
 @dataclass
@@ -73,15 +94,40 @@ class VectorStore:
             )
 
     @_locked
-    def add(self, collection: str, vector: np.ndarray, identity_id: int) -> None:
+    def add(
+        self,
+        collection: str,
+        vector: np.ndarray,
+        identity_id: int,
+        *,
+        source: str = SOURCE_LIVE,
+        annotation_id: int | None = None,
+        crop_path: str | None = None,
+    ) -> None:
+        """Store one embedding under an identity, with its provenance.
+
+        `source` says which writer added it; `annotation_id` and
+        `crop_path` say what it was made from, where that is known. Both
+        are the handles later surgery uses to find this exact vector
+        again — an annotation moved to another identity takes its vector
+        with it, an event's claim that gets reassigned takes the vectors
+        its crops contributed. Recording them costs a dict key at write
+        time and is the difference between an exact edit and a numeric
+        guess (CLD-84).
+        """
         self.ensure_collection(collection, dim=int(vector.shape[0]))
+        payload: dict = {"identity_id": identity_id, "source": source}
+        if annotation_id is not None:
+            payload["annotation_id"] = int(annotation_id)
+        if crop_path:
+            payload["crop_path"] = str(crop_path)
         self._client.upsert(
             collection_name=collection,
             points=[
                 PointStruct(
                     id=uuid.uuid4().hex,
                     vector=vector.astype(np.float32).tolist(),
-                    payload={"identity_id": identity_id},
+                    payload=payload,
                 )
             ],
         )
@@ -236,35 +282,20 @@ class VectorStore:
             ).count
         )
 
-    @_locked
-    def delete_duplicates_of(
-        self,
-        collection: str,
-        identity_id: int,
-        vectors: list[np.ndarray],
-        min_score: float = 0.999,
-    ) -> int:
-        """Delete an identity's vectors that duplicate one of `vectors`.
+    def _scroll_identity(
+        self, collection: str, identity_id: int, *, with_vectors: bool = False
+    ) -> list:
+        """Every point an identity owns. Callers hold the lock.
 
-        Provenance-free surgery for the identity split. Vector payloads
-        record only `identity_id` — nothing says which stored vector came
-        from which annotation — so an identity's gallery cannot be
-        separated by origin. What *can* be established is numerical
-        identity: re-embedding a stored crop with the same embedder
-        reproduces the vector that crop contributed (deterministic
-        embedder, same image — "one crop, two jobs"), so a stored vector
-        at cosine ≈ 1.0 to a re-embedded crop IS that crop's vector.
-
-        This deletes only those provable duplicates and leaves every
-        other vector alone — crucially the ones live camera matching
-        added, which have no annotation to rebuild them from and would
-        be destroyed by a wholesale delete-and-rebuild.
-
-        Vectors from the embedders are L2-normalized, so the dot product
-        is the cosine similarity. Returns the number deleted.
+        Filtering by identity in the engine and by payload in Python is
+        deliberate: the identity filter is the safety property (a
+        bystander's gallery must never be touched — see
+        `test_split_does_not_touch_another_identitys_matching_vectors`),
+        while the payload predicates vary per caller and are cheap over
+        one identity's handful of vectors.
         """
-        if not vectors or not self._client.collection_exists(collection):
-            return 0
+        if not self._client.collection_exists(collection):
+            return []
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
         points, _ = self._client.scroll(
@@ -277,8 +308,122 @@ class VectorStore:
                 ]
             ),
             limit=10_000,
-            with_vectors=True,
+            with_payload=True,
+            with_vectors=with_vectors,
         )
+        return points
+
+    @_locked
+    def delete_by_annotations(
+        self, collection: str, identity_id: int, annotation_ids
+    ) -> int:
+        """Delete the vectors an identity got from these annotations.
+
+        The exact form of what `delete_duplicates_of` approximates: a
+        point written by `identity/enroll.py` records the annotation it
+        came from, so moving that annotation elsewhere can take its
+        vector with it by origin rather than by numeric coincidence.
+        Only points carrying provenance are eligible — pre-CLD-84 points
+        have no `annotation_id` and stay for the numeric pass. Returns
+        the number deleted.
+        """
+        wanted = {int(a) for a in annotation_ids}
+        if not wanted:
+            return 0
+        doomed = [
+            p.id
+            for p in self._scroll_identity(collection, identity_id)
+            if (p.payload or {}).get("annotation_id") in wanted
+        ]
+        if doomed:
+            self._client.delete(collection_name=collection, points_selector=doomed)
+        return len(doomed)
+
+    @_locked
+    def delete_by_crops(
+        self, collection: str, identity_id: int, crop_paths
+    ) -> int:
+        """Delete the vectors an identity got from these crop files.
+
+        The handle for live-matched vectors, which have no annotation:
+        the resolver records the crop it embedded ("one crop, two jobs"),
+        so an operator repudiating an event's claim can strip exactly the
+        vectors that event taught the wrong identity — the pollution that
+        otherwise keeps re-attracting the same wrong match.
+        """
+        wanted = {str(p) for p in crop_paths if p}
+        if not wanted:
+            return 0
+        doomed = [
+            p.id
+            for p in self._scroll_identity(collection, identity_id)
+            if (p.payload or {}).get("crop_path") in wanted
+        ]
+        if doomed:
+            self._client.delete(collection_name=collection, points_selector=doomed)
+        return len(doomed)
+
+    @_locked
+    def move_by_crops(
+        self, collection: str, old_id: int, new_id: int, crop_paths
+    ) -> int:
+        """Re-point the vectors made from these crops onto another identity.
+
+        A reassignment (CLD-36) is not a deletion: the crops really are
+        the new identity, and the human saying so is stronger evidence
+        than any cosine score — so the vectors move rather than being
+        thrown away, correcting the wrong gallery and teaching the right
+        one in one step.
+        """
+        wanted = {str(p) for p in crop_paths if p}
+        if not wanted:
+            return 0
+        moving = [
+            p.id
+            for p in self._scroll_identity(collection, old_id)
+            if (p.payload or {}).get("crop_path") in wanted
+        ]
+        if moving:
+            self._client.set_payload(
+                collection_name=collection,
+                payload={"identity_id": new_id},
+                points=moving,
+            )
+        return len(moving)
+
+    @_locked
+    def delete_duplicates_of(
+        self,
+        collection: str,
+        identity_id: int,
+        vectors: list[np.ndarray],
+        min_score: float = 0.999,
+    ) -> int:
+        """Delete an identity's vectors that duplicate one of `vectors`.
+
+        The legacy pass, for points written before payloads carried
+        provenance (CLD-84). Those record only `identity_id` — nothing
+        says which stored vector came from which annotation — so that
+        part of a gallery cannot be separated by origin. What *can* be
+        established is numerical identity: re-embedding a stored crop
+        with the same embedder reproduces the vector that crop
+        contributed (deterministic embedder, same image — "one crop, two
+        jobs"), so a stored vector at cosine ≈ 1.0 to a re-embedded crop
+        IS that crop's vector.
+
+        `delete_by_annotations` is the exact form and runs first; this
+        catches whatever it could not identify. It deletes only provable
+        duplicates and leaves every other vector alone — crucially the
+        ones live camera matching added, which have no annotation to
+        rebuild them from and would be destroyed by a wholesale
+        delete-and-rebuild.
+
+        Vectors from the embedders are L2-normalized, so the dot product
+        is the cosine similarity. Returns the number deleted.
+        """
+        if not vectors:
+            return 0
+        points = self._scroll_identity(collection, identity_id, with_vectors=True)
         reference = np.asarray(vectors, dtype=np.float32)
         doomed = []
         for point in points:
@@ -296,19 +441,7 @@ class VectorStore:
     @_locked
     def reassign_identity(self, collection: str, old_id: int, new_id: int) -> int:
         """Move all of one identity's vectors to another (merge)."""
-        if not self._client.collection_exists(collection):
-            return 0
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-        selector = Filter(
-            must=[FieldCondition(key="identity_id", match=MatchValue(value=old_id))]
-        )
-        points, _ = self._client.scroll(
-            collection_name=collection,
-            scroll_filter=selector,
-            limit=10_000,
-            with_payload=True,
-        )
+        points = self._scroll_identity(collection, old_id)
         if not points:
             return 0
         self._client.set_payload(
