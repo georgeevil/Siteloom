@@ -1189,10 +1189,48 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .unique()
                 .all()
             )
+        # Why this page may be empty, which is not the same as "it was
+        # quiet" (CLD-26). Audio never reaches AudioModule on a live
+        # stream: Frame carries only an image, OpenCV's FFmpeg backend
+        # discards audio, and ingest calls _process_audio only for the
+        # file adapter. So on a site of UniFi cameras this table cannot
+        # fill, no matter how loud it gets, and `audio.enabled: true`
+        # changes nothing. Saying so beats an empty table that reads as
+        # a clean bill of health.
+        # Why the table is empty, which is never just "it was quiet".
+        # Mirrors ingest's gates exactly: _process_audio runs only for the
+        # file adapter, and only when the site has audio on and the camera
+        # lists the module. Each reason gets its own message — collapsing
+        # them would mean explaining the live-stream limitation to someone
+        # whose real problem is that audio is switched off.
+        wants_audio = [
+            c.id
+            for c in config.cameras
+            if config.audio.enabled and "audio" in (c.modules or [])
+        ]
+        producing = [
+            c.id for c in config.cameras if c.adapter == "file" and c.id in wants_audio
+        ]
+        if producing:
+            reason = "quiet"
+        elif wants_audio:
+            reason = "inert"  # asked for, but no camera can deliver it
+        elif config.audio.enabled:
+            reason = "unconfigured"  # on site-wide, no camera lists it
+        else:
+            reason = "off"
         return templates.TemplateResponse(
             request,
             "noise.html",
-            {"site_name": config.site_name or config.site_id, "noise_events": rows},
+            {
+                "site_name": config.site_name or config.site_id,
+                "noise_events": rows,
+                "producing_cameras": producing,
+                "empty_reason": reason,
+                # Cameras asked for audio that cannot deliver it — the
+                # module is listed and the live path silently ignores it.
+                "inert_cameras": [c for c in wants_audio if c not in producing],
+            },
         )
 
     @app.get("/stats", response_class=HTMLResponse)
