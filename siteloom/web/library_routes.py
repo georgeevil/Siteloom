@@ -37,6 +37,50 @@ log = logging.getLogger(__name__)
 #: a time; observed via OperationRun like any other long job.
 _reindex_state: dict = {"thread": None}
 
+#: Same, for the import wizard's index step (CLD-27).
+_import_state: dict = {"thread": None}
+
+
+class ImportPathError(ValueError):
+    """A path the wizard will not register, with a reason to show."""
+
+
+def resolve_import_path(raw: str, roots: list[str]) -> Path:
+    """The directory the wizard may register, or raise.
+
+    The CLI takes any path because a shell already has the filesystem.
+    The wizard's whole point is that an operator does not need one, so
+    it must not become an arbitrary-path read of the host through a text
+    input — `../../` or a plain `/etc` would otherwise be a source.
+
+    Containment is the same gate the media route uses, and both halves
+    matter for the same reasons: resolved paths compared with
+    `is_relative_to`, never a string prefix (which would admit
+    `/srv/media-x` under `/srv/media`, CLD-49), and the candidate
+    resolved last so a symlink inside an allowed root pointing out of it
+    is caught rather than trusted.
+    """
+    if not roots:
+        raise ImportPathError(
+            "Web import is off: no library.import_roots are configured."
+        )
+    text = (raw or "").strip()
+    if not text:
+        raise ImportPathError("Enter a directory to import.")
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        raise ImportPathError("Enter an absolute path.")
+    full = candidate.resolve()
+    allowed = [Path(r).expanduser().resolve() for r in roots]
+    if not any(full == root or full.is_relative_to(root) for root in allowed):
+        raise ImportPathError(
+            "That path is outside every configured import root: "
+            + ", ".join(str(r) for r in allowed)
+        )
+    if not full.is_dir():
+        raise ImportPathError(f"{full} is not a directory.")
+    return full
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -352,6 +396,173 @@ def _source_progress(session) -> list[dict]:
 def register(app, templates, Session, config):  # noqa: C901 — route table
     def ctx(**kw) -> dict:
         return {"site_name": config.site_name or config.site_id, **kw}
+
+    # -- import wizard (CLD-27) -------------------------------------------
+
+    def _build_indexer():
+        """A LibraryIndexer wired for the *serving* process.
+
+        The vector store comes from get_shared_store, never a fresh
+        VectorStore: embedded Qdrant takes an exclusive lock per path,
+        and the recognition API and enrollment already hold this one.
+        """
+        from siteloom.identity import IdentityResolver, get_shared_store
+        from siteloom.ingest import build_dispatcher
+        from siteloom.library import LibraryIndexer
+
+        resolver = None
+        if config.identity.enabled:
+            resolver = IdentityResolver(
+                config.identity, get_shared_store(config.identity.vector_db_path)
+            )
+        return LibraryIndexer(config, Session, build_dispatcher(config), resolver)
+
+    def _import_ctx(step: str, **kw) -> dict:
+        roots = list(config.library.import_roots)
+        running = _import_state["thread"]
+        return ctx(
+            step=step,
+            roots=roots,
+            enabled=bool(roots),
+            video_frames=config.library.video_frames,
+            batch_size=config.library.batch_size,
+            identify_default=config.library.identify_on_index,
+            indexing=running is not None and running.is_alive(),
+            **kw,
+        )
+
+    @app.get("/library/import")
+    def import_wizard(request: Request):
+        return templates.TemplateResponse(
+            request, "import.html", _import_ctx("source")
+        )
+
+    @app.post("/library/import/source")
+    def import_add_source(
+        request: Request,
+        path: str = Form(""),
+        kind: str = Form("directory"),
+        name: str = Form(""),
+    ):
+        """Step 1 → 2: register the directory, then scan it.
+
+        Scan is cheap and decodes nothing, so it runs inline here rather
+        than as a job — the operator sees real counts before committing
+        to the expensive step.
+        """
+        try:
+            full = resolve_import_path(path, config.library.import_roots)
+        except ImportPathError as exc:
+            return templates.TemplateResponse(
+                request,
+                "import.html",
+                _import_ctx("source", error=str(exc), path=path, kind=kind),
+                status_code=400,
+            )
+        kind = kind if kind in ("directory", "takeout") else "directory"
+        indexer = _build_indexer()
+        source = indexer.add_source(full, name=name, kind=kind)
+        result = indexer.scan(source.id)
+        with Session() as session:
+            sample = (
+                session.scalars(
+                    select(LibraryItem)
+                    .filter_by(source_id=source.id)
+                    .order_by(LibraryItem.id)
+                    .limit(8)
+                )
+                .unique()
+                .all()
+            )
+        return templates.TemplateResponse(
+            request,
+            "import.html",
+            _import_ctx(
+                "scan", source=source, result=result, sample=sample, kind=kind
+            ),
+        )
+
+    @app.post("/library/import/index")
+    def import_start_index(
+        request: Request,
+        source_id: int = Form(...),
+        identify: str = Form("0"),
+    ):
+        """Step 2 → 3: start the expensive pass in the background.
+
+        Bounded and resumable like every other index run — this starts
+        one batch-driven job whose progress lands in OperationRun, which
+        is what /jobs already renders. Nothing here re-implements a
+        progress bar the platform owns.
+        """
+        thread = _import_state["thread"]
+        if thread is not None and thread.is_alive():
+            return templates.TemplateResponse(
+                request,
+                "import.html",
+                _import_ctx("scan", error="An index run is already going."),
+                status_code=409,
+            )
+        with Session() as session:
+            source = session.get(LibrarySource, source_id)
+            if source is None:
+                raise HTTPException(404)
+            source_name = source.name
+
+        wants_identify = identify == "1"
+
+        def work():
+            from siteloom.progress import ProgressReporter
+
+            try:
+                indexer = _build_indexer()
+                with ProgressReporter(
+                    Session,
+                    "library-index",
+                    target=source_name,
+                    bar=False,
+                    resume_command=(
+                        f"siteloom library index --source {source_id} --all"
+                    ),
+                ) as progress:
+                    indexer.process(
+                        source_id=source_id,
+                        # Same sentinel `library index --all` uses: process
+                        # is batch-committed and interruptible internally,
+                        # so "everything pending" is a limit, not a
+                        # single transaction.
+                        limit=10**9,
+                        identify=wants_identify,
+                        progress=progress,
+                    )
+            except Exception:  # pragma: no cover — surfaced via OperationRun
+                log.exception("library import indexing failed")
+            finally:
+                _import_state["thread"] = None
+
+        thread = threading.Thread(target=work, name="siteloom-import", daemon=True)
+        _import_state["thread"] = thread
+        thread.start()
+        return RedirectResponse(
+            f"/library/import/done?source_id={source_id}", status_code=303
+        )
+
+    @app.get("/library/import/done")
+    def import_done(request: Request, source_id: int):
+        with Session() as session:
+            source = session.get(LibrarySource, source_id)
+            if source is None:
+                raise HTTPException(404)
+            counts = dict(
+                session.execute(
+                    select(LibraryItem.status, func.count())
+                    .filter_by(source_id=source_id)
+                    .group_by(LibraryItem.status)
+                ).all()
+            )
+        return templates.TemplateResponse(
+            request, "import.html", _import_ctx("done", source=source, counts=counts)
+        )
 
     # -- library browser ---------------------------------------------------
 

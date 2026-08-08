@@ -394,6 +394,14 @@ class LibraryConfig(BaseModel):
     # Run identification during indexing (can be deferred to save time
     # on a first pass, then run later).
     identify_on_index: bool = True
+    # Directories the web import wizard (CLD-27) may register sources
+    # under. Empty is the safe default and disables web import entirely —
+    # the CLI still works, because someone with a shell already has the
+    # filesystem. The wizard exists so an operator does not need one, and
+    # that is exactly why it must not hand them an arbitrary-path read of
+    # the host. Paths are resolved and compared with is_relative_to, the
+    # same containment the media route uses.
+    import_roots: list[str] = []
 
 
 class TrainingConfig(BaseModel):
