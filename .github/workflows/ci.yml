@@ -1,0 +1,88 @@
+name: CI
+
+# The repo had no CI at all before CLD-71/CLD-82; this is the whole of it.
+#
+# Two jobs on purpose. `lint` needs nothing but ruff and answers in seconds, so a
+# stray unused import does not cost a seven-minute dependency install to discover.
+# `test` needs the real environment — mypy is run there rather than in `lint`
+# because `ignore_missing_imports` would otherwise silently widen pydantic and
+# SQLAlchemy to Any and the strict seed would be checking a different program.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Deliberately not the full requirements-dev.txt: ruff parses, it does not
+      # import, so torch and the CUDA stack buy this job nothing but six minutes.
+      # The pin is kept in step with requirements-dev.txt by hand.
+      - run: python -m pip install "ruff==0.16.2"
+      - run: ruff check --output-format=github .
+
+  test:
+    name: pytest (3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # opencv-python links libGL/libgthread; the ubuntu runner image does not
+      # guarantee them, and `import cv2` is the first thing conftest.py does, so a
+      # missing .so reads as a mass collection error rather than a packaging problem.
+      - name: System libraries for opencv
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+
+      # The pinned set, matching CLAUDE.md's documented install, so CI fails on the
+      # same resolution developers get. ~6.5 min cold on a clean venv (measured),
+      # ~5.4 GB installed — the linux pins pull the full CUDA wheel stack. See
+      # docs/testing/ci.md for the CPU-wheel follow-up that would cut both.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      # Types before tests: mypy is seconds and its failure mode (a contract module
+      # drifting) is cheaper to read than four minutes of test output.
+      - name: Types
+        run: mypy
+
+      # --cov comes from pyproject addopts. The floor is asserted here, on the whole
+      # suite, because a coverage floor over a subset asserts something untrue.
+      - name: Tests + coverage
+        run: pytest -q --cov-report=xml --cov-report=html --cov-fail-under=70
+
+      - name: Upload coverage HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov/
+          retention-days: 14
