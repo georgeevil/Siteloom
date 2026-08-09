@@ -11,6 +11,15 @@
 # or one person turns into six events, note the window here — that is how
 # the next tracker change gets judged against this one instead of against
 # an anecdote.
+#
+# Coverage matters more than case count, and this corpus is currently
+# weak on it: one camera, one lighting condition. A jump measured in box
+# widths is comparable across cameras, but almost nothing else is —
+# subject distance, IR versus daylight, and how much foliage moves all
+# change what a good setting is. Two clips from *different* cameras test
+# a setting; two from the same one confirm each other. Detection settings
+# cannot even be varied per camera yet (CLD-99), so for now the honest
+# reading of a win here is "this does not hurt on this camera".
 
 sample_fps: 5.0
 
