@@ -1,0 +1,71 @@
+# Tracker regression corpus (CLD-98).
+#
+# The clips are NOT in the repository — they are minutes of real footage
+# from a residential property, and they are large. What is committed is
+# the *definition*: which minute, from which camera, and what failure it
+# is a case of. `scripts/track_ab.py fetch` pulls each one from UniFi
+# Protect into ~/.cache/siteloom/track-corpus/ and skips what it already
+# has, so the corpus reconstitutes on any machine with NVR access.
+#
+# Adding a case is the point. When an event turns out to hold two people,
+# or one person turns into six events, note the window here — that is how
+# the next tracker change gets judged against this one instead of against
+# an anecdote.
+
+sample_fps: 5.0
+
+# A gap longer than this is a re-acquisition rather than tracking. Two
+# seconds at 5 fps is ten missed frames: long enough that the motion
+# prediction, not the evidence, is what connected the two halves.
+bridge_gap_s: 2.0
+
+clips:
+  - id: event-1392-two-people
+    camera: backyard-puerta
+    # Naive UTC, matching what ingest stores. Padded either side of the
+    # event so the hole has context around it.
+    start: 2026-08-06 23:33:30
+    end: 2026-08-06 23:34:30
+    case: >
+      One ByteTrack track (id 42) held 108 detections and two different
+      people: a towel-wrapped figure until 23:33:48, a shirtless man from
+      23:33:54. It bridged a 6.2s detection hole with a 165px jump — about
+      1.7 box widths — and produced fifteen identity claims, all wrong.
+      Not a stitching failure: every crop carries the same track id.
+    expect:
+      # The shipped config scores 8 tracks / 0 implausible bridges here.
+      # The headroom is deliberate: this must fail on a regression, not
+      # on a model that detects one extra frame.
+      max_implausible_bridges: 0
+      max_tracks: 12
+
+# Named tracker configurations. `shipped` is whatever the code defaults
+# to, so it moves when TRACKER_DEFAULTS moves — that is the baseline
+# every candidate is compared against.
+configs:
+  shipped: {}
+
+  # Ultralytics' own default. Its track_buffer of 30 assumes 30 fps
+  # video; at the few fps we sample it is six seconds of a dead track
+  # waiting to adopt a stranger. Kept as a case so the regression is
+  # visible rather than remembered.
+  upstream-defaults:
+    track_buffer: 30
+
+  # Rejected in CLD-97: removes every bridge by fragmenting into ~4x the
+  # tracks. Kept so the next person to propose it sees why.
+  loose-match:
+    track_buffer: 10
+    match_thresh: 0.5
+
+  # Also rejected in CLD-97: scored identically to plain ByteTrack, so
+  # the appearance-aware tracker that looks obviously right bought
+  # nothing. Worth re-running whenever ultralytics changes its ReID
+  # backend — "no benefit" is a measurement, not a permanent fact.
+  botsort-reid:
+    tracker_type: botsort
+    gmc_method: none          # fixed cameras: optical flow is pure cost
+    with_reid: true
+    model: auto               # detector features, no extra download
+    proximity_thresh: 0.5
+    appearance_thresh: 0.8
