@@ -201,20 +201,56 @@ def check_detection_model(report: Report, config) -> None:
 
 
 def check_face_models(report: Report, config) -> None:
-    from siteloom.identity.embedders import MODELS_DIR
+    """Cached weights are verified by digest, not just counted.
 
-    wanted = ["face_detection_yunet", "face_recognition_sface"]
-    cache = Path(MODELS_DIR)
-    found = [w for w in wanted if any(cache.glob(f"{w}*.onnx"))]
-    if len(found) == len(wanted):
-        report.add("face models", OK, f"cached in {cache}")
-    else:
+    The cache is a directory any local process can write and these files
+    decide identity, so "present" is not the question — "is it the file
+    we pinned?" is. Read-only by design: this reports, `ensure_model`
+    deletes. An unverifiable file is a FAIL, not a WARN; the face path
+    will refuse to load it, so the deployment is not fit to run.
+    """
+    from siteloom.identity import embedders
+
+    cache = embedders.models_dir()
+    try:
+        statuses = [embedders.check_cached_model(s, cache) for s in embedders.FACE_MODELS]
+    except Exception as exc:  # unreadable directory, exotic filesystem
+        report.add(
+            "face models",
+            FAIL,
+            f"{cache} could not be inspected: {type(exc).__name__}: {exc}",
+            f"check permissions on {cache}, or set SITELOOM_MODELS_DIR to a "
+            "directory holding verified weights",
+        )
+        return
+
+    bad = [s for s in statuses if s.state in ("corrupt", "unreadable")]
+    if bad:
+        report.add(
+            "face models",
+            FAIL,
+            "; ".join(f"{s.path.name}: {s.detail}" for s in bad),
+            "delete "
+            + " ".join(str(s.path) for s in bad)
+            + " and re-run to fetch a clean copy — a digest mismatch is a "
+            "corrupted download, a tampered cache, or an upstream that "
+            "republished the file; siteloom will not load it either way",
+        )
+        return
+
+    missing = [s for s in statuses if s.state == "missing"]
+    if missing:
         report.add(
             "face models",
             WARN,
-            f"{len(found)}/{len(wanted)} cached in {cache}",
-            "downloaded automatically on first face operation (needs network)",
+            f"{len(statuses) - len(missing)}/{len(statuses)} cached in {cache}",
+            "downloaded and verified automatically on first face operation "
+            "(needs network); for an offline install pre-seed that directory "
+            "or set SITELOOM_MODELS_DIR",
         )
+        return
+
+    report.add("face models", OK, f"{len(statuses)}/{len(statuses)} verified in {cache}")
 
 
 def check_plate_ocr(report: Report, config) -> None:

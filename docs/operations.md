@@ -21,14 +21,71 @@ siteloom doctor --config site.yaml --json
 ```
 
 Checks the database and its schema, the media directory (writable, and space
-left), the vector store (openable — *and who is holding it*), detector and face
-model weights, optional plate-OCR dependencies, abandoned jobs, and integration
-config coherence. Every check reports a remedy, and one broken check never hides
+left), the vector store (openable — *and who is holding it*), detector weights,
+face weights (by SHA-256, see below), optional plate-OCR dependencies, abandoned
+jobs, and integration config coherence. Every check reports a remedy, and one broken check never hides
 the others.
 
 It is deliberately safe to run at any time, including as an `ExecStartPre` or a
 monitoring probe. Exit code 1 means at least one check failed; warnings alone
 still exit 0.
+
+## Model weights and their digests
+
+The face pipeline downloads two ONNX files from opencv_zoo on first use and
+caches them in `~/.cache/siteloom/models`:
+
+| file | SHA-256 | size |
+| --- | --- | --- |
+| `face_detection_yunet_2023mar.onnx` | `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` | 232,589 B |
+| `face_recognition_sface_2021dec.onnx` | `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79` | 38,696,353 B |
+
+Both digests are pinned in `siteloom/identity/embedders.py` and **verified on
+every load, cached or freshly downloaded** — not only on the run that fetched
+them. The cache is a directory in the operator's home that any local process can
+write, and these weights decide who the system thinks a face belongs to, so
+"the file is present and roughly the right size" is not the question. A file
+that fails is deleted before anything else happens; leaving it would mean the
+next run loads it without even trying to re-download.
+
+`siteloom doctor` verifies the cache in place and reports, but never deletes —
+it stays safe to run as an `ExecStartPre`.
+
+**A mismatch is one of three things.** A corrupted or interrupted download (a
+clean re-download fixes it, and that is what deleting the file achieves); a
+cache someone else wrote to; or an upstream that republished the artifact under
+the same name. Do not edit the pinned digest to make the error go away — that
+turns the check off. Confirm the new file against opencv_zoo's own git-lfs
+pointer first, which is an independent source from the blob download:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/\
+face_detection_yunet/face_detection_yunet_2023mar.onnx   # prints "oid sha256:…"
+```
+
+### Pre-seeding an offline or air-gapped install
+
+A verified cached file is used without touching the network, so a host with no
+outbound access works as long as the weights are already there. Copy them from a
+machine that has them (or download and check them by hand), then either drop
+them in `~/.cache/siteloom/models` or point `SITELOOM_MODELS_DIR` at the
+directory holding them:
+
+```bash
+mkdir -p /opt/siteloom/models && cp face_*_2021dec.onnx face_*_2023mar.onnx /opt/siteloom/models
+shasum -a 256 /opt/siteloom/models/*.onnx        # compare with the table above
+export SITELOOM_MODELS_DIR=/opt/siteloom/models  # set it in the service unit too
+siteloom doctor --config site.yaml               # "face models  2/2 verified in …"
+```
+
+The env var applies to `serve`, `frigate`, and every CLI job; set it in the
+launchd plist / systemd unit as well as your shell, or a service will fall back
+to the home cache and try to download.
+
+The YOLO detector weights are a separate story: ultralytics downloads
+`detection.model` itself, inside its own library, and Siteloom never sees that
+transfer — so it is **not** covered by any of the above. Point
+`detection.model` at a local path you vetted if that matters to you.
 
 ## Watching a running server
 
