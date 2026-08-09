@@ -262,24 +262,44 @@ def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
     # by machine agreement is a floor cleared by Google's people-tags
     # agreeing with a face detector — which may well be fine, but it is
     # not human sign-off and should never be mistaken for it.
-    if "source" in cols and "identity_id" in cols:
+    if "proposal_basis" in cols and "identity_id" in cols:
         rule("Who verified the training data")
         rows = conn.execute(
-            "SELECT source, COUNT(*) AS n FROM annotations "
-            "WHERE identity_id IS NOT NULL AND class_name='face' "
-            "AND verified=1 AND rejected=0 GROUP BY source ORDER BY n DESC"
+            "SELECT COALESCE(proposal_basis, '') AS basis, COUNT(*) AS n "
+            "FROM annotations WHERE identity_id IS NOT NULL AND class_name='face' "
+            "AND verified=1 AND rejected=0 GROUP BY basis"
         ).fetchall()
-        total = sum(r["n"] for r in rows)
-        for r in rows:
-            share = (r["n"] / total * 100) if total else 0
-            print(f"      {str(r['source']):<12} {r['n']:>8}  ({share:.0f}%)")
-        human = next((r["n"] for r in rows if r["source"] == "human"), 0)
-        if total and not human:
+        by_basis = {r["basis"]: r["n"] for r in rows}
+        total = sum(by_basis.values())
+        # Pass 1 is the only thing the importer auto-verifies
+        # (`verified=certain and self.auto_verify_unambiguous`). Anything
+        # else carrying verified=1 was confirmed by a person in the UI,
+        # which never rewrites `source`.
+        auto = by_basis.get("unambiguous", 0)
+        human = total - auto
+        if total:
+            print(f"      importer auto-verified  {auto:>8}  ({auto / total * 100:.0f}%)")
+            print(f"      human-confirmed         {human:>8}  ({human / total * 100:.0f}%)")
+        rejected = conn.execute(
+            "SELECT COUNT(*) AS n FROM annotations "
+            "WHERE class_name='face' AND rejected=1"
+        ).fetchone()["n"]
+        if rejected:
+            print(f"      human-rejected          {rejected:>8}  (excluded from training)")
+        if auto:
             print(
-                "\n  No annotation in the training set was verified by a person.\n"
-                "  Every sample is an importer auto-verification, which\n"
-                "  training/dataset.py reads as ground truth regardless."
+                f"\n  {auto} sample{'' if auto == 1 else 's'} cleared pass 1 — one face,\n"
+                "  one Google people-tag — and were auto-verified without anyone\n"
+                "  looking. training/dataset.py reads them as ground truth exactly\n"
+                "  like the human-confirmed ones."
             )
+        # The split above is inferred, not recorded, and saying so matters:
+        # it holds only while pass 1 is the sole auto-verifying path.
+        print(
+            "\n  Note: nothing stores *who* verified a row. The split above is\n"
+            "  inferred from proposal_basis — `source` stays \"import\" after a\n"
+            "  human confirms, so it cannot answer this."
+        )
 
     print(
         "\n  Only the confirmed-identity row is training data — training/dataset.py\n"
