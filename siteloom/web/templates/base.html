@@ -236,22 +236,12 @@
       <span class="sl-site-name">{{ site_name }}</span>
     </button>
     <nav class="sl-nav">
-      {% for href, label, code in [
-        ("/", "Events", "EV"),
-        ("/live", "Live view", "LV"),
-        ("/library", "Media library", "MD"),
-        ("/identities", "Identities", "ID"),
-        ("/classes", "Classes", "CL"),
-        ("/training", "Training data", "TR"),
-        ("/stats", "Accuracy", "AC"),
-        ("/jobs", "Jobs", "JB"),
-        ("/noise", "Noise", "NO"),
-      ] %}
-      {% set active = (path == "/" or path.startswith("/events"))
-         if href == "/" else (path == href or path.startswith(href ~ "/")) %}
-      <a class="sl-nav-item{% if active %} active{% endif %}" href="{{ href }}">
-        <span class="sl-code">{{ code }}</span>
-        <span class="sl-label">{{ label }}</span>
+      {# Declared in web/nav.py, next to the routes each entry links to. #}
+      {% for item in nav_items() %}
+      <a class="sl-nav-item{% if item.active_for(path) %} active{% endif %}"
+         href="{{ item.href }}">
+        <span class="sl-code">{{ item.code }}</span>
+        <span class="sl-label">{{ item.label }}</span>
       </a>
       {% endfor %}
     </nav>
