@@ -8,6 +8,7 @@ improves one of them. Argument cannot settle that; this can.
     scripts/track_ab.py run                      # every config, every clip
     scripts/track_ab.py run --config botsort-reid
     scripts/track_ab.py check                    # regression gate, exits 1
+    scripts/track_ab.py suggest                  # clips operators have flagged
 
 The corpus is `config/track_corpus.yaml`: which minute of which camera,
 and what failure it is a case of. Footage is cached under
@@ -275,9 +276,76 @@ def check(corpus: dict, config_path: str) -> int:
     return 0
 
 
+# -- suggest --------------------------------------------------------------
+
+
+def suggest(corpus: dict, config_path: str) -> int:
+    """Print corpus entries for events operators marked multi-subject.
+
+    Closes the loop the marker exists for (CLD-103). An operator flags
+    "more than one person here" while reviewing; that mark already
+    carries a camera and a time window, which is a clip definition. This
+    turns them into YAML to paste, rather than asking anyone to translate
+    a database row into a config by hand.
+
+    Prints rather than writes: which flagged events are worth keeping as
+    permanent regression cases is a judgement, and a corpus that grows
+    itself would fill with duplicates of the same easy failure.
+    """
+    from datetime import timedelta
+
+    from siteloom.config import load_config
+    from siteloom.store import Event, get_session, make_engine
+
+    cfg = load_config(config_path)
+    have = {c["id"] for c in corpus["clips"]}
+    Session = get_session(make_engine(cfg.storage.db_url))
+    with Session() as session:
+        flagged = (
+            session.query(Event)
+            .filter(Event.multi_subject.is_(True))
+            .order_by(Event.multi_subject_at.desc())
+            .limit(50)
+            .all()
+        )
+        rows = [
+            (e.id, e.camera_id, e.first_seen, e.last_seen, e.detection_count)
+            for e in flagged
+        ]
+
+    if not rows:
+        print("No events flagged as multi-subject yet.")
+        print("Mark one with \"more than one person here\" on an event page.")
+        return 0
+
+    print(f"# {len(rows)} flagged event(s). Paste what is worth keeping into")
+    print(f"# {DEFAULT_CORPUS.name}, then run `track_ab.py fetch`.\n")
+    for event_id, camera, first, last, dets in rows:
+        clip_id = f"event-{event_id}-multi-subject"
+        if clip_id in have:
+            print(f"# {clip_id}: already in the corpus\n")
+            continue
+        # Pad, because the interesting part is usually the approach and
+        # the hole rather than the detections themselves.
+        start = (first - timedelta(seconds=15)).replace(microsecond=0)
+        end = (last + timedelta(seconds=15)).replace(microsecond=0)
+        print(f"""  - id: {clip_id}
+    camera: {camera}
+    start: {start}
+    end: {end}
+    case: >
+      Operator marked event {event_id} as containing more than one
+      subject: {dets} detections under a single track. Describe what was
+      actually in it before relying on this as a regression case.
+    expect:
+      max_implausible_bridges: 0
+""")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("command", choices=("fetch", "run", "check"))
+    parser.add_argument("command", choices=("fetch", "run", "check", "suggest"))
     parser.add_argument("--corpus", default=str(DEFAULT_CORPUS))
     parser.add_argument("--config", dest="site_config", default="site.yaml",
                         help="site config, for camera/NVR details and the "
@@ -292,6 +360,8 @@ def main() -> int:
         return fetch(corpus, args.site_config)
     if args.command == "check":
         return check(corpus, args.site_config)
+    if args.command == "suggest":
+        return suggest(corpus, args.site_config)
     return run(corpus, args.site_config, args.only, args.out)
 
 

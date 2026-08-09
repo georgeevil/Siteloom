@@ -174,3 +174,39 @@ def revert_learned_plate(session, link, event_id: int) -> None:
             identity.id,
         )
         identity.plate = None
+
+
+def unlink_claim(session, vectors, event, link, *, when) -> int:
+    """Detach one identity claim from an event, and undo what it taught.
+
+    Extracted so the single-claim route and the bulk action (CLD-103)
+    cannot drift. The row surviving with its identity, similarity and
+    matched_by intact is the record of what the system got wrong;
+    negatives are data. What must not survive is the claim's *effect* on
+    matching — a gallery polluted by this event keeps re-attracting the
+    same wrong match, so the vectors this event contributed are removed
+    and any plate it taught is reverted.
+
+    Returns the number of vectors removed, for the caller's log.
+    """
+    from siteloom.store import Identity
+
+    identity = session.get(Identity, link.identity_id)
+    if identity is None:
+        link.unlinked_at = when
+        return 0
+    removed = vectors.delete_by_crops(
+        identity.identifier_key,
+        identity.id,
+        event_crop_paths(session, event),
+    )
+    link.unlinked_at = when
+    # Unlink is the operator asserting the pairing never held, which is a
+    # stronger statement than a "wrong" verdict — but it implies one, and
+    # /stats counts verdicts.
+    link.verdict = "wrong"
+    link.verdict_at = when
+    revert_learned_plate(session, link, event.id)
+    identity.appearance_count = max(identity.appearance_count - 1, 0)
+    refresh_vector_count(session, vectors, identity)
+    return removed

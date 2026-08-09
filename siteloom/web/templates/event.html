@@ -9,47 +9,135 @@
   {% if event.track_id is not none %}<span class="muted" style="font-size:0.8em;">track {{ event.track_id }}</span>{% endif %}
 </h2>
 
+{#
+  One row per claim (CLD-103). These used to be inline spans inside a
+  single <p>, so fifteen claims flowed like text and a row's controls
+  wrapped onto the next line — you could not tell which "unlink" belonged
+  to which identity, which is precisely the moment you most need to.
+
+  The reassign picker is behind a <details> because rendering fifteen
+  full identity selects is most of the clutter and almost none of the
+  use: the common actions are judging and detaching.
+#}
 {% if identity_links %}
-<p>
+<style>
+  .claims { border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden; margin: 10px 0; }
+  .claim {
+    display: grid; grid-template-columns: minmax(0,1fr) auto auto;
+    gap: 10px; align-items: center; padding: 7px 10px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .claim:last-child { border-bottom: 0; }
+  .claim.is-wrong { opacity: .6; }
+  .claim .who { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+  .claim .sim { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .claim form { display: inline; margin: 0; }
+  .claim .acts { display: flex; gap: 4px; align-items: center; }
+  .claims-bar {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 10px; background: var(--raised);
+    border-bottom: 1px solid var(--hairline); font-size: 12px;
+  }
+  .claims-bar .count { color: var(--muted); margin-right: auto; }
+  details.pick { display: inline; }
+  details.pick > summary {
+    cursor: pointer; list-style: none; font-size: 11px; color: var(--muted);
+    border: 1px solid var(--control-border); border-radius: 6px; padding: 3px 8px;
+  }
+  details.pick > summary::-webkit-details-marker { display: none; }
+  details.pick[open] > summary { color: var(--text); }
+</style>
+
+<div class="claims">
+  {# Bulk, because a track that absorbed two people accumulates a dozen
+     claims and clearing them one at a time is the actual work. #}
+  <div class="claims-bar">
+    <span class="count">{{ identity_links | length }} identity claim{{ '' if identity_links | length == 1 else 's' }}</span>
+    {% if identity_links | length > 1 %}
+    <form method="post" action="/events/{{ event.id }}/identity/bulk">
+      <input type="hidden" name="action" value="unlink_wrong">
+      <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+      <button type="submit" title="Detach every claim already marked wrong">unlink all marked wrong</button>
+    </form>
+    <form method="post" action="/events/{{ event.id }}/identity/bulk">
+      <input type="hidden" name="action" value="unlink_all">
+      <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+      <button type="submit" title="Detach every claim on this event">unlink all</button>
+    </form>
+    {% endif %}
+  </div>
+
   {% for l in identity_links %}
-    <span style="white-space:nowrap;">
-    <a href="/identities/{{ l.identity.id }}">
-      <span class="badge {% if not l.identity.label %}unknown{% endif %}">{{ l.identity.display_name }}</span></a>
-    {% if l.identity.plate %}<span class="badge plate">{{ l.identity.plate }}</span>{% endif %}
-    <span class="muted" style="font-size:0.8rem;">({{ l.identity.identifier_key }}, sim {{ '%.2f'|format(l.similarity) }})</span>
-    <form class="verdict" method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/verdict">
-      <button name="verdict" value="{% if l.verdict == 'confirmed' %}clear{% else %}confirmed{% endif %}"
-              class="ok {% if l.verdict == 'confirmed' %}on{% endif %}"
-              title="{% if l.verdict == 'confirmed' %}confirmed — click to clear{% else %}mark correct{% endif %}">&#10003;</button>
-      <button name="verdict" value="{% if l.verdict == 'wrong' %}clear{% else %}wrong{% endif %}"
-              class="bad {% if l.verdict == 'wrong' %}on{% endif %}"
-              title="{% if l.verdict == 'wrong' %}marked wrong — click to clear{% else %}mark wrong{% endif %}">&#10007;</button>
-    </form>
-    {# Fixing the claim rather than grading it (CLD-36). #}
-    <form class="verdict" method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/reassign">
-      <input type="hidden" name="identifier" value="{{ l.identifier_key or l.identity.identifier_key }}">
-      <select name="identity_id" aria-label="Reassign to">
-        {% for i in candidates if i.id != l.identity_id %}
-          <option value="{{ i.id }}">{{ i.display_name }}</option>
-        {% endfor %}
-        <option value="new">+ new identity</option>
-      </select>
-      <button type="submit" title="This event was someone else">reassign</button>
-    </form>
-    <form class="verdict" method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/unlink">
-      <button type="submit" title="This event was not this identity">unlink</button>
-    </form>
+  <div class="claim{% if l.verdict == 'wrong' %} is-wrong{% endif %}">
+    <span class="who">
+      <a href="/identities/{{ l.identity.id }}">
+        <span class="badge {% if not l.identity.label %}unknown{% endif %}">{{ l.identity.display_name }}</span></a>
+      {% if l.identity.plate %}<span class="badge plate">{{ l.identity.plate }}</span>{% endif %}
+      <span class="sim">{{ l.identity.identifier_key }} · {{ '%.2f'|format(l.similarity) }}</span>
     </span>
+
+    <span class="acts">
+      <form method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/verdict">
+        <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+        <button name="verdict" value="{% if l.verdict == 'confirmed' %}clear{% else %}confirmed{% endif %}"
+                class="ok {% if l.verdict == 'confirmed' %}on{% endif %}"
+                title="{% if l.verdict == 'confirmed' %}confirmed — click to clear{% else %}mark correct{% endif %}">&#10003;</button>
+        <button name="verdict" value="{% if l.verdict == 'wrong' %}clear{% else %}wrong{% endif %}"
+                class="bad {% if l.verdict == 'wrong' %}on{% endif %}"
+                title="{% if l.verdict == 'wrong' %}marked wrong — click to clear{% else %}mark wrong{% endif %}">&#10007;</button>
+      </form>
+    </span>
+
+    <span class="acts">
+      {% if identity_links | length > 1 %}
+      <form method="post" action="/events/{{ event.id }}/identity/bulk">
+        <input type="hidden" name="action" value="keep_only">
+        <input type="hidden" name="keep_id" value="{{ l.id }}">
+        <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+        <button type="submit" title="Detach every other claim and keep this one">keep only</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/unlink">
+        <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+        <button type="submit" title="This event was not this identity">unlink</button>
+      </form>
+      {# Fixing the claim rather than grading it (CLD-36). #}
+      <details class="pick">
+        <summary>reassign</summary>
+        <form method="post" action="/events/{{ event.id }}/identity/{{ l.id }}/reassign">
+          <input type="hidden" name="identifier" value="{{ l.identifier_key or l.identity.identifier_key }}">
+          <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+          <select name="identity_id" aria-label="Reassign to">
+            {% for i in candidates if i.id != l.identity_id %}
+              <option value="{{ i.id }}">{{ i.display_name }}</option>
+            {% endfor %}
+            <option value="new">+ new identity</option>
+          </select>
+          <button type="submit" title="This event was someone else">move</button>
+        </form>
+      </details>
+    </span>
+  </div>
   {% endfor %}
-</p>
+</div>
 {% endif %}
 
-{% for l in unlinked %}
-<p class="muted" style="font-size:0.85rem;">
-  unlinked from {{ l.identity.display_name }}
-  {% if l.unlinked_at %}({{ l.unlinked_at.strftime('%Y-%m-%d %H:%M') }}){% endif %}
-</p>
-{% endfor %}
+{# Seven lines of "unlinked from unknown-face-111" crowded out the part
+   an operator can act on. The history matters — re-attaching is how a
+   correction gets corrected — but it is reference, not workspace. #}
+{% if unlinked %}
+<details style="margin: 6px 0 10px;">
+  <summary class="muted" style="font-size:0.85rem; cursor:pointer;">
+    {{ unlinked | length }} previously unlinked
+  </summary>
+  <div class="muted" style="font-size:0.8rem; line-height:1.7; margin-top:4px;">
+    {% for l in unlinked %}
+      {{ l.identity.display_name }}{% if l.unlinked_at %}
+      <span class="mono">({{ l.unlinked_at.strftime('%m-%d %H:%M') }})</span>{% endif %}{{ "," if not loop.last }}
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
 
 {# Say who this event actually was — the half verdicts never had. #}
 <form class="verdict" method="post" action="/events/{{ event.id }}/identity"
@@ -79,6 +167,28 @@
   {% else %}
     <button name="missed" value="1"
             title="an identifiable face/plate was present but nothing was claimed">mark missed identity</button>
+  {% endif %}
+</form>
+
+{# A different statement from every control above it: those grade a
+   claim, this says the event itself is wrong. It is also the cheapest
+   corpus contribution there is — the mark carries a camera and a time
+   window, which is exactly a tracker-corpus clip, and the operator is
+   already here. `scripts/track_ab.py suggest` reads these. #}
+<form class="verdict" method="post" action="/events/{{ event.id }}/multi-subject"
+      style="margin:0.3rem 0 0.6rem;">
+  <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+  {% if event.multi_subject %}
+    <span class="badge missed">more than one person</span>
+    <button name="multi" value="0" title="clear the mark">undo</button>
+    <span class="muted" style="font-size:0.8rem;">
+      recorded as a tracking failure — this window can be replayed against
+      new tracker settings
+    </span>
+  {% else %}
+    <button name="multi" value="1"
+            title="These crops are not all the same subject — the track absorbed more than one person">
+      more than one person here</button>
   {% endif %}
 </form>
 <p class="muted">
