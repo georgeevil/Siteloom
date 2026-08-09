@@ -234,3 +234,6 @@ identity_db/
 site.yaml
 archive.yaml
 .playwright-mcp/
+
+# Agent worktrees created by Claude Code (isolated checkouts, never content)
+.claude/worktrees/

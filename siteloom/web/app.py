@@ -29,7 +29,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.web import auth, identity_ops
+from siteloom.web import auth, identity_ops, nav
 from siteloom.store import (
     Camera,
     Detection,
@@ -241,6 +241,9 @@ def _identity_candidates(session) -> list[Identity]:
 def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     app = FastAPI(title="Siteloom")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # The sidebar is data (web/nav.py) and reached as a Jinja global, so a
+    # screen cannot render chrome-less by forgetting to pass it.
+    templates.env.globals["nav_items"] = nav.items
     # Vendored fonts and anything else the console needs to render without
     # reaching the internet (CLD-86). Mounted rather than routed: this
     # serves a fixed directory shipped with the package, not user paths,
@@ -1262,9 +1265,18 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             }
         return templates.TemplateResponse(request, "stats.html", context)
 
-    from siteloom.web import library_routes
+    # Route modules split out of this file to keep each readable. Each
+    # takes the same four arguments, registers its own routes onto this
+    # app, and declares its own sidebar entry via web/nav.add().
+    from siteloom.web import (
+        backfill_routes,
+        bookings_routes,
+        library_routes,
+        train_routes,
+    )
 
-    library_routes.register(app, templates, Session, config)
+    for module in (library_routes, bookings_routes, backfill_routes, train_routes):
+        module.register(app, templates, Session, config)
 
     if config.integrations.recognition_api.enabled:
         from siteloom.web import recognition_api

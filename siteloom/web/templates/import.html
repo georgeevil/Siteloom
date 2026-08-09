@@ -164,6 +164,58 @@
           <strong>{{ source.name }}</strong>
           <span class="roots">{{ source.path }}</span>
         </p>
+        {% if preview %}
+        {# ------------------------------------------- Takeout source #}
+        <div class="facts" style="margin-top:14px;">
+          <div class="fact"><b>{{ preview.media }}</b><span>media files</span></div>
+          <div class="fact"><b>{{ preview.sidecars }}</b><span>JSON sidecars</span></div>
+          <div class="fact"><b>{{ preview.derivatives }}</b><span>edited copies skipped</span></div>
+        </div>
+
+        {% if not preview.looks_like_takeout %}
+        <div class="amber">
+          No JSON sidecars here, so there are no <code>people</code> tags to
+          read and the import has nothing to propose. If this is an ordinary
+          folder of photos, go back and choose <strong>Directory</strong>.
+        </div>
+        {% endif %}
+
+        <div class="fld" style="margin-top:18px;">
+          <label>Unambiguous assignments</label>
+          <label class="toggle-row">
+            <input type="hidden" name="auto_verify" value="0">
+            <input type="checkbox" name="auto_verify" value="1">
+            Mark 1&nbsp;face&nbsp;+&nbsp;1&nbsp;name assignments as verified
+          </label>
+          <p class="roots" style="margin-top:6px;">
+            Off here, unlike the CLI. <code>verified</code> is what a training
+            export reads as ground truth, and these are the importer's
+            judgement, not yours — leaving it off means a fine-tune trains on
+            what a human confirmed. It changes nothing about import quality:
+            the pass-2 gallery is built from the assignments either way.
+          </p>
+        </div>
+
+        {% if preview.sample %}
+        <div class="files">
+          {% for path in preview.sample %}
+          <div><span class="k">{{ path.suffix | replace('.','') }}</span><span class="p">{{ path }}</span></div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="wiz-foot">
+        <span class="note">
+          Reads sidecar people tags, detects faces, then proposes names in two
+          passes. Long and resumable — it runs as a job you can watch or stop.
+        </span>
+        <a class="btn-outline sm" href="/library/import">&larr; Back</a>
+        <button type="submit" class="btn-primary"
+                {{ 'disabled' if indexing }}>Import {{ preview.media }} files &rarr;</button>
+      </div>
+
+        {% else %}
+        {# ----------------------------------------- ordinary directory #}
         <div class="facts" style="margin-top:14px;">
           <div class="fact"><b>{{ result.added }}</b><span>added</span></div>
           <div class="fact"><b>{{ result.updated }}</b><span>changed</span></div>
@@ -201,16 +253,35 @@
         <button type="submit" class="btn-primary"
                 {{ 'disabled' if indexing }}>Index {{ result.total_pending }} items &rarr;</button>
       </div>
+        {% endif %}
     </form>
 
     {# ---------------------------------------------------- step 3 #}
     {% else %}
     <div class="wiz-body">
       <div class="disc">&#10003;</div>
-      <h3 style="margin:0 0 6px;font-size:15px;">Source added, indexing started</h3>
+      <h3 style="margin:0 0 6px;font-size:15px;">
+        Source added, {{ 'import' if faces else 'indexing' }} started
+      </h3>
       <p style="font-size:13px;color:var(--muted);margin:0;">
         <strong>{{ source.name }}</strong> <span class="roots">{{ source.path }}</span>
       </p>
+
+      {% if faces %}
+      {# A Takeout import attaches face annotations without ever marking an
+         item `indexed`, so the ordinary status counts would report a
+         working run as "0 indexed, 26k pending". These are its numbers. #}
+      <div class="facts" style="margin-top:16px;">
+        <div class="fact"><b>{{ faces.detected }}</b><span>faces found</span></div>
+        <div class="fact"><b>{{ faces.proposed }}</b><span>names proposed</span></div>
+        <div class="fact"><b>{{ faces.verified }}</b><span>auto-verified</span></div>
+      </div>
+      <div class="amber">
+        Proposals are guesses. They sit in <code>proposed_name</code> and reach
+        neither the identity store nor a training export until someone confirms
+        them &mdash; that is what the review queue is for.
+      </div>
+      {% else %}
       <div class="facts" style="margin-top:16px;">
         <div class="fact"><b>{{ counts.get('indexed', 0) }}</b><span>indexed</span></div>
         <div class="fact"><b>{{ counts.get('pending', 0) }}</b><span>pending</span></div>
@@ -226,10 +297,12 @@
         a corrupt file fails identically on every pass.
       </div>
       {% endif %}
+      {% endif %}
     </div>
     <div class="wiz-foot">
       <span class="note">Progress, ETA and interruption live on the jobs screen.</span>
-      <a class="btn-outline sm" href="/library">Library</a>
+      <a class="btn-outline sm" href="{{ '/training' if faces else '/library' }}">
+        {{ 'Review queue' if faces else 'Library' }}</a>
       <a class="btn-primary" href="/jobs">Watch the job &rarr;</a>
     </div>
     {% endif %}

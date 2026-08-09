@@ -462,6 +462,25 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         kind = kind if kind in ("directory", "takeout") else "directory"
         indexer = _build_indexer()
         source = indexer.add_source(full, name=name, kind=kind)
+
+        if kind == "takeout":
+            # Deliberately NOT indexer.scan(). A Takeout tree's `-edited`
+            # derivatives are skipped by import_tree but would be
+            # registered by scan, left pending forever, and eventually
+            # picked up by a later `library index` — seeding the gallery
+            # with near-duplicates. preview_tree registers nothing and
+            # counts what the import will actually take.
+            from siteloom.library.takeout import preview_tree
+
+            preview = preview_tree(full)
+            return templates.TemplateResponse(
+                request,
+                "import.html",
+                _import_ctx(
+                    "scan", source=source, preview=preview, kind=kind
+                ),
+            )
+
         result = indexer.scan(source.id)
         with Session() as session:
             sample = (
@@ -487,6 +506,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         request: Request,
         source_id: int = Form(...),
         identify: str = Form("0"),
+        auto_verify: str = Form("0"),
     ):
         """Step 2 → 3: start the expensive pass in the background.
 
@@ -494,6 +514,13 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         one batch-driven job whose progress lands in OperationRun, which
         is what /jobs already renders. Nothing here re-implements a
         progress bar the platform owns.
+
+        Which pass runs is decided by the source kind, not by this
+        endpoint's caller. A Takeout source gets TakeoutImporter: sidecar
+        people tags, face detection, two-pass name proposals. Anything
+        else gets the ordinary indexer. Choosing "Google Takeout" in step
+        1 and then running a plain directory index — which is what this
+        did before CLD-92 — succeeds silently and proposes nothing.
         """
         thread = _import_state["thread"]
         if thread is not None and thread.is_alive():
@@ -508,14 +535,46 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             if source is None:
                 raise HTTPException(404)
             source_name = source.name
+            source_path = source.path
+            source_kind = source.kind
 
         wants_identify = identify == "1"
+        wants_auto_verify = auto_verify == "1"
 
         def work():
             from siteloom.progress import ProgressReporter
 
             try:
                 indexer = _build_indexer()
+                if source_kind == "takeout":
+                    from siteloom.library.takeout import TakeoutImporter
+
+                    # The resume command has to carry the auto-verify
+                    # choice. Dropping a flag on resume is exactly the
+                    # bug _resume_command was written for, and this is
+                    # the flag whose loss writes unreviewed rows that
+                    # training/dataset.py reads as ground truth.
+                    flag = "" if wants_auto_verify else " --no-auto-verify"
+                    with ProgressReporter(
+                        Session,
+                        "takeout-import",
+                        target=source_path,
+                        bar=False,
+                        resume_command=(
+                            f"siteloom takeout import {source_path}{flag}"
+                        ),
+                    ) as progress:
+                        TakeoutImporter(
+                            indexer,
+                            auto_verify_unambiguous=wants_auto_verify,
+                            progress=progress,
+                        ).import_tree(
+                            source_path,
+                            name=source_name,
+                            batch_size=config.library.batch_size,
+                        )
+                    return
+
                 with ProgressReporter(
                     Session,
                     "library-index",
@@ -560,8 +619,33 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     .group_by(LibraryItem.status)
                 ).all()
             )
+            faces = None
+            if source.kind == "takeout":
+                # `indexed`/`pending` are the wrong facts for this run:
+                # the importer registers items and attaches face
+                # annotations without ever marking an item indexed, so a
+                # successful import would read as "0 indexed, 26k
+                # pending" — a failure, in the same numbers.
+                base = (
+                    select(func.count())
+                    .select_from(Annotation)
+                    .join(LibraryItem, Annotation.item_id == LibraryItem.id)
+                    .where(
+                        LibraryItem.source_id == source_id,
+                        Annotation.class_name == "face",
+                    )
+                )
+                faces = {
+                    "detected": session.scalar(base),
+                    "proposed": session.scalar(
+                        base.where(Annotation.proposed_name.isnot(None))
+                    ),
+                    "verified": session.scalar(base.where(Annotation.verified.is_(True))),
+                }
         return templates.TemplateResponse(
-            request, "import.html", _import_ctx("done", source=source, counts=counts)
+            request,
+            "import.html",
+            _import_ctx("done", source=source, counts=counts, faces=faces),
         )
 
     # -- library browser ---------------------------------------------------

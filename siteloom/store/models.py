@@ -358,7 +358,7 @@ class NoiseEvent(Base):
 
 
 class Booking(Base):
-    """A guest booking synced from iCal (PRD §6.7 guest-correlation)."""
+    """A guest booking (PRD §6.7 guest-correlation), from iCal or by hand."""
 
     __tablename__ = "bookings"
 
@@ -367,6 +367,23 @@ class Booking(Base):
     summary: Mapped[str] = mapped_column(String, default="")
     start: Mapped[datetime] = mapped_column(DateTime, index=True)
     end: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # Provenance (CLD-90): "ical" for rows the feed owns, "manual" for an
+    # operator's correction. The iCal sync keys on `uid`, which is unique,
+    # so without this column a feed carrying a colliding UID would silently
+    # overwrite a hand-entered booking — and an operator's correction that
+    # the next sync reverts is worse than no correction at all. Defaults to
+    # "ical" because every row predating the column came from the feed.
+    source: Mapped[str] = mapped_column(String, default="ical", index=True)
+
+    @property
+    def is_manual(self) -> bool:
+        """Whether an operator owns this row, and may therefore edit it.
+
+        Editing an iCal row in place is deliberately not offered: the feed
+        is the source of truth for its own rows and the next sync would
+        revert the edit. The fix for a wrong feed is a manual booking.
+        """
+        return self.source == "manual"
 
 
 class BackfillClip(Base):
