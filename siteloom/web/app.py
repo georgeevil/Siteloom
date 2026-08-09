@@ -29,7 +29,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.web import auth, identity_ops, nav
+from siteloom.web import auth, identity_ops, nav, paging
 from siteloom.store import (
     Camera,
     Detection,
@@ -132,6 +132,18 @@ def _kind_clause(kind: str):
     return Event.class_name.in_(CLASS_KINDS[kind])
 
 
+#: How many rows each keyset-paged list hands over at a time. Sized to
+#: the shape of the screen, not to a shared constant: a triage row is
+#: 52px and an identity card is a grid tile.
+EVENTS_PAGE = 50
+IDENTITIES_PAGE = 60
+NOISE_PAGE = 100
+
+#: The query parameter carrying a keyset cursor. One name across the
+#: console so `_with_cursor` is the only place that spells it.
+CURSOR_PARAM = "after"
+
+
 def _triage_url(base: dict, **overrides) -> str:
     """A link to the events list with some filters changed.
 
@@ -139,6 +151,12 @@ def _triage_url(base: dict, **overrides) -> str:
     or time window when you tick "Unmatched" makes the chips unusable —
     so links are built from the whole live filter state, not composed
     from the one field being changed.
+
+    A cursor is deliberately not part of that state (CLD-104). It
+    describes one client's position in one scroll, so a link built here
+    — a chip, a row, the rail's "back" — opens at the top of the
+    filtered set for whoever it is pasted to. Only `_with_cursor` adds
+    one, and only to the load-more request.
     """
     params: list[tuple[str, str]] = []
     merged = {**base, **overrides}
@@ -152,9 +170,44 @@ def _triage_url(base: dict, **overrides) -> str:
         params.append(("kind", k))
     if merged.get("selected"):
         params.append(("selected", str(merged["selected"])))
-    if merged.get("page", 1) and int(merged.get("page") or 1) > 1:
-        params.append(("page", str(merged["page"])))
     return "/?" + urlencode(params) if params else "/"
+
+
+def _with_cursor(url: str, cursor: str) -> str:
+    """The same filtered list, continued after `cursor`.
+
+    Appended to a URL the filter helpers built rather than threaded
+    through them, so every other link in the console stays cursor-free
+    by construction.
+    """
+    sep = "&" if "?" in url else "?"
+    return url + sep + urlencode({CURSOR_PARAM: cursor})
+
+
+def _cursor_values(token: str | None, types: tuple[type, ...]) -> tuple | None:
+    """A cursor decoded, or None when there is none — never a shrug.
+
+    A token this server did not mint is a 400. Falling back to "no
+    cursor" would restart the list from the top halfway down a scroll,
+    and the operator sees rows they already worked appear again: that
+    reads as duplicated data, not as a bad request.
+    """
+    if not token:
+        return None
+    try:
+        return paging.decode_cursor(token, types)
+    except paging.CursorError as exc:
+        raise HTTPException(400, f"unreadable cursor: {exc}") from None
+
+
+def _more(target: str, next_url: str | None, label: str, end: str) -> dict:
+    """The load-more footer's context (templates/_load_more.html).
+
+    `next_url` is None exactly when the list is exhausted, which is what
+    lets the footer say "that is all of them" instead of going quiet —
+    silence is indistinguishable from a failed fetch.
+    """
+    return {"target": target, "next_url": next_url, "label": label, "end": end}
 
 
 def _identities_url(base: dict, **overrides) -> str:
@@ -471,10 +524,16 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         min_count: int | None = None,
         kind: list[str] = Query(default=[]),
         selected: int | None = None,
-        page: int = 1,
+        after: str | None = None,
     ):
-        page_size = 50
+        page_size = EVENTS_PAGE
         kinds = [k for k in kind if k in CLASS_KINDS]
+        # The sort key, spelled once: the cursor must carry every column
+        # the ORDER BY does or it drops rows. Sampled cameras close many
+        # tracks on the same frame, so `last_seen` ties constantly and a
+        # cursor on it alone would skip every row tying with the last one
+        # delivered — hence the id tie-break (CLD-104).
+        sort = (Event.last_seen, Event.id)
         with Session() as session:
             q = (
                 select(Event)
@@ -487,7 +546,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                         EventIdentity.identity
                     ),
                 )
-                .order_by(Event.last_seen.desc())
+                .order_by(Event.last_seen.desc(), Event.id.desc())
             )
             if camera:
                 q = q.filter(Event.camera_id == camera)
@@ -526,16 +585,25 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             total = session.scalar(
                 select(func.count()).select_from(Event)
             )
+            # Counted over the filtered set, not the sliced one: "1 of 12"
+            # while showing 50 rows would be a worse lie than the OFFSET
+            # this replaces. The cursor narrows what is rendered, never
+            # what is counted.
             matched = session.scalar(
                 select(func.count()).select_from(q.subquery())
             )
+            values = _cursor_values(after, (datetime, int))
+            rows_q = q if values is None else q.where(paging.after(sort, values))
+            # One row more than the page, so "is there more" is answered
+            # by the same query that produced the page — a second COUNT
+            # can disagree with it while ingest writes between the two.
             events = (
-                session.scalars(q.offset((page - 1) * page_size).limit(page_size + 1))
-                .unique()
-                .all()
+                session.scalars(rows_q.limit(page_size + 1)).unique().all()
             )
-            has_next = len(events) > page_size
-            events = events[:page_size]
+            slice_ = paging.take(
+                list(events), page_size, lambda e: (e.last_seen, e.id)
+            )
+            events = slice_.rows
             cameras = session.scalars(select(Camera)).all()
             classes = sorted(
                 {c for (c,) in session.execute(select(Event.class_name).distinct())}
@@ -567,6 +635,18 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             chip_urls[k] = _triage_url(
                 state, kinds=[x for x in kinds if x != k] if k in kinds else kinds + [k]
             )
+        # The load-more link is this same view, filters and selection
+        # intact, continued after the last row actually delivered. It is
+        # a real href: JavaScript only intercepts the click, so a client
+        # without it walks the list one navigation at a time.
+        page_url = _triage_url(state, selected=selected)
+        more = _more(
+            "#event-rows",
+            None if slice_.exhausted else _with_cursor(page_url, slice_.next_cursor),
+            f"Load {page_size} more events",
+            f"End of the list — {matched} event"
+            f"{'' if matched == 1 else 's'} match these filters.",
+        )
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -574,7 +654,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "chip_urls": chip_urls,
                 "identifier_keys": list(config.identity.identifiers.keys()),
                 "row_urls": {e.id: _triage_url(state, selected=e.id) for e in events},
-                "back_url": _triage_url(state, selected=selected, page=page),
+                "back_url": _triage_url(state, selected=selected),
                 "clear_url": _triage_url({}),
                 "kind_labels": {
                     "people": "People",
@@ -608,10 +688,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "hidden": hidden,
                 "selected": selected,
                 "rail": rail,
-                "page": page,
-                "has_next": has_next,
-                "prev_url": _triage_url(state, selected=selected, page=page - 1),
-                "next_url": _triage_url(state, selected=selected, page=page + 1),
+                "more": more,
             },
         )
 
@@ -779,9 +856,18 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         unlabeled: bool = False,
         unenrolled: bool = False,
         selected: int | None = None,
+        after: str | None = None,
     ):
+        # This screen used to take `LIMIT 200` and say nothing about it,
+        # so on a site with more identities than that the 201st did not
+        # exist as far as the console was concerned — the same failure
+        # CLD-26 fixed on /noise. It is now walkable to the end, and the
+        # count in the toolbar is the real one (CLD-104).
+        sort = (Identity.last_seen, Identity.id)
         with Session() as session:
-            q = select(Identity).order_by(Identity.last_seen.desc())
+            q = select(Identity).order_by(
+                Identity.last_seen.desc(), Identity.id.desc()
+            )
             if identifier:
                 q = q.filter(Identity.identifier_key == identifier)
             if unlabeled:
@@ -790,7 +876,14 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 # Named, but with nothing in the vector store — recognition
                 # cannot match on this person at all (identity/enroll.py).
                 q = q.filter(Identity.label.is_not(None), Identity.vector_count == 0)
-            rows = session.scalars(q.limit(200)).unique().all()
+            matched = session.scalar(select(func.count()).select_from(q.subquery())) or 0
+            values = _cursor_values(after, (datetime, int))
+            rows_q = q if values is None else q.where(paging.after(sort, values))
+            fetched = session.scalars(rows_q.limit(IDENTITIES_PAGE + 1)).unique().all()
+            slice_ = paging.take(
+                list(fetched), IDENTITIES_PAGE, lambda i: (i.last_seen, i.id)
+            )
+            rows = slice_.rows
             identifier_keys = sorted(
                 {k for (k,) in session.execute(select(Identity.identifier_key).distinct())}
             )
@@ -823,10 +916,22 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                     },
                 },
                 "card_urls": {i.id: _identities_url(state, selected=i.id) for i in rows},
-                "matched": len(rows),
+                "matched": matched,
                 "total": total,
                 "selected": selected,
                 "rail": rail,
+                "more": _more(
+                    "#identity-cards",
+                    None
+                    if slice_.exhausted
+                    else _with_cursor(
+                        _identities_url(state, selected=selected),
+                        slice_.next_cursor,
+                    ),
+                    f"Load {IDENTITIES_PAGE} more identities",
+                    f"End of the list — {matched} identit"
+                    f"{'y' if matched == 1 else 'ies'} match this filter.",
+                ),
             },
         )
 
@@ -1335,15 +1440,27 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         return RedirectResponse(f"/identities/{identity_id}", status_code=303)
 
     @app.get("/noise", response_class=HTMLResponse)
-    def noise(request: Request):
+    def noise(request: Request, after: str | None = None):
+        # `LIMIT 200` with nothing said about it was the same class of
+        # failure this page's empty states were written for (CLD-26): a
+        # screen that cannot show the truth reading as though it has. A
+        # long soak makes 200 episodes easily, and episode 201 simply did
+        # not exist here. Keyset-paged now, with the real count stated.
+        sort = (NoiseEvent.start, NoiseEvent.id)
         with Session() as session:
-            rows = (
-                session.scalars(
-                    select(NoiseEvent).order_by(NoiseEvent.start.desc()).limit(200)
-                )
-                .unique()
-                .all()
+            q = select(NoiseEvent).order_by(
+                NoiseEvent.start.desc(), NoiseEvent.id.desc()
             )
+            noise_total = (
+                session.scalar(select(func.count()).select_from(NoiseEvent)) or 0
+            )
+            values = _cursor_values(after, (datetime, int))
+            rows_q = q if values is None else q.where(paging.after(sort, values))
+            fetched = session.scalars(rows_q.limit(NOISE_PAGE + 1)).unique().all()
+            slice_ = paging.take(
+                list(fetched), NOISE_PAGE, lambda n: (n.start, n.id)
+            )
+            rows = slice_.rows
         # Why this page may be empty, which is not the same as "it was
         # quiet" (CLD-26). Audio never reaches AudioModule on a live
         # stream: Frame carries only an image, OpenCV's FFmpeg backend
@@ -1380,6 +1497,16 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             {
                 "site_name": config.site_name or config.site_id,
                 "noise_events": rows,
+                "noise_total": noise_total,
+                "more": _more(
+                    "#noise-rows",
+                    None
+                    if slice_.exhausted
+                    else _with_cursor("/noise", slice_.next_cursor),
+                    f"Load {NOISE_PAGE} more episodes",
+                    f"End of the list — {noise_total} episode"
+                    f"{'' if noise_total == 1 else 's'} recorded.",
+                ),
                 "producing_cameras": producing,
                 "empty_reason": reason,
                 # Cameras asked for audio that cannot deliver it — the

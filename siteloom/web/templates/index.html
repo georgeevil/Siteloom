@@ -265,7 +265,6 @@
   .btn-outline.on-amber { border-color: oklch(0.5 0.08 85); color: var(--amber); }
 
   .empty { padding: 40px 20px; color: var(--muted); font-size: 13px; }
-  .pager { padding: 14px 20px; }
 
   /* Narrow pane: the rail stops taking space and floats over the list. */
   @media (max-width: 1000px) {
@@ -342,6 +341,11 @@
         <div class="r-conf">Conf</div>
         <div>Status</div>
       </div>
+      {# The rows live in their own container because that is what
+         infinite.js appends into (data-infinite-target below): appending
+         into .triage-list would drop the sticky header and the footer
+         itself into the middle of the list. #}
+      <div id="event-rows">
       {% for e in events %}
       {% set st = e.review_status %}
       {% set link = e.active_identities | first %}
@@ -376,11 +380,9 @@
         <div><span class="st-chip st-{{ st }}">{{ st }}</span></div>
       </a>
       {% endfor %}
-
-      <div class="pager">
-        {% if page > 1 %}<a href="{{ prev_url }}">&larr; newer</a>{% endif %}
-        {% if has_next %}<a href="{{ next_url }}">older &rarr;</a>{% endif %}
       </div>
+
+      {% include "_load_more.html" %}
     {% else %}
       <p class="empty">
         No events match these filters.
