@@ -7,7 +7,7 @@ two were conflated precisely because only one of them had a screen, so
 the split is deliberate: "Training data" collects ground truth, "Models"
 turns it into vectors and weights.
 
-Three things here are load-bearing and none of them are layout.
+Four things here are load-bearing and none of them are layout.
 
 **An invalid score is not a zero score.** `EvalMetrics.valid` is False
 when a split cannot produce both same-person and different-person pairs;
@@ -25,6 +25,14 @@ recognition API returns empty subjects for a person the operator
 confirmed last week, unenrolled annotations are the first suspect, and
 there was no way to see that outside a terminal. It is shown per person
 and runnable here.
+
+**The floor is two numbers, not one** (CLD-95). The Takeout importer
+auto-verifies its unambiguous matches with nobody looking, into the same
+`verified` column a person's confirm writes. So the readiness panel
+reports the per-person floor twice — samples, and samples a human signed
+off on — because a fine-tune cleared entirely by Google's people-tags
+agreeing with a face detector may be perfectly fine, and is still not the
+claim "47 people have five confirmed samples" makes.
 
 **The detector trains detection.** `export-detector`/`detector` improve
 face *finding* on your own imagery. Identification stays with the
@@ -79,10 +87,24 @@ class Readiness:
     min_samples: int
     samples: int = 0
     people: int = 0
-    #: (person, sample_count, clears_the_floor), commonest first.
-    coverage: list[tuple[str, int, bool]] = field(default_factory=list)
+    #: (person, sample_count, clears_the_floor, human_confirmed_count),
+    #: commonest first.
+    coverage: list[tuple[str, int, bool, int]] = field(default_factory=list)
     ready_people: int = 0
     ready_samples: int = 0
+    #: The same floor, counted over human sign-off only (CLD-95). The
+    #: importer auto-verifies its pass-1 matches, and those rows are
+    #: verified in the same column as the ones a person clicked through —
+    #: so "47 people clear the floor" and "47 people have five samples a
+    #: human confirmed" are different sentences, and the screen must not
+    #: print one while meaning the other.
+    human_samples: int = 0
+    human_people: int = 0
+    human_ready_people: int = 0
+    #: {verified_by: count} over the whole set — "unattributed" for rows
+    #: verified before the column existed on a database this project
+    #: never migrated.
+    provenance: dict[str, int] = field(default_factory=dict)
     train_samples: int = 0
     val_samples: int = 0
     can_train: bool = False
@@ -110,16 +132,32 @@ def face_readiness(session, min_samples: int, val_fraction: float) -> Readiness:
     run's metrics come back `valid=False` — not zero, *unscored* — and no
     result from it may be adopted.
     """
-    from siteloom.training.dataset import collect_face_samples, split_by_person
+    from siteloom.store import VERIFIED_BY_HUMAN
+    from siteloom.training.dataset import (
+        collect_face_samples,
+        sample_provenance,
+        split_by_person,
+    )
     from siteloom.training.face import person_coverage
 
     samples = collect_face_samples(session)
     counts = person_coverage(samples)
+    # Filtered from the rows already collected rather than re-queried, so
+    # the two readings of the floor can never disagree about their input.
+    human_counts = person_coverage(
+        [s for s in samples if s.verified_by == VERIFIED_BY_HUMAN]
+    )
     readiness = Readiness(
         min_samples=min_samples,
         samples=len(samples),
         people=len(counts),
-        coverage=[(p, n, n >= min_samples) for p, n in counts.items()],
+        coverage=[
+            (p, n, n >= min_samples, human_counts.get(p, 0)) for p, n in counts.items()
+        ],
+        human_samples=sum(human_counts.values()),
+        human_people=len(human_counts),
+        human_ready_people=sum(1 for n in human_counts.values() if n >= min_samples),
+        provenance=sample_provenance(samples),
     )
     ready_names = {p for p, n in counts.items() if n >= min_samples}
     readiness.ready_people = len(ready_names)
@@ -641,6 +679,7 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
             from siteloom.training import face as face_mod
             from siteloom.training.dataset import (
                 collect_face_samples,
+                describe_provenance,
                 split_by_person,
             )
 
@@ -701,7 +740,11 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
                     row.status = "complete" if result.improved else "no-improvement"
                     row.metrics = json.dumps(result.as_dict())
                     row.artifact_path = result.projection_path
-                    row.notes = result.message
+                    # The run states what it trained on, not only how it
+                    # scored — see the CLI's `train face`.
+                    row.notes = (
+                        f"{result.message}\ntrained on: {describe_provenance(train)}"
+                    )
                     session.commit()
             except Exception as exc:  # pragma: no cover — via OperationRun
                 log.exception("face fine-tune failed")

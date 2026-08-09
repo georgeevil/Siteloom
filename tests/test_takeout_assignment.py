@@ -134,6 +134,11 @@ def test_unambiguous_assignment(importer, takeout_dir):
     assert rows[0].proposal_basis == "unambiguous"
     assert rows[0].verified is True
     assert rows[0].class_name == "face"
+    # Auto-verified means nobody looked, and the row says so. `source`
+    # cannot: it stays "import" after a human confirms (CLD-95).
+    assert rows[0].source == "import"
+    assert rows[0].verified_by == "import"
+    assert rows[0].verified_at is not None
 
 
 def test_auto_verify_can_be_disabled(tmp_path, takeout_dir, importer):
@@ -144,7 +149,10 @@ def test_auto_verify_can_be_disabled(tmp_path, takeout_dir, importer):
     )
     importer.import_tree(takeout_dir)
     with importer.Session() as session:
-        assert session.query(Annotation).one().verified is False
+        row = session.query(Annotation).one()
+    assert row.verified is False
+    # No sign-off, so no verifier — the pair never drifts apart.
+    assert row.verified_by is None and row.verified_at is None
 
 
 def test_group_photo_matched_against_gallery(importer, takeout_dir):

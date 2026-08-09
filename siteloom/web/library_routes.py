@@ -19,6 +19,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.store import (
+    VERIFIED_BY_HUMAN,
     Annotation,
     CustomClass,
     Identity,
@@ -883,7 +884,18 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 annotation.class_name = box.get("class_name") or "object"
                 annotation.custom_class = box.get("custom_class") or None
                 annotation.identity_id = box.get("identity_id") or None
-                annotation.verified = bool(box.get("verified", False))
+                # Transitions only. This endpoint replaces an item's boxes
+                # wholesale, so it re-sends `verified` for rows nobody
+                # touched; stamping on every save would relabel the
+                # importer's own auto-verifications as human sign-off
+                # because somebody opened the editor and pressed save.
+                # Flipping the flag on *is* an explicit act, so that one
+                # is recorded.
+                wants_verified = bool(box.get("verified", False))
+                if wants_verified and not annotation.verified:
+                    annotation.mark_verified(VERIFIED_BY_HUMAN, _now())
+                elif not wants_verified:
+                    annotation.clear_verified()
                 annotation.rejected = bool(box.get("rejected", False))
                 if box.get("proposed_name") is not None:
                     annotation.proposed_name = box["proposed_name"] or None
@@ -1798,7 +1810,11 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     if not name:
                         continue
                     annotation.proposed_name = name
-                    annotation.verified = True
+                    # Re-stamped unconditionally: a row the importer had
+                    # already auto-verified becomes "human" the moment a
+                    # person confirms it. That transition is the one the
+                    # old schema lost — `source` stays "import" forever.
+                    annotation.mark_verified(VERIFIED_BY_HUMAN, _now())
                     annotation.rejected = False
                     annotation.enrolled = False  # (re)enroll under this name
                     annotation.identity_id = identity_for_label(session, name).id
@@ -1820,7 +1836,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                         skipped += 1
                         continue
                     annotation.custom_class = name
-                    annotation.verified = True
+                    annotation.mark_verified(VERIFIED_BY_HUMAN, _now())
                     annotation.rejected = False
                     classified += 1
                     touched_classes.add(name)
@@ -1831,10 +1847,14 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                             examples += 1
                 elif action == "reject":
                     annotation.rejected = True
-                    annotation.verified = False
+                    # Rejection is a human act, but `rejected` already
+                    # records that: no importer ever rejects. What it is
+                    # not is a verification, so the sign-off comes off
+                    # with it — see Annotation's `rejected` comment.
+                    annotation.clear_verified()
                     rejected += 1
                 elif action == "unset":
-                    annotation.verified = False
+                    annotation.clear_verified()
                     annotation.rejected = False
             # Keep the chips' counts honest. Derived from the annotations
             # rather than incremented, so re-assigning an already

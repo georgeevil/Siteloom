@@ -24,6 +24,10 @@ Everything lands in Annotation rows as `proposed_name` + `proposal_basis`
 with verified=False (except pass 1). Nothing reaches the identity store
 or a training export until a human confirms it in the UI.
 
+Pass 1's auto-verified rows are stamped `verified_by="import"`, so what
+the importer signed off on itself is separable from what a person did
+(CLD-95) — `source` cannot say, it stays "import" forever either way.
+
 Sidecar naming is genuinely messy across Takeout versions (truncation,
 `(1)` counters that migrate into the JSON name, older `.json` suffixes),
 so matching is done primarily by the sidecar's own `title` field, with
@@ -46,7 +50,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from siteloom.adapters.file import IMAGE_EXTS, VIDEO_EXTS
-from siteloom.store import Annotation, ItemTag, LibraryItem  # noqa: F401
+from siteloom.store import (  # noqa: F401
+    VERIFIED_BY_IMPORT,
+    Annotation,
+    ItemTag,
+    LibraryItem,
+)
 
 log = logging.getLogger(__name__)
 
@@ -414,6 +423,7 @@ class TakeoutImporter:
             path = self.faces_dir / f"{item.id}_{seq}.jpg"
             cv2.imwrite(str(path), crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
             crop_path = str(path)
+        now = _now()
         annotation = Annotation(
             item_id=item.id,
             frame_index=0,
@@ -424,8 +434,16 @@ class TakeoutImporter:
             proposal_basis=basis,
             source="import",
             verified=verified,
+            # Nobody looked at this. Recording that is the whole point of
+            # the column (CLD-95): `source="import"` describes the box,
+            # and stays "import" after a human confirms — only
+            # `verified_by` distinguishes machine agreement from sign-off,
+            # and training/dataset.py reads both as ground truth by
+            # default.
+            verified_by=VERIFIED_BY_IMPORT if verified else None,
+            verified_at=now if verified else None,
             crop_path=crop_path,
-            created_at=_now(),
+            created_at=now,
         )
         session.add(annotation)
         return annotation

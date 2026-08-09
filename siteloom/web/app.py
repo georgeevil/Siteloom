@@ -59,6 +59,72 @@ CLASS_KINDS = {
 }
 
 
+# LIKE's own wildcards, and the character that turns them back into
+# literals. SQLAlchemy's `.like()` emits the pattern verbatim and adds no
+# ESCAPE clause, so both halves are the caller's job (CLD-67).
+LIKE_ESCAPE = "\\"
+
+# SQLite binds Python ints as signed 64-bit; a longer digit string (a
+# phone number pasted into the search box) raises OverflowError out of
+# the driver rather than simply matching nothing.
+_MAX_ROW_ID = 2**63 - 1
+
+
+def like_pattern(term: str) -> str:
+    """A LIKE pattern matching `term` as a literal substring.
+
+    Operators type `%` and `_` — in plates, unit numbers, filenames —
+    and unescaped they are "any run" and "any character": searching
+    "unit_4" would return "unita4", and a bare "%" would return the
+    whole table. Pair with escape=LIKE_ESCAPE; the ESCAPE clause is not
+    implied by the pattern.
+    """
+    for char in (LIKE_ESCAPE, "%", "_"):
+        term = term.replace(char, LIKE_ESCAPE + char)
+    return f"%{term}%"
+
+
+def _contains(column, term: str):
+    """`column` contains `term` literally."""
+    return column.like(like_pattern(term), escape=LIKE_ESCAPE)
+
+
+def _as_row_id(term: str) -> int | None:
+    """`term` read as a row id, or None when it is not one."""
+    if not term.isdigit():
+        return None
+    value = int(term)
+    return value if 0 < value <= _MAX_ROW_ID else None
+
+
+def _media_candidates(raw: str, media_root: Path) -> list[Path]:
+    """Every location a stored media path can mean, likeliest first.
+
+    Two shapes are current. An absolute path is taken as it stands —
+    joining it onto media_root would be no-op anyway, since Path("/a") /
+    "/etc/passwd" is "/etc/passwd" — and a relative one is anchored on
+    media_root, which is the only reading that does not depend on where
+    the process was started (CLD-64).
+
+    Legacy rows carry a third: a relative path written when media_dir
+    itself was relative, so the media_dir prefix is still on the front
+    ("media/cam1/…" for media_dir "media"). Those are re-anchored by
+    stripping the prefix rather than left permanently unreachable.
+    Containment is re-checked on whatever this returns, so an extra
+    candidate cannot widen what is servable.
+    """
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return [candidate]
+    parts = candidate.parts
+    root_parts = media_root.parts
+    out = [media_root / candidate]
+    for n in range(1, len(parts)):
+        if root_parts[-n:] == parts[:n]:
+            out.append(media_root.joinpath(*parts[n:]))
+    return out
+
+
 def _kind_clause(kind: str):
     named = CLASS_KINDS["people"] | CLASS_KINDS["vehicles"]
     if kind == "other":
@@ -256,7 +322,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     engine = make_engine(config.storage.db_url)
     init_db(engine)
     Session = get_session(engine)
-    media_root = Path(config.storage.media_dir).resolve()
+    # load_config has already anchored a relative media_dir to the config
+    # file's directory (CLD-64); resolve() here only settles symlinks and
+    # covers a config built in-process, which has no file to anchor to.
+    media_root = Path(config.storage.media_dir).expanduser().resolve()
     #: Per-app so a second app in the same process (tests) starts clean.
     auth_gate = auth.AuthGate()
     login_throttle = auth.LoginThrottle()
@@ -550,31 +619,50 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def search(request: Request, q: str = ""):
         """One box over events, people and plates — the top bar's promise.
 
-        Substring match per entity, ranked by recency. SQLite LIKE is
-        case-insensitive for ASCII and these tables are PoC-sized;
-        FTS5 is the V1 upgrade path once an archive gets big enough to
-        feel it, and it slots in behind this same route.
+        Substring match per entity, ranked by recency — literal
+        substrings, via _contains: what the operator typed is a string,
+        never a pattern. SQLite LIKE is case-insensitive for ASCII and
+        these tables are PoC-sized; FTS5 is the V1 upgrade path once an
+        archive gets big enough to feel it, and it slots in behind this
+        same route.
         """
         term = q.strip()
         results: dict = {"identities": [], "events": [], "library": []}
         if term:
-            like = f"%{term}%"
+            named = or_(
+                _contains(Identity.label, term), _contains(Identity.plate, term)
+            )
             with Session() as session:
                 results["identities"] = (
                     session.scalars(
                         select(Identity)
-                        .filter(
-                            or_(
-                                Identity.label.like(like),
-                                Identity.plate.like(like),
-                            )
-                        )
+                        .filter(named)
                         .order_by(Identity.last_seen.desc())
                         .limit(20)
                     )
                     .unique()
                     .all()
                 )
+                matches = [
+                    _contains(Event.class_name, term),
+                    _contains(Camera.name, term),
+                    # Events surface by whom they matched, too —
+                    # searching a name should find the visits.
+                    Event.id.in_(
+                        select(EventIdentity.event_id)
+                        .join(Identity, EventIdentity.identity_id == Identity.id)
+                        .where(named)
+                    ),
+                ]
+                event_id = _as_row_id(term)
+                if event_id is not None:
+                    # The event-number fast path stays — typing "412"
+                    # must land on event 412 — but it is one more way to
+                    # match, not a replacement for the others: "7" is
+                    # equally a plate fragment, a camera name and a unit
+                    # number, and answering only the id reads as "no such
+                    # visit" for all of them (CLD-67).
+                    matches.insert(0, Event.id == event_id)
                 event_q = (
                     select(Event)
                     .options(
@@ -584,29 +672,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                         ),
                     )
                     .join(Camera, Event.camera_id == Camera.id)
-                    .filter(
-                        or_(
-                            Event.class_name.like(like),
-                            Camera.name.like(like),
-                            # Events surface by whom they matched, too —
-                            # searching a name should find the visits.
-                            Event.id.in_(
-                                select(EventIdentity.event_id)
-                                .join(
-                                    Identity,
-                                    EventIdentity.identity_id == Identity.id,
-                                )
-                                .where(
-                                    or_(
-                                        Identity.label.like(like),
-                                        Identity.plate.like(like),
-                                    )
-                                )
-                            ),
-                        )
-                        if not term.isdigit()
-                        else Event.id == int(term)
-                    )
+                    .filter(or_(*matches))
                     .order_by(Event.last_seen.desc())
                     .limit(20)
                 )
@@ -616,7 +682,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 results["library"] = (
                     session.scalars(
                         select(LibraryItem)
-                        .filter(LibraryItem.path.like(like))
+                        .filter(_contains(LibraryItem.path, term))
                         .order_by(LibraryItem.id.desc())
                         .limit(20)
                     )
@@ -1271,11 +1337,20 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     from siteloom.web import (
         backfill_routes,
         bookings_routes,
+        incidents_routes,
         library_routes,
         train_routes,
+        users_routes,
     )
 
-    for module in (library_routes, bookings_routes, backfill_routes, train_routes):
+    for module in (
+        library_routes,
+        bookings_routes,
+        backfill_routes,
+        train_routes,
+        incidents_routes,
+        users_routes,
+    ):
         module.register(app, templates, Session, config)
 
     if config.integrations.recognition_api.enabled:
@@ -1343,25 +1418,24 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def media(path: str):
         """Serve a stored crop, confined to media_dir.
 
-        The request component is resolved as given, never joined onto
-        media_root. That is deliberate: ingest stores crop_path with the
-        media_dir prefix already on it, so the component is absolute
-        whenever media_dir is — the normal case, not an attack. Joining
-        would also be no defence at all, since Path("/a") / "/etc/passwd"
-        is "/etc/passwd": an absolute component silently discards the
-        base. Containment is therefore the only gate.
+        The request component is read through _media_candidates: absolute
+        as given, relative anchored on media_root (never on the CWD, which
+        is what made the same config serve different files depending on
+        how the process was launched — CLD-64).
 
-        That gate compares *resolved* paths with is_relative_to. Both
-        halves matter. A string-prefix test would admit a sibling
-        directory — "/var/media-x/secret" starts with "/var/media"
-        (CLD-49) — and resolving the full path last, rather than
-        trusting a resolved root, is what catches a symlink inside
-        media_dir pointing outside it.
+        Containment is the gate, and it is applied to every candidate. It
+        compares *resolved* paths with is_relative_to, and both halves
+        matter. A string-prefix test would admit a sibling directory —
+        "/var/media-x/secret" starts with "/var/media" (CLD-49) — and
+        resolving the full path last, rather than trusting a resolved
+        root, is what catches a symlink inside media_dir pointing out of
+        it.
         """
-        full = Path(path).resolve()
-        if not full.is_relative_to(media_root) or not full.is_file():
-            raise HTTPException(404)
-        return FileResponse(full)
+        for candidate in _media_candidates(path, media_root):
+            full = candidate.resolve()
+            if full.is_relative_to(media_root) and full.is_file():
+                return FileResponse(full)
+        raise HTTPException(404)
 
     # -- supervision -------------------------------------------------------
 
