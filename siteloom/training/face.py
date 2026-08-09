@@ -30,7 +30,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from siteloom.training.dataset import FaceSample
+from siteloom.training.dataset import FaceSample, sample_provenance
 
 log = logging.getLogger(__name__)
 
@@ -82,12 +82,20 @@ class TrainResult:
     after: EvalMetrics = field(default_factory=EvalMetrics)
     improved: bool = False
     message: str = ""
+    #: {verified_by: count} over the training half — what this run was
+    #: actually trained on. A model adopted here is judged on held-out
+    #: pairs, but "held out from what" is half the claim: a projection
+    #: learned entirely from importer auto-verifications is a different
+    #: result from one learned from human sign-off, and the run should be
+    #: able to say which it was rather than leaving it to be inferred.
+    provenance: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
             "people": self.people,
             "train_samples": self.train_samples,
             "val_samples": self.val_samples,
+            "provenance": self.provenance,
             "before": self.before.as_dict(),
             "after": self.after.as_dict(),
             "improved": self.improved,
@@ -235,6 +243,11 @@ def train_face_projection(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Recorded from the samples handed in, before anything is dropped for
+    # being unembeddable — it describes the set this run was asked to
+    # learn from, which is the claim the result has to stand behind.
+    provenance = sample_provenance(train_samples)
+
     train_x, train_people = embed_samples(train_samples, embedder, raw=True)
     val_x, val_people = embed_samples(val_samples, embedder, raw=True)
 
@@ -249,6 +262,7 @@ def train_face_projection(
                 "need at least 2 people and 4 verified face samples to train; "
                 "verify more training data first"
             ),
+            provenance=provenance,
         )
 
     # Evaluate on held-out data when it can produce a real score; fall
@@ -318,6 +332,7 @@ def train_face_projection(
                     "people": unique,
                     "dim_in": dim_in,
                     "dim_out": output_dim,
+                    "provenance": provenance,
                     "before": before.as_dict(),
                     "after": after.as_dict(),
                 },
@@ -352,6 +367,7 @@ def train_face_projection(
         after=after,
         improved=improved,
         message=message,
+        provenance=provenance,
     )
 
 

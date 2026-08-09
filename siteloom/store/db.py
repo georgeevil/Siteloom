@@ -32,7 +32,11 @@ def init_db(engine: Engine) -> None:
     # collide with the indexes create_all makes for the new table.
     _relax_event_identity_nullability(engine)
     Base.metadata.create_all(engine)
-    _ensure_columns(engine)
+    added = _ensure_columns(engine)
+    # Only when this run is the one that added the column: the backfill
+    # below is a migration, not a repair pass (see its docstring).
+    if ("annotations", "verified_by") in added:
+        _backfill_verified_by(engine)
 
 
 def _relax_event_identity_nullability(engine: Engine) -> None:
@@ -136,7 +140,7 @@ def _finish_event_identity_rebuild(engine: Engine, inspector) -> None:
             index.create(conn, checkfirst=True)
 
 
-def _ensure_columns(engine: Engine) -> None:
+def _ensure_columns(engine: Engine) -> set[tuple[str, str]]:
     """Add columns the models define but an existing database lacks.
 
     create_all() only creates missing tables; a column added to a model
@@ -144,7 +148,15 @@ def _ensure_columns(engine: Engine) -> None:
     it existed. This covers the additive case (new nullable/defaulted
     columns) — the only kind of schema change the project makes; anything
     beyond that warrants a real migration tool.
+
+    Returns the (table, column) pairs it actually added, so a caller can
+    run a one-time data migration in the same breath as the DDL. Note
+    what an added column holds for existing rows: a DDL DEFAULT is
+    emitted **only** for a non-nullable column with a scalar default, so
+    a nullable column arrives NULL everywhere and any backfill is the
+    caller's job.
     """
+    added: set[tuple[str, str]] = set()
     inspector = inspect(engine)
     with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
@@ -166,6 +178,53 @@ def _ensure_columns(engine: Engine) -> None:
                     ddl += f" DEFAULT {column.default.arg!r}"
                 log.info("migrating: %s", ddl)
                 conn.execute(text(ddl))
+                added.add((table.name, column.name))
+    return added
+
+
+def _backfill_verified_by(engine: Engine) -> int:
+    """Attribute already-verified annotations, once, at migration time.
+
+    Before `verified_by` existed the verifier was not recorded, but for a
+    database written by this project it is derivable: the Takeout
+    importer auto-verifies pass 1 and only pass 1
+    (`verified=certain and self.auto_verify_unambiguous` in
+    library/takeout.py), so a verified row on basis "unambiguous" is the
+    importer and a verified row on any other basis was confirmed by a
+    person in the review UI.
+
+    That inference is legitimate exactly here and nowhere else. It holds
+    only over rows written before this column existed, and only while
+    pass 1 was the sole auto-verifying path — both of which are facts
+    about the past, which is why the result is *written down* rather than
+    recomputed at read time. Every query from now on reads the column;
+    nothing else in the codebase may infer a verifier from
+    `proposal_basis` again.
+
+    `verified_at` is left NULL: the time was never recorded, and NULL
+    says "unknown" where any invented timestamp would say something
+    false. Runs inside one transaction over rows that are `verified` with
+    no verifier, so it is idempotent even if it is somehow reached twice.
+    """
+    with engine.begin() as conn:
+        # `WHERE verified`, not `verified = 1`: SQLite stores the flag as
+        # an int and Postgres as a boolean, and this has to run on both.
+        result = conn.execute(
+            text(
+                "UPDATE annotations SET verified_by = "
+                "CASE WHEN proposal_basis = 'unambiguous' THEN 'import' "
+                "ELSE 'human' END "
+                "WHERE verified AND verified_by IS NULL"
+            )
+        )
+        count = result.rowcount or 0
+    if count:
+        log.info(
+            "migrating: attributed %d verified annotations from proposal_basis "
+            "(one-time; verified_by is read directly from now on)",
+            count,
+        )
+    return count
 
 
 def get_session(engine: Engine) -> sessionmaker[Session]:

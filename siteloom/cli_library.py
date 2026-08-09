@@ -422,6 +422,19 @@ def takeout_status(config: Path = CONFIG_OPT):
                 Annotation.rejected.is_(False),
             )
         )
+        # Split by verifier, not by `source` — `source` is the provenance
+        # of the box and stays "import" after a person confirms.
+        by_verifier = dict(
+            session.execute(
+                select(Annotation.verified_by, func.count())
+                .filter(
+                    Annotation.class_name == "face",
+                    Annotation.verified.is_(True),
+                    Annotation.rejected.is_(False),
+                )
+                .group_by(Annotation.verified_by)
+            ).all()
+        )
         rejected = session.scalar(
             select(func.count())
             .select_from(Annotation)
@@ -456,6 +469,8 @@ def takeout_status(config: Path = CONFIG_OPT):
     for basis, n in sorted(by_basis.items(), key=lambda kv: -kv[1]):
         table.add_row(f"  {basis or 'unassigned'}", f"{n:,}")
     table.add_row("verified", f"{verified:,}")
+    for who, n in sorted(by_verifier.items(), key=lambda kv: -kv[1]):
+        table.add_row(f"  by {who or 'unattributed'}", f"{n:,}")
     table.add_row("rejected", f"{rejected:,}")
     table.add_row("awaiting review", f"{pending_review:,}")
     console.print(table)
@@ -841,9 +856,18 @@ def classes_rebuild(config: Path = CONFIG_OPT):
 
 @train_app.command("status")
 def train_status(config: Path = CONFIG_OPT):
-    """Show how much verified training data exists per person."""
+    """Show how much verified training data exists per person.
+
+    The floor is reported twice on purpose (CLD-95). "Verified" is set
+    both by a person clicking confirm and by the Takeout importer's pass-1
+    auto-verify, and a floor cleared entirely by the second is a floor
+    cleared by Google's people-tags agreeing with a face detector. That
+    may be fine to fine-tune on; it is a different claim, so it gets a
+    different line instead of being read as one number.
+    """
     cfg, Session, _indexer = _setup(config)
-    from siteloom.training.dataset import collect_face_samples
+    from siteloom.store import VERIFIED_BY_HUMAN
+    from siteloom.training.dataset import collect_face_samples, sample_provenance
     from siteloom.training.face import person_coverage
 
     with Session() as session:
@@ -855,12 +879,38 @@ def train_status(config: Path = CONFIG_OPT):
             "verify proposals at /training"
         )
         return
-    ready = {p: n for p, n in coverage.items() if n >= cfg.training.min_samples_per_person}
+    floor = cfg.training.min_samples_per_person
+    ready = {p: n for p, n in coverage.items() if n >= floor}
+    # Same computation over the human-confirmed subset. Filtered from the
+    # rows already collected rather than re-queried, so the two lines can
+    # never disagree about what they counted.
+    human = [s for s in samples if s.verified_by == VERIFIED_BY_HUMAN]
+    human_coverage = person_coverage(human)
+    human_ready = {p: n for p, n in human_coverage.items() if n >= floor}
+
     typer.echo(f"{len(samples)} verified face samples across {len(coverage)} people")
-    typer.echo(f"{len(ready)} people meet the {cfg.training.min_samples_per_person}-sample minimum\n")
+    typer.echo(f"{len(ready)} people meet the {floor}-sample minimum")
+    typer.echo(
+        f"{len(human)} of those samples were confirmed by a person, across "
+        f"{len(human_coverage)} "
+        + ("person" if len(human_coverage) == 1 else "people")
+    )
+    typer.echo(f"{len(human_ready)} people meet the minimum on human-confirmed samples alone")
+    others = {
+        who: n
+        for who, n in sample_provenance(samples).items()
+        if who != VERIFIED_BY_HUMAN
+    }
+    if others:
+        typer.echo(
+            "  the rest: "
+            + ", ".join(f"{n} {who}-verified" for who, n in others.items())
+            + " — machine agreement, nobody looked"
+        )
+    typer.echo("")
     for person, n in list(coverage.items())[:25]:
-        mark = "✓" if n >= cfg.training.min_samples_per_person else " "
-        typer.echo(f"  {mark} {n:4d}  {person}")
+        mark = "✓" if n >= floor else " "
+        typer.echo(f"  {mark} {n:4d}  ({human_coverage.get(person, 0)} human)  {person}")
 
 
 @train_app.command("enroll")
@@ -926,27 +976,46 @@ def train_face(
         "--apply-threshold",
         help="Write the newly-tuned face threshold back to the config",
     ),
+    human_only: bool = typer.Option(
+        False,
+        "--human-only",
+        help=(
+            "Train only on samples a person confirmed, excluding the "
+            "importer's auto-verified matches"
+        ),
+    ),
 ):
     """Fine-tune the face embedding on verified samples.
 
     Learns a linear projection over SFace features so your people separate
     better. Only adopted if held-out AUC improves.
+
+    `--human-only` narrows the set to human sign-off. It is opt-in: the
+    default set is every verified, non-rejected annotation, exactly as it
+    has always been. Either way the run records what it trained on.
     """
     cfg, Session, _indexer = _setup(config)
     from siteloom.identity.embedders import FaceEmbedder
     from siteloom.store import TrainingRun
-    from siteloom.training.dataset import collect_face_samples, split_by_person
+    from siteloom.training.dataset import (
+        collect_face_samples,
+        describe_provenance,
+        split_by_person,
+    )
     from siteloom.training.face import train_face_projection
 
     with Session() as session:
         samples = collect_face_samples(
-            session, min_per_person=cfg.training.min_samples_per_person
+            session,
+            min_per_person=cfg.training.min_samples_per_person,
+            human_only=human_only,
         )
         if len(samples) < 4:
             typer.echo(
-                f"only {len(samples)} verified samples meet the minimum of "
-                f"{cfg.training.min_samples_per_person} per person — verify more "
-                "training data at /training first",
+                f"only {len(samples)} "
+                f"{'human-confirmed' if human_only else 'verified'} samples "
+                f"meet the minimum of {cfg.training.min_samples_per_person} "
+                "per person — verify more training data at /training first",
                 err=True,
             )
             raise typer.Exit(1)
@@ -961,7 +1030,10 @@ def train_face(
         session.commit()
         run_id = run.id
 
-    typer.echo(f"training on {len(train)} samples, validating on {len(val)}…")
+    typer.echo(
+        f"training on {len(train)} samples, validating on {len(val)}… "
+        f"({describe_provenance(train)})"
+    )
     # Base embedder: never load an existing projection, or fine-tunes stack.
     embedder = FaceEmbedder(projection_path=None)
     result = train_face_projection(
@@ -981,7 +1053,10 @@ def train_face(
         run.status = "complete" if result.improved else "no-improvement"
         run.metrics = json.dumps(result.as_dict())
         run.artifact_path = result.projection_path
-        run.notes = result.message
+        # What it trained on travels with the result, not just the score:
+        # a projection learned from importer auto-verifications is a
+        # different claim from one learned from human sign-off.
+        run.notes = f"{result.message}\ntrained on: {describe_provenance(train)}"
         session.commit()
 
     old_threshold = result.after.threshold
