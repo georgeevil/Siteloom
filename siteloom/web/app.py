@@ -1337,11 +1337,20 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     from siteloom.web import (
         backfill_routes,
         bookings_routes,
+        incidents_routes,
         library_routes,
         train_routes,
+        users_routes,
     )
 
-    for module in (library_routes, bookings_routes, backfill_routes, train_routes):
+    for module in (
+        library_routes,
+        bookings_routes,
+        backfill_routes,
+        train_routes,
+        incidents_routes,
+        users_routes,
+    ):
         module.register(app, templates, Session, config)
 
     if config.integrations.recognition_api.enabled:
