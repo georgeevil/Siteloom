@@ -1,4 +1,4 @@
-"""The sidebar is the console's only index of itself (CLD-87).
+"""The sidebar is the console's only index of itself (CLD-89).
 
 Two failures matter and neither shows up in a page-renders test: an entry
 pointing at a route nobody registered, and a route that exists with no

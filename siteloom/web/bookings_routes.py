@@ -1,4 +1,4 @@
-"""Guest bookings (CLD-89) — placeholder registration.
+"""Guest bookings (CLD-90) — placeholder registration.
 
 `guests.py` already syncs iCal into Booking rows and `GuestWindows`
 already stamps `Event.guest_window` at ingest, which is what suppresses
@@ -16,4 +16,4 @@ from __future__ import annotations
 
 
 def register(app, templates, Session, config) -> None:
-    """No routes yet — see CLD-89."""
+    """No routes yet — see CLD-90."""

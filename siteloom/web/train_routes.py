@@ -1,4 +1,4 @@
-"""Model training and enrolment (CLD-92) — placeholder registration.
+"""Model training and enrolment (CLD-94) — placeholder registration.
 
 All five `siteloom train` commands — status, face, enroll,
 export-detector, detector — have no console at all. `/training` is
@@ -18,4 +18,4 @@ from __future__ import annotations
 
 
 def register(app, templates, Session, config) -> None:
-    """No routes yet — see CLD-92."""
+    """No routes yet — see CLD-94."""
