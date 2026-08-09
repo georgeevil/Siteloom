@@ -44,6 +44,38 @@ def tables(conn: sqlite3.Connection) -> set[str]:
     return {r["name"] for r in rows}
 
 
+def columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Which columns this database actually has.
+
+    A long-lived archive predates whatever was added since it was
+    written, and this script is most useful precisely on the oldest
+    database anyone still has. Every optional column is checked rather
+    than assumed.
+    """
+    try:
+        return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+#: Printed once if anything was skipped. `init_db` runs `_ensure_columns`,
+#: an additive ALTER pass over every model table, so this is the whole fix
+#: — and it is safe, because additive is the only schema change the
+#: project makes.
+MIGRATE_HINT = (
+    "Some columns are missing because this database predates them.\n"
+    "  `siteloom init-db --config <your-archive.yaml>` adds them in place\n"
+    "  (additive only — no data is rewritten), then re-run this report."
+)
+
+_skipped: list[str] = []
+
+
+def note_missing(table: str, column: str) -> None:
+    _skipped.append(f"{table}.{column}")
+    print(f"      ({table}.{column} not in this database — section skipped)")
+
+
 def rule(title: str) -> None:
     print(f"\n{title}\n{'-' * len(title)}")
 
@@ -96,62 +128,79 @@ def report_items(conn: sqlite3.Connection, present: set[str]) -> None:
     ).fetchone()
     if row["n"]:
         print(f"\n  {row['n']} failed — these are NOT retried without --retry-failed.")
-        errors = conn.execute(
-            "SELECT substr(error, 1, 60) AS e, COUNT(*) AS n FROM library_items "
-            "WHERE status='failed' AND error IS NOT NULL "
-            "GROUP BY e ORDER BY n DESC LIMIT 10"
+        if "error" in columns(conn, "library_items"):
+            errors = conn.execute(
+                "SELECT substr(error, 1, 60) AS e, COUNT(*) AS n FROM library_items "
+                "WHERE status='failed' AND error IS NOT NULL "
+                "GROUP BY e ORDER BY n DESC LIMIT 10"
+            ).fetchall()
+            for r in errors:
+                print(f"      {r['n']:>6}  {r['e']}")
+
+    cols = columns(conn, "library_items")
+
+    if "attempts" in cols:
+        attempts = conn.execute(
+            "SELECT attempts, COUNT(*) AS n FROM library_items "
+            "GROUP BY attempts ORDER BY attempts"
         ).fetchall()
-        for r in errors:
-            print(f"      {r['n']:>6}  {r['e']}")
+        if len(attempts) > 1:
+            print("\n  attempts distribution:")
+            for r in attempts:
+                print(f"      tried {r['attempts']}x: {r['n']}")
+    else:
+        note_missing("library_items", "attempts")
 
-    attempts = conn.execute(
-        "SELECT attempts, COUNT(*) AS n FROM library_items "
-        "GROUP BY attempts ORDER BY attempts"
-    ).fetchall()
-    if len(attempts) > 1:
-        print("\n  attempts distribution:")
-        for r in attempts:
-            print(f"      tried {r['attempts']}x: {r['n']}")
-
-    span = conn.execute(
-        "SELECT MIN(taken_at) AS lo, MAX(taken_at) AS hi, "
-        "COUNT(taken_at) AS n FROM library_items"
-    ).fetchone()
-    if span["n"]:
-        print(f"\n  capture times: {span['n']} known, {span['lo']} .. {span['hi']}")
+    if "taken_at" in cols:
+        span = conn.execute(
+            "SELECT MIN(taken_at) AS lo, MAX(taken_at) AS hi, "
+            "COUNT(taken_at) AS n FROM library_items"
+        ).fetchone()
+        if span["n"]:
+            print(f"\n  capture times: {span['n']} known, {span['lo']} .. {span['hi']}")
+    else:
+        note_missing("library_items", "taken_at")
 
 
 def report_annotations(conn: sqlite3.Connection, present: set[str]) -> None:
     if "annotations" not in present:
         return
     rule("Annotations")
+    cols = columns(conn, "annotations")
     show_counts(conn, "annotations", "class_name", "by class")
-    show_counts(conn, "annotations", "source", "by provenance")
+    if "source" in cols:
+        show_counts(conn, "annotations", "source", "by provenance")
 
-    row = conn.execute(
-        "SELECT SUM(verified) AS verified, SUM(rejected) AS rejected, "
-        "SUM(enrolled) AS enrolled, COUNT(*) AS total FROM annotations"
-    ).fetchone()
-    print(
-        f"\n  verified={row['verified'] or 0}  rejected={row['rejected'] or 0}  "
-        f"enrolled={row['enrolled'] or 0}  of {row['total']}"
-    )
+    flags = [c for c in ("verified", "rejected", "enrolled") if c in cols]
+    if flags:
+        selects = ", ".join(f"SUM({c}) AS {c}" for c in flags)
+        row = conn.execute(
+            f"SELECT {selects}, COUNT(*) AS total FROM annotations"
+        ).fetchone()
+        summary = "  ".join(f"{c}={row[c] or 0}" for c in flags)
+        print(f"\n  {summary}  of {row['total']}")
+        for missing in ("verified", "rejected", "enrolled"):
+            if missing not in cols:
+                note_missing("annotations", missing)
 
     # Proposals: how many, on what basis, over how many distinct names.
     # The names themselves stay on the machine that owns them.
-    prop = conn.execute(
-        "SELECT COUNT(*) AS n, COUNT(DISTINCT proposed_name) AS names "
-        "FROM annotations WHERE proposed_name IS NOT NULL"
-    ).fetchone()
-    if prop["n"]:
-        print(
-            f"  {prop['n']} proposals over {prop['names']} distinct names "
-            f"(names not printed)"
-        )
-        basis = counts(conn, "annotations", "proposal_basis")
-        for r in basis:
-            if r["k"] is not None:
-                print(f"      basis {r['k']:<20} {r['n']:>8}")
+    if "proposed_name" in cols:
+        prop = conn.execute(
+            "SELECT COUNT(*) AS n, COUNT(DISTINCT proposed_name) AS names "
+            "FROM annotations WHERE proposed_name IS NOT NULL"
+        ).fetchone()
+        if prop["n"]:
+            print(
+                f"  {prop['n']} proposals over {prop['names']} distinct names "
+                f"(names not printed)"
+            )
+            if "proposal_basis" in cols:
+                for r in counts(conn, "annotations", "proposal_basis"):
+                    if r["k"] is not None:
+                        print(f"      basis {r['k']:<20} {r['n']:>8}")
+    else:
+        note_missing("annotations", "proposed_name")
 
 
 def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
@@ -159,12 +208,20 @@ def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
     if "annotations" not in present:
         return
     rule(f"Face training readiness (floor: {FACE_SAMPLE_FLOOR} verified per person)")
+    cols = columns(conn, "annotations")
+    if not {"verified", "rejected"} <= cols:
+        print("  cannot be computed: this database has no verified/rejected flags,")
+        print("  and unverified annotations are never training data.")
+        return
 
     # Verified, non-rejected, face-class annotations grouped per person.
     # identity_id is the real ground truth; proposed_name is a guess and
     # is counted separately so the two are never conflated.
     for column, caption in (("identity_id", "confirmed identities"),
                             ("proposed_name", "unconfirmed proposals")):
+        if column not in cols:
+            note_missing("annotations", column)
+            continue
         rows = conn.execute(
             f"SELECT {column} AS who, COUNT(*) AS n FROM annotations "
             f"WHERE {column} IS NOT NULL AND class_name='face' "
@@ -193,6 +250,11 @@ def report_identities(conn: sqlite3.Connection, present: set[str]) -> None:
     if "identities" not in present:
         return
     rule("Identities")
+    cols = columns(conn, "identities")
+    if "vector_count" not in cols:
+        note_missing("identities", "vector_count")
+        show_counts(conn, "identities", "identifier_key", "by identifier")
+        return
     rows = conn.execute(
         "SELECT identifier_key, COUNT(*) AS n, "
         "SUM(CASE WHEN label IS NOT NULL THEN 1 ELSE 0 END) AS labeled, "
@@ -259,6 +321,12 @@ def main() -> None:
     print(f"Siteloom database report: {path.name} ({size_mb:.1f} MB)")
     print(f"tables: {len(present)}")
 
+    # One section failing must not take the others with it. A diagnostic
+    # that dies on the first problem hides the rest — and the databases
+    # worth reporting on are exactly the old ones most likely to surprise
+    # it. Column drift is handled explicitly above; this is the backstop
+    # for whatever was not anticipated.
+    failures = 0
     for report in (
         report_sources,
         report_items,
@@ -268,7 +336,20 @@ def main() -> None:
         report_events,
         report_runs,
     ):
-        report(conn, present)
+        try:
+            report(conn, present)
+        except sqlite3.Error as exc:
+            failures += 1
+            print(f"\n  [{report.__name__} could not run: {exc}]")
+
+    if failures:
+        print(
+            f"\n{failures} section(s) failed. The rest of the report above is "
+            "still valid."
+        )
+
+    if _skipped:
+        print(f"\n{MIGRATE_HINT}")
 
     print("\nNo names, paths, or boxes are printed above — this output is")
     print("safe to paste into an issue or a chat.")
