@@ -1,0 +1,66 @@
+{#
+  The load-more footer, shared by every keyset-paged list (CLD-104).
+
+  The anchor is the mechanism; the sentinel is only the convenience on
+  top. `static/infinite.js` intercepts the click and appends the next
+  slice, but the href is a real URL carrying the cursor, so a console
+  with JavaScript off — or one where that file failed to load — still
+  walks the whole list one navigation at a time. Nothing here degrades
+  to a dead end.
+
+  Four states, deliberately distinct, because three of them would
+  otherwise be indistinguishable from an empty list:
+
+    * more to come  — the button, with its own count
+    * loading       — while a fetch is in flight
+    * end of list   — "that is all of them", with the denominator
+    * error         — "the fetch failed, retry", never silence
+
+  Rendered from `_more()` in web/app.py: `next_url` is None exactly when
+  the list is exhausted, so this template never has to guess.
+#}
+<style>
+  .loadmore {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 16px 20px;
+  }
+  .loadmore .more-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; text-decoration: none;
+    font: inherit; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .loadmore .more-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .loadmore .more-end {
+    margin: 0; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: .04em; color: var(--faint); text-align: center;
+  }
+  /* Shown only while a fetch is in flight — infinite.js hides the button
+     and stamps data-state, so "loading" can never be read as "empty". */
+  .loadmore .more-loading {
+    display: none; margin: 0; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: .04em; color: var(--muted); animation: slpulse 1.2s infinite;
+  }
+  .loadmore[data-state="loading"] .more-loading { display: block; }
+  .loadmore .more-error {
+    margin: 0; max-width: 44ch; text-align: center;
+    font-size: 11.5px; line-height: 1.5; color: oklch(0.86 0.12 30);
+  }
+  .loadmore .more-sentinel { display: block; width: 100%; height: 1px; }
+</style>
+
+<div class="loadmore" data-infinite data-infinite-target="{{ more.target }}" data-state="idle">
+  {% if more.next_url %}
+    <a class="more-btn" href="{{ more.next_url }}"
+       data-load-more data-retry-label="Retry">{{ more.label }}</a>
+    {# Unhidden by infinite.js when a fetch comes back with no further
+       cursor, so the scrolling path ends in words rather than in a list
+       that has simply stopped. #}
+    <p class="more-end" data-load-end hidden>{{ more.end }}</p>
+  {% else %}
+    <p class="more-end">{{ more.end }}</p>
+  {% endif %}
+  <p class="more-loading" aria-live="polite">Loading…</p>
+  <p class="more-error" data-load-error role="alert" hidden></p>
+  <span class="more-sentinel" data-load-sentinel aria-hidden="true"></span>
+</div>

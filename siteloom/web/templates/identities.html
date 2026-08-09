@@ -147,7 +147,9 @@
 <div class="work">
   <div class="cards">
     {% if identities %}
-    <div class="cardgrid">
+    {# id, because infinite.js appends the next slice's cards straight
+       into this grid (data-infinite-target in the footer below). #}
+    <div class="cardgrid" id="identity-cards">
       {% for i in identities %}
       <a class="idcard{% if selected == i.id %} on{% endif %}" href="{{ card_urls[i.id] }}">
         {% if i.best_crop_path %}
@@ -171,6 +173,7 @@
       </a>
       {% endfor %}
     </div>
+    {% include "_load_more.html" %}
     {% else %}
       <p class="empty">
         No identities match this filter.
