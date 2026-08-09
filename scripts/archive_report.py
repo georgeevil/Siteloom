@@ -215,16 +215,31 @@ def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
         return
 
     # Verified, non-rejected, face-class annotations grouped per person.
-    # identity_id is the real ground truth; proposed_name is a guess and
-    # is counted separately so the two are never conflated.
-    for column, caption in (("identity_id", "confirmed identities"),
-                            ("proposed_name", "unconfirmed proposals")):
+    #
+    # The two rows must not overlap. An annotation the importer verified
+    # carries BOTH identity_id and proposed_name, so a proposals query
+    # that does not exclude identity_id counts the same rows twice and
+    # prints two identical lines — one of them labelled "unconfirmed"
+    # about rows that are confirmed.
+    queries = (
+        (
+            "confirmed identities",
+            "identity_id",
+            "identity_id IS NOT NULL",
+        ),
+        (
+            "proposals only, no identity yet",
+            "proposed_name",
+            "proposed_name IS NOT NULL AND identity_id IS NULL",
+        ),
+    )
+    for caption, column, where in queries:
         if column not in cols:
             note_missing("annotations", column)
             continue
         rows = conn.execute(
             f"SELECT {column} AS who, COUNT(*) AS n FROM annotations "
-            f"WHERE {column} IS NOT NULL AND class_name='face' "
+            f"WHERE {where} AND class_name='face' "
             f"AND verified=1 AND rejected=0 GROUP BY {column}"
         ).fetchall()
         if not rows:
@@ -239,6 +254,32 @@ def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
         if clearing:
             sizes = sorted((r["n"] for r in clearing), reverse=True)
             print(f"      sample counts, largest first: {sizes[:20]}")
+
+    # Who did the verifying. This is the number that decides whether the
+    # floor means anything: `verified` is set both by a human clicking
+    # confirm and by the Takeout importer's auto-verify pass, and
+    # training/dataset.py cannot tell them apart. A floor cleared entirely
+    # by machine agreement is a floor cleared by Google's people-tags
+    # agreeing with a face detector — which may well be fine, but it is
+    # not human sign-off and should never be mistaken for it.
+    if "source" in cols and "identity_id" in cols:
+        rule("Who verified the training data")
+        rows = conn.execute(
+            "SELECT source, COUNT(*) AS n FROM annotations "
+            "WHERE identity_id IS NOT NULL AND class_name='face' "
+            "AND verified=1 AND rejected=0 GROUP BY source ORDER BY n DESC"
+        ).fetchall()
+        total = sum(r["n"] for r in rows)
+        for r in rows:
+            share = (r["n"] / total * 100) if total else 0
+            print(f"      {str(r['source']):<12} {r['n']:>8}  ({share:.0f}%)")
+        human = next((r["n"] for r in rows if r["source"] == "human"), 0)
+        if total and not human:
+            print(
+                "\n  No annotation in the training set was verified by a person.\n"
+                "  Every sample is an importer auto-verification, which\n"
+                "  training/dataset.py reads as ground truth regardless."
+            )
 
     print(
         "\n  Only the confirmed-identity row is training data — training/dataset.py\n"
