@@ -346,7 +346,9 @@ def test_stopping_a_job_is_an_admin_action(env):
     assert required_role("POST", "/jobs/12/reap") == "admin"
     assert required_role("POST", "/jobs/reap") == "admin"
     assert required_role("POST", "/jobs/reindex") == "admin"
-    assert required_role("GET", "/jobs") == "view"
+    # The trailing slash in the `/jobs/` prefix still keeps the console
+    # itself readable; its floor is now the bottom rung (CLD-31).
+    assert required_role("GET", "/jobs") == "restricted"
 
     run_id = add_run(Session, host="nvr-two", pid=4242)
     with Session() as session:
