@@ -39,12 +39,27 @@ from siteloom.dispatch.base import Job
 #: ultralytics' bytetrack.yaml defaults, restated here so the effective
 #: tracker config is explicit and stable across library upgrades.
 #: DetectionConfig.tracker entries are merged over these.
+#:
+#: `track_buffer` deliberately departs from ultralytics' 30 (CLD-96).
+#: It counts *sampled* frames, and their default assumes 30 fps video —
+#: at the few-fps Siteloom samples, 30 frames is six seconds of a lost
+#: track coasting on a Kalman prediction whose covariance has grown
+#: enormous, ready to adopt whoever next appears near it. That is not
+#: hypothetical: it merged two different people into one 108-detection
+#: event on real footage, bridging a 6.2 s hole with a 165 px jump.
+#: 10 frames is ~2 s at 5 fps, which measurement put at a 3.0 s / 16 px
+#: worst case over the same clip — a distance well inside one box width,
+#: i.e. plausibly still the same person.
+#:
+#: Raising it back is reasonable for a camera sampled at a higher rate;
+#: it is config, not a constant. What must not happen is treating the
+#: upstream 30 as neutral when the sampling rate makes it six seconds.
 TRACKER_DEFAULTS: dict[str, Any] = {
     "tracker_type": "bytetrack",
     "track_high_thresh": 0.25,
     "track_low_thresh": 0.1,
     "new_track_thresh": 0.25,
-    "track_buffer": 30,
+    "track_buffer": 10,
     "match_thresh": 0.8,
     "fuse_score": True,
 }

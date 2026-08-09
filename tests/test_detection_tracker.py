@@ -21,6 +21,29 @@ def test_default_disables_fuse_score():
             assert data[key] == value
 
 
+def test_lost_tracks_do_not_coast_for_seconds():
+    """`track_buffer` counts sampled frames, and ultralytics' 30 assumes
+    30 fps video. At the few fps Siteloom samples, that is six seconds of
+    a dead track waiting to adopt the next person who walks near its
+    Kalman prediction — which is exactly how one event came to hold two
+    people (CLD-96). The number is only meaningful as a duration, so the
+    assertion is about the duration.
+    """
+    buffered = TRACKER_DEFAULTS["track_buffer"]
+    for sample_fps in (2.0, 5.0):
+        coast_s = buffered / sample_fps
+        assert coast_s <= 5.0, (
+            f"at {sample_fps} fps a lost track survives {coast_s:.1f}s "
+            f"(track_buffer={buffered})"
+        )
+
+
+def test_track_buffer_is_still_overridable_per_deployment():
+    """A camera sampled faster wants a longer buffer; this is config."""
+    path = tracker_config_path(DetectionConfig(tracker={"track_buffer": 45}))
+    assert yaml.safe_load(path.read_text())["track_buffer"] == 45
+
+
 def test_overrides_merge_and_hash_to_distinct_files():
     default = tracker_config_path(DetectionConfig())
     tuned = tracker_config_path(
