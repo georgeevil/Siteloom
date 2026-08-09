@@ -11,7 +11,8 @@ Siteloom: a multi-site video & audio intelligence platform (PoC for Kai Apartmen
 The project uses a plain `venv` + `pip` at `./.venv` (Python ≥3.12). Commands below use `.venv/bin/...` explicitly so they work without activating; interactively, `source .venv/bin/activate` first and drop the prefix.
 
 - `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt` — install (runtime + test deps, project editable)
-- `.venv/bin/pytest` — full test suite; single test: `.venv/bin/pytest tests/test_ingest.py::test_ingest_end_to_end`
+- `.venv/bin/pytest` — full test suite, with coverage (it is in `addopts`); single test: `.venv/bin/pytest tests/test_ingest.py::test_ingest_end_to_end`. Add `--cov-report=html` for `htmlcov/`; add `--no-cov` for a fast iteration loop — coverage roughly doubles the suite's wall clock.
+- `.venv/bin/ruff check .` (`--fix` to apply) and `.venv/bin/mypy` — the lint and type gates. Both pass clean on `main` and both run in CI.
 - `.venv/bin/siteloom run --config config/site.example.yaml` — ingest configured cameras (add `--max-frames N` for a quick debug run)
 - `.venv/bin/siteloom serve --config ...` — event-browser web UI on :8000
 - `.venv/bin/siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
