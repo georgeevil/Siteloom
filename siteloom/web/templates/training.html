@@ -196,7 +196,27 @@
   .btn-danger { border-color: oklch(0.45 0.1 30); color: oklch(0.82 0.12 30); }
   .btn-danger:hover { border-color: var(--red); color: var(--red); }
   .empty { padding: 40px 16px; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
-  .pager { padding: 0 16px 20px; display: flex; gap: 14px; font-family: var(--font-mono); font-size: 11px; }
+  /* Load-more footer (CLD-104). Three states, none of which may read as
+     an empty grid: a button, a full stop, and a failure that says so.
+     It sits inside .gridwrap because .gridwrap is what scrolls — an
+     observer whose sentinel is outside the scroller watches the viewport
+     and fires forever. */
+  .loadmore {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 4px 0 22px;
+  }
+  .lm-btn {
+    padding: 7px 16px; border-radius: 6px; text-decoration: none;
+    border: 1px solid var(--control-border); background: var(--raised);
+    color: var(--text); font-size: 12px;
+  }
+  .lm-btn:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .lm-note { margin: 0; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); }
+  .lm-error { margin: 0; font-family: var(--font-mono); font-size: 10.5px; color: oklch(0.86 0.12 30); }
+  .loadmore[data-state="loading"]::before {
+    content: "Loading…"; font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--muted); animation: slpulse 1.2s infinite;
+  }
   .srctabs { display: none; }
 
   /* Handoff tiers, measured on the work area rather than the window. */
@@ -220,7 +240,12 @@
 {% endblock %}
 
 {% block content %}
-{%- macro nav_url(show=None, kind=None, group=None, size=None, source_id='keep', page=None) -%}
+{#- Facet links carry the whole view state and never a cursor: one of
+    these sent to a colleague has to open at the top of the set it names,
+    and a position halfway down someone else's scroll is not part of what
+    the link describes. The load-more href is composed server-side
+    (`_training_url`) — it is the only URL a cursor belongs in. -#}
+{%- macro nav_url(show=None, kind=None, group=None, size=None, source_id='keep') -%}
 {%- set p = [] -%}
 {%- set _ = p.append('show=' ~ (show or view.show)) -%}
 {%- set _ = p.append('kind=' ~ (kind or view.kind)) -%}
@@ -229,8 +254,6 @@
 {%- set sid = selected_source if source_id == 'keep' else source_id -%}
 {%- if sid %}{% set _ = p.append('source_id=' ~ sid) %}{% endif -%}
 {%- if filters.person %}{% set _ = p.append('person=' ~ (filters.person | urlencode)) %}{% endif -%}
-{%- if page and page > 1 %}{% set _ = p.append('page=' ~ page) %}{% endif -%}
-{#- Changing a facet drops the page: page N of the old filter is meaningless. -#}
 /training?{{ p | join('&') }}
 {%- endmacro -%}
 
@@ -320,39 +343,64 @@
     </div>
 
     <div class="gridwrap" id="gridwrap">
-      {% if proposals %}
-        {% if groups %}
-          {% for name, items in groups %}
-            <div class="grouphead">
-              <h3>{{ name or 'Unnamed' }}</h3>
-              <span class="n">{{ items | length }} crops ·
-                {{ items | selectattr('verified') | list | length }} verified</span>
-            </div>
-            <div class="cropgrid">
-              {% for a in items %}{{ crop_tile(a) }}{% endfor %}
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="cropgrid">
-            {% for a in proposals %}{{ crop_tile(a) }}{% endfor %}
-          </div>
-        {% endif %}
-      {% else %}
-        <p class="empty">
-          No crops match this filter.
-          {% if view.show == 'needs_review' %}
-            Nothing is waiting on review here — try <a href="{{ nav_url(show='all') }}">All</a>.
+      {# Appended slices land in #cropgrids (grouped) or straight into the
+         one #cropflat grid, never in #gridwrap itself — the footer below
+         is a child of #gridwrap and would otherwise be appended into the
+         list along with the rows it belongs to. #}
+      <div id="cropgrids">
+        {% if proposals %}
+          {% if groups %}
+            {% for name, items in groups %}
+              <div class="grouphead">
+                <h3>{{ name or 'Unnamed' }}</h3>
+                <span class="n">{{ items | length }} crops ·
+                  {{ items | selectattr('verified') | list | length }} verified</span>
+              </div>
+              <div class="cropgrid">
+                {% for a in items %}{{ crop_tile(a) }}{% endfor %}
+              </div>
+            {% endfor %}
           {% else %}
-            Index a library source to produce crops:
-            <code>siteloom library scan</code> then <code>siteloom library index</code>.
+            <div class="cropgrid" id="cropflat">
+              {% for a in proposals %}{{ crop_tile(a) }}{% endfor %}
+            </div>
           {% endif %}
-        </p>
-      {% endif %}
-    </div>
+        {% else %}
+          <p class="empty">
+            No crops match this filter.
+            {% if view.show == 'needs_review' %}
+              Nothing is waiting on review here — try <a href="{{ nav_url(show='all') }}">All</a>.
+            {% else %}
+              Index a library source to produce crops:
+              <code>siteloom library scan</code> then <code>siteloom library index</code>.
+            {% endif %}
+          </p>
+        {% endif %}
+      </div>
 
-    <div class="pager">
-      {% if page > 1 %}<a href="{{ nav_url(page=page-1) }}">&larr; previous</a>{% endif %}
-      {% if has_next %}<a href="{{ nav_url(page=page+1) }}">next &rarr;</a>{% endif %}
+      {% if proposals %}
+      {# A real anchor with the cursor in its href: infinite.js only
+         removes the clicking, and the review actions keep working on
+         appended tiles because selection is delegated from #gridwrap
+         rather than bound per tile at load time. #}
+      <div class="loadmore" data-infinite
+           data-infinite-target="{{ '#cropgrids' if view.group == 'name' else '#cropflat' }}"
+           data-state="{{ 'idle' if more_url else 'end' }}">
+        <span data-load-sentinel aria-hidden="true"></span>
+        {% if more_url %}
+        <a class="lm-btn" href="{{ more_url }}" data-load-more data-retry-label="Retry">
+          Load more crops
+        </a>
+        {% endif %}
+        <p class="lm-note" data-load-end {% if more_url %}hidden{% endif %}>
+          That is every crop in this view — {{ crop_total }} in all.
+        </p>
+        <p class="lm-error" data-load-error hidden role="status"></p>
+        {# Present only when this page was reached by following a cursor,
+           which only a client without JavaScript ever does. #}
+        {% if top_url %}<a class="lm-note" href="{{ top_url }}">&uarr; back to the start of this list</a>{% endif %}
+      </div>
+      {% endif %}
     </div>
   </section>
 
@@ -463,6 +511,10 @@
     document.getElementById("summary").innerHTML = lines.join("<br>");
   }
 
+  // Delegated from the grid rather than bound per tile, which is what
+  // keeps selection — and therefore confirm/reject/classify — working on
+  // the tiles continuous scroll appends after this ran (CLD-104). The
+  // same goes for tiles(), which is queried live on every use.
   wrap.addEventListener("click", function (ev) {
     var tile = ev.target.closest(".tile");
     if (!tile) return;

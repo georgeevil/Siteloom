@@ -44,18 +44,22 @@ middleware. Two consequences are worth naming rather than discovering:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 from fastapi import Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete, func, select
 
 from siteloom.store import AuditLog, User, WebSession
-from siteloom.web import auth, nav
+from siteloom.web import auth, nav, paging
 
-#: Rows the audit viewer renders. The table is append-only and grows with
-#: every mutation, so the page is a window on the recent past; the
-#: filters are how you reach further back.
-AUDIT_LIMIT = 200
+#: Rows in one slice of the audit viewer — a page size, not a ceiling
+#: (CLD-104). It used to be `AUDIT_LIMIT`, and it was the only thing
+#: standing between an admin and the 201st row: the trail stopped at 200
+#: with nothing on the page saying so, and on the one screen where "no
+#: row about that" and "200 rows in the way" have to be distinguishable,
+#: they were not. Every slice now carries a cursor to the next one.
+AUDIT_PAGE = 200
 
 
 class UserActionError(ValueError):
@@ -240,8 +244,10 @@ def register(app, templates, Session, config) -> None:
         return RedirectResponse("/users", status_code=303)
 
     @app.get("/audit", response_class=HTMLResponse)
-    def audit_page(request: Request, actor: str = "", path: str = ""):
-        """Who changed what, when.
+    def audit_page(
+        request: Request, actor: str = "", path: str = "", after: str | None = None
+    ):
+        """Who changed what, when — all of it, a slice at a time.
 
         Both filters are substring matches on the row's own columns.
         `actor` reads `AuditLog.username` — the denormalized copy, never a
@@ -251,6 +257,12 @@ def register(app, templates, Session, config) -> None:
         The same column is what carries `(open)` for mutations made before
         auth was enabled and `(failed:name)` for a sign-in that never
         succeeded, neither of which has a User row to join to at all.
+
+        The list is ordered by `id` descending — the primary key of an
+        append-only table, so it is both the recency order and unique, and
+        a single-column cursor cannot drop a tie. New rows land above the
+        cursor while an admin reads, which is precisely what a keyset
+        window is immune to: this page is written to by every other page.
         """
         actor, path = actor.strip()[:200], path.strip()[:200]
         with Session() as session:
@@ -260,10 +272,23 @@ def register(app, templates, Session, config) -> None:
             if path:
                 q = q.filter(_contains(AuditLog.path, path))
             total = session.scalar(select(func.count()).select_from(q.subquery())) or 0
-            rows = (
-                session.scalars(q.order_by(AuditLog.id.desc()).limit(AUDIT_LIMIT))
-                .unique()
-                .all()
+            windowed = q
+            if after:
+                try:
+                    values = paging.decode_cursor(after, (int,))
+                except paging.CursorError as exc:
+                    raise HTTPException(400, f"bad audit cursor: {exc}") from None
+                windowed = q.where(paging.after((AuditLog.id,), values))
+            slice_ = paging.take(
+                list(
+                    session.scalars(
+                        windowed.order_by(AuditLog.id.desc()).limit(AUDIT_PAGE + 1)
+                    )
+                    .unique()
+                    .all()
+                ),
+                AUDIT_PAGE,
+                lambda row: (row.id,),
             )
             # The actor picker is built from the log, not from the user
             # table, for the same reason the filter is: the names worth
@@ -271,15 +296,35 @@ def register(app, templates, Session, config) -> None:
             actors = sorted(
                 {a for (a,) in session.execute(select(AuditLog.username).distinct())}
             )
+        # The filters travel with the cursor, and only here: the picker
+        # and the "clear" link stay cursor-free so a copied /audit URL
+        # opens at the top of the filtered trail.
+        kept = [(k, v) for k, v in (("actor", actor), ("path", path)) if v]
+        more_url = None
+        if not slice_.exhausted:
+            more_url = "/audit?" + urlencode(
+                [*kept, ("after", slice_.next_cursor or "")]
+            )
         return templates.TemplateResponse(
             request,
             "audit.html",
             _ctx(
-                rows=rows,
+                rows=slice_.rows,
                 actors=actors,
                 total=total,
-                shown=len(rows),
-                limit=AUDIT_LIMIT,
+                shown=len(slice_.rows),
+                # None when the trail is exhausted. The template needs the
+                # difference: "nothing more was ever audited" and "there is
+                # more, ask for it" are the two readings the old 200-row
+                # ceiling collapsed into one silent list.
+                more_url=more_url,
+                # Only ever set on the no-JS walk: a client running
+                # infinite.js appends in place and never navigates to a
+                # cursor, so nobody with scripting can land part-way down
+                # the trail without a way back to the top of it.
+                top_url=("/audit?" + urlencode(kept) if kept else "/audit")
+                if after
+                else None,
                 filters={"actor": actor, "path": path},
                 filtered=bool(actor or path),
             ),
