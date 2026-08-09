@@ -86,6 +86,14 @@ class Event(Base):
     # has no verdicts to infer from and would otherwise sit in the queue
     # forever. Clearing is reversible; reopening nulls it.
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # The incident this event was escalated into (CLD-96), or NULL — which
+    # is what almost every event is. Escalation is deliberately NOT a fifth
+    # `review_status`: one incident links many events across cameras, and a
+    # per-event status could not express that (see `Incident`). So the
+    # status property and its SQL twin below are untouched by this column.
+    incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incidents.id"), nullable=True, index=True
+    )
     # Significance gate (event noise reduction): ingest creates events as
     # insignificant ("ephemeral") and flips this once the event accumulates
     # enough detections/confidence/duration (EventConfig); the flip is
@@ -98,6 +106,7 @@ class Event(Base):
     camera: Mapped[Camera] = relationship(back_populates="events")
     detections: Mapped[list["Detection"]] = relationship(back_populates="event")
     identities: Mapped[list["EventIdentity"]] = relationship(back_populates="event")
+    incident: Mapped["Incident | None"] = relationship(back_populates="events")
 
     @property
     def active_identities(self) -> list["EventIdentity"]:
@@ -343,6 +352,92 @@ def unmatched_clause():
         )
         .exists()
     )
+
+
+#: An incident's lifecycle. Two states, because the question it answers is
+#: "is anyone still working this" — anything finer is a workflow tool, and
+#: a property manager with one console does not have a workflow.
+INCIDENT_STATUSES = ("open", "closed")
+
+
+class Incident(Base):
+    """Something happened here — kept, so it can be found again (CLD-96).
+
+    The Escalate action on the triage rail had no semantics for a year
+    because nobody could answer "escalate to whom". For a property manager
+    the honest answer is: nobody, immediately — and somebody, later. An
+    insurer, the police, a tenant dispute six weeks on. That rules out a
+    notification (a broker nobody is subscribed to) and a review queue
+    (state that means nothing once the shift ends), and leaves a record.
+
+    Why this is its own table rather than a fifth `Event.review_status`:
+
+    * **One incident links many events.** A vehicle arriving, someone at
+      the door, and a noise episode forty minutes later are one incident
+      across three cameras. A per-event flag cannot say that, and saying
+      it is the entire reason this exists. `Event.incident_id` is the
+      link; the status property and `status_clause` are left alone.
+    * **It has a lifecycle of its own.** `Event.reviewed_at` says someone
+      looked; an incident's closure says how it ended.
+    * **It carries prose** (`IncidentNote`). Every other field here is
+      reconstructible from the events; the notes are the part worth
+      anything to a reader who was not there.
+
+    `opened_by`/`closed_by` are denormalized usernames for the same reason
+    `AuditLog.username` is: the record must still say who judged this
+    after the account is renamed or deleted. "(open)" records a judgement
+    made before auth was enabled.
+
+    Deleting an incident must not delete its events — the events are the
+    record, the incident is an interpretation of them — so `events` carries
+    no delete cascade and the member rows are detached instead. `notes`
+    *are* part of the interpretation and go with it.
+    """
+
+    __tablename__ = "incidents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="open", index=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    opened_by: Mapped[str] = mapped_column(String, default="")
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    closed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    events: Mapped[list["Event"]] = relationship(back_populates="incident")
+    notes: Mapped[list["IncidentNote"]] = relationship(
+        back_populates="incident",
+        cascade="all, delete-orphan",
+        order_by="IncidentNote.at",
+    )
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == "open"
+
+
+class IncidentNote(Base):
+    """One entry of an incident's prose, appended.
+
+    Append-only rather than one editable blob: the notes are the evidence
+    half of the record, and a record that can be silently rewritten is
+    worth less to the reader it was written for. `kind` marks the two
+    entries the console writes itself — the closing note and the reason a
+    closed incident was reopened — so an export can render the lifecycle
+    and the commentary as one chronology instead of two.
+    """
+
+    __tablename__ = "incident_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidents.id"), index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    author: Mapped[str] = mapped_column(String, default="")
+    # "note" | "close" | "reopen"
+    kind: Mapped[str] = mapped_column(String, default="note")
+    body: Mapped[str] = mapped_column(Text, default="")
+
+    incident: Mapped[Incident] = relationship(back_populates="notes")
 
 
 class NoiseEvent(Base):

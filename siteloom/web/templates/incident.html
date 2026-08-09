@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}Incident {{ incident.id }}{% endblock %}
+{% block subtitle %}{{ incident.title }}{% endblock %}
+
+{#
+  One incident (CLD-96): its events in time order, its prose, its
+  lifecycle, and the export.
+
+  Time order rather than the order the events were attached — the record
+  is read as a chronology by someone who was not there, and the operator
+  attached them in whatever order the triage queue surfaced them.
+
+  Notes are appended, never edited: a record that can be quietly rewritten
+  is worth less to the reader it exists for. The closing note shares the
+  close button because "how did this end" is the question that reader has.
+#}
+
+{% block content %}
+<style>
+  .in-top { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; }
+  .in-top h2 { font-size: 16px; font-weight: 600; margin: 0; }
+  .in-state {
+    display: inline-block; padding: 3px 7px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .in-state.open { background: oklch(0.3 0.05 85); color: oklch(0.87 0.1 85); }
+  .in-state.closed { background: oklch(0.27 0.02 250); color: oklch(0.72 0.01 250); }
+  .in-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .in-facts {
+    display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 18px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--faint);
+  }
+  .in-facts b { color: var(--muted); font-weight: 500; }
+
+  .in-section { margin-bottom: 22px; }
+  .in-section h3 {
+    margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--faint);
+    font-weight: 500;
+  }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .erow {
+    display: grid; grid-template-columns: 84px 150px 1fr 150px 130px;
+    align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .erow:last-child { border-bottom: 0; }
+  .erow.head {
+    padding: 0 14px; height: 32px; background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .erow img {
+    width: 72px; aspect-ratio: 4/3; object-fit: cover; border-radius: 4px;
+    border: 1px solid var(--hairline); display: block;
+    background: oklch(0.26 0.01 250);
+  }
+  .erow .ph { width: 72px; aspect-ratio: 4/3; border-radius: 4px; background: oklch(0.26 0.01 250); }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .in-sub { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+
+  .in-note {
+    border-left: 2px solid var(--hairline); padding: 2px 0 2px 12px; margin: 0 0 12px;
+    font-size: 12.5px; line-height: 1.6; white-space: pre-wrap;
+  }
+  .in-note.close { border-left-color: var(--green); }
+  .in-note.reopen { border-left-color: var(--amber); }
+  .in-note .who {
+    display: block; font-family: var(--font-mono); font-size: 10px;
+    color: var(--faint); white-space: normal;
+  }
+
+  .in-form {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start;
+    margin-top: 10px; font-size: 12px;
+  }
+  .in-form textarea, .in-form input, .in-form button {
+    padding: 6px 9px; border-radius: 6px; font-family: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .in-form textarea { min-width: 46ch; min-height: 60px; resize: vertical; }
+  .in-form button { cursor: pointer; }
+  .in-form button:hover { border-color: oklch(0.5 0.03 250); }
+  .in-form .danger { color: oklch(0.86 0.12 30); }
+  .btn-outline {
+    padding: 6px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--muted);
+    text-decoration: none; display: inline-block;
+  }
+  .btn-outline:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .in-none {
+    padding: 12px 14px; color: var(--faint); font-size: 12px;
+    border: 1px dashed var(--row-rule); border-radius: 8px;
+  }
+</style>
+
+<div class="in-top">
+  <h2>{{ incident.title }}</h2>
+  <span class="in-state {{ incident.status }}">{{ incident.status }}</span>
+  <div class="in-actions">
+    {# The export is the artifact this screen exists to produce: one
+       self-contained file, crops embedded, readable with no console. #}
+    <a class="btn-outline" href="/incidents/{{ incident.id }}/export">Export bundle</a>
+    <a class="btn-outline" href="/incidents">All incidents</a>
+  </div>
+</div>
+
+<div class="in-facts">
+  <span>incident <b>#{{ incident.id }}</b></span>
+  <span>opened <b>{{ incident.opened_at.strftime('%Y-%m-%d %H:%M') }}</b>
+    by <b>{{ incident.opened_by or '—' }}</b></span>
+  {% if incident.closed_at %}
+  <span>closed <b>{{ incident.closed_at.strftime('%Y-%m-%d %H:%M') }}</b>
+    by <b>{{ incident.closed_by or '—' }}</b></span>
+  {% endif %}
+  <span><b>{{ events | length }}</b> event{{ '' if events | length == 1 else 's' }}</span>
+  <span>cameras <b>{{ cameras | join(', ') if cameras else '—' }}</b></span>
+  {% if start %}
+  <span>window <b>{{ start.strftime('%Y-%m-%d %H:%M:%S') }}</b>
+    → <b>{{ end.strftime('%Y-%m-%d %H:%M:%S') }}</b></span>
+  {% endif %}
+</div>
+
+<div class="in-section">
+  <h3>Timeline</h3>
+  {% if events %}
+  <div class="tablecard">
+    <div class="erow head">
+      <div>Crop</div><div>First seen (UTC)</div><div>What</div>
+      <div>Identified as</div><div></div>
+    </div>
+    {% for e in events %}
+    <div class="erow">
+      <div>
+        {% if e.best_crop_path %}
+          <img src="/media/{{ e.best_crop_path }}" alt="{{ e.class_name }}">
+        {% else %}
+          <div class="ph"></div>
+        {% endif %}
+      </div>
+      <div>
+        <div class="mono">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+        <div class="in-sub">{{ ((e.last_seen - e.first_seen).total_seconds()) | round | int }}s
+          · {{ e.detection_count }} detection{{ '' if e.detection_count == 1 else 's' }}</div>
+      </div>
+      <div>
+        <a href="/events/{{ e.id }}">{{ e.class_name }} · event {{ e.id }}</a>
+        <div class="in-sub">{{ e.camera.name if e.camera else e.camera_id }}</div>
+      </div>
+      <div class="mono">
+        {%- set names = [] -%}
+        {%- for link in e.active_identities if link.identity -%}
+          {%- set _ = names.append(link.identity.display_name) -%}
+        {%- endfor -%}
+        {{ names | join(', ') if names else '—' }}
+      </div>
+      <div>
+        {# Detaching an event escalated by mistake. The event itself is
+           untouched — the events are the record, this is a judgement
+           about them. #}
+        <form class="in-form" style="margin:0" method="post"
+              action="/incidents/{{ incident.id }}/events/{{ e.id }}/remove">
+          <button type="submit" class="btn-outline"
+                  title="Detach this event; the event itself is kept">Remove</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="in-none">
+    No events are attached. Escalate one from the triage rail on
+    <a href="/">Events</a> to add it here.
+  </div>
+  {% endif %}
+</div>
+
+<div class="in-section">
+  <h3>Notes</h3>
+  {% if notes %}
+    {% for note in notes %}
+    <div class="in-note {{ note.kind }}">
+      <span class="who">{{ note.at.strftime('%Y-%m-%d %H:%M:%S') }} ·
+        {{ note.author or '—' }}{% if note.kind != 'note' %} · {{ note.kind }}{% endif %}</span>
+      {{ note.body }}
+    </div>
+    {% endfor %}
+  {% else %}
+  <div class="in-none">
+    No notes yet. The prose is the part worth anything to a reader six weeks
+    from now — every other field here can be rebuilt from the events.
+  </div>
+  {% endif %}
+  <form class="in-form" method="post" action="/incidents/{{ incident.id }}/note">
+    <textarea name="body" placeholder="What happened, what was done." required></textarea>
+    <button type="submit">Add note</button>
+  </form>
+</div>
+
+<div class="in-section">
+  <h3>{{ 'Close' if incident.is_open else 'Reopen' }}</h3>
+  <form class="in-form" method="post" action="/incidents/{{ incident.id }}/status">
+    <input type="hidden" name="status" value="{{ 'closed' if incident.is_open else 'open' }}">
+    <textarea name="body"
+              placeholder="{{ 'How it ended (recorded with the closure).' if incident.is_open else 'Why it is being reopened.' }}"></textarea>
+    <button type="submit">{{ 'Close incident' if incident.is_open else 'Reopen incident' }}</button>
+  </form>
+  <form class="in-form" method="post" action="/incidents/{{ incident.id }}/delete">
+    <button type="submit" class="danger"
+            onclick="return confirm('Delete this incident and its notes? The events stay exactly as they are — only this interpretation of them goes.')">
+      Delete incident</button>
+  </form>
+</div>
+{% endblock %}

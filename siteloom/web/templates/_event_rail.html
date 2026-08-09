@@ -160,6 +160,55 @@
     {% endif %}
   </div>
 
+  {# Escalate (CLD-96). Not a flag on the event — it attaches this event
+     to an incident, which is a record that links events across cameras
+     and outlives the shift. Its options come from a Jinja global
+     (incidents_routes.escalate_options) for the same reason nav_items is
+     one: this rail's context is built in app.py, which must not have to
+     know incidents exist for the control to render.
+
+     Adding to an open incident is the common case, so it is the default
+     selection and the whole interaction is one click — the create path
+     is the last option in the same select, never a separate step. #}
+  {% set incidents = escalate_options(e.id) %}
+  <div class="rail-section">
+    <h3>Incident</h3>
+    {% if incidents.current %}
+      <p class="rail-note">
+        Escalated into
+        <a href="/incidents/{{ incidents.current.id }}">{{ incidents.current.title }}</a>
+        ({{ incidents.current.status }}).
+      </p>
+      <form class="id-edit" method="post"
+            action="/incidents/{{ incidents.current.id }}/events/{{ e.id }}/remove">
+        <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
+        <button type="submit" class="btn-outline sm on-amber"
+                title="Detach this event; the incident and the event both remain">
+          Remove from incident</button>
+      </form>
+    {% else %}
+      <p class="rail-note">
+        {% if incidents.recent %}
+          Add this event to an open incident, or open a new one.
+        {% else %}
+          Nothing is open. Escalating opens an incident — a record that
+          outlives this session, with this event as its first.
+        {% endif %}
+      </p>
+      <form class="id-attach" method="post" action="/events/{{ e.id }}/escalate">
+        <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
+        <select name="incident_id" aria-label="Incident">
+          {% for row in incidents.recent %}
+            <option value="{{ row.id }}">{{ row.title }} · {{ row.events }} event{{ '' if row.events == 1 else 's' }}</option>
+          {% endfor %}
+          <option value="new">+ new incident</option>
+        </select>
+        <input type="text" name="title" placeholder="title (new incident)">
+        <button type="submit" class="btn-outline sm">Escalate</button>
+      </form>
+    {% endif %}
+  </div>
+
   <div class="rail-actions">
     <form method="post" action="/events/{{ e.id }}/review">
       <input type="hidden" name="reviewed" value="{{ '0' if e.reviewed_at else '1' }}">
