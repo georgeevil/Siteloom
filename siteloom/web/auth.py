@@ -124,6 +124,12 @@ ADMIN_READ_PREFIXES = (
 RESTRICTED_DENIED_PREFIXES = (
     "/classes",
     "/identities",
+    # An incident is built from events a restricted operator may read, but
+    # its detail view and its export both render `identity.display_name`
+    # for every event on the timeline — so the incident is a list of who
+    # was there, which is the one thing this rung withholds. Escalating is
+    # `edit` work and out of reach anyway; reading is what needed closing.
+    "/incidents",
     "/library",
     "/search",
     "/train",

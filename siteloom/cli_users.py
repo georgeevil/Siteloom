@@ -21,7 +21,7 @@ from pathlib import Path
 import typer
 from sqlalchemy import select
 
-from siteloom.web.auth import ROLE_SUMMARIES, ROLES, hash_password, role_label
+from siteloom.web.auth import ROLES, hash_password, role_label
 
 #: Built from the ladder rather than typed out, so a rung added to ROLES
 #: cannot go unmentioned in the help text of the commands that set it.
