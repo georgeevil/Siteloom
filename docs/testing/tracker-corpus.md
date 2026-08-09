@@ -125,6 +125,33 @@ regression test.
 | 2026-08-09 | BoT-SORT **with ReID** scores identically to plain ByteTrack here. The appearance-aware tracker that looks obviously right bought nothing. Worth re-running when ultralytics changes its ReID backend — "no benefit" is a measurement, not a permanent fact. |
 | 2026-08-09 | `yolo11s` costs 40 ms/frame warm against nano's 39 on mps at this resolution, and halves track churn. Effectively free. |
 
+## A result belongs to a camera, not to the site
+
+Everything above was measured on one minute of `backyard-puerta`: gravel
+and foliage, subjects 2–5 m away and roughly 100 px wide, at night under
+IR. None of that generalises. A driveway watching cars at 30 m, or a
+doorway where subjects fill the frame, will disagree about every number
+here — box widths differ by an order of magnitude, so the same pixel jump
+is damning on one camera and unremarkable on the next, and IR washes out
+exactly the colour the appearance embedder leans on.
+
+So `shipped` winning on this clip means *the shipped config is right for
+this camera*. It is evidence about a site only once the corpus covers
+several cameras that disagree with each other.
+
+**Detection settings are not per-camera yet** (CLD-99). `sample_fps`,
+event rules and identity thresholds already are; `detection.model`,
+`.confidence`, `.class_confidence` and `.tracker` are site-wide, so today
+the harness can only recommend one setting for all cameras and the best
+it can do is tell you which camera is paying for that. Until that lands,
+read a per-clip win as "this does not hurt here" rather than "adopt this
+everywhere".
+
+The practical consequence for the corpus: **add clips from cameras that
+are unlike each other** before drawing a conclusion. Two clips from the
+same camera confirm each other; two from different cameras are the first
+real test of a setting.
+
 ## What this does not measure
 
 - **Whether an identity claim was right.** That is `/stats` and operator
