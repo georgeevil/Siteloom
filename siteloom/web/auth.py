@@ -46,15 +46,19 @@ PUBLIC_PATHS = {"/login", "/healthz", "/readyz"}
 #: Prefixes with their own auth scheme (x-api-key).
 EXEMPT_PREFIXES = ("/api/v1/",)
 #: Path prefixes whose mutations reconfigure the system rather than
-#: review its output — admin only. `/jobs/` covers every mutation on the
-#: jobs console (reindex, cancel, reap): each one starts or stops work
-#: the whole site is doing, which is not a reviewer's call. The trailing
-#: slash matters — GET /jobs stays a `view` screen.
+#: review its output — admin only. A trailing slash is load-bearing on
+#: two of these: `/jobs/` covers every mutation on the jobs console
+#: (reindex, cancel, reap) while leaving GET /jobs a `view` screen, and
+#: `/train/` keeps this off `/training`, which is labelling and needs
+#: only `edit`.
 ADMIN_PREFIXES = (
     "/backfill",
     "/classes/detection",
     "/classes/events",
     "/jobs/",
+    # Enrolling, fine-tuning and adopting a model reconfigure what the
+    # system recognizes (CLD-94).
+    "/train/",
     "/users",
 )
 
