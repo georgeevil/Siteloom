@@ -5,6 +5,11 @@ into the Booking table, and answers "does this timestamp fall inside a
 known guest arrival window?" — used to stamp events guest_window=True so
 unknown-vehicle alerts during expected arrivals are suppressed (the PoC
 success metric in PRD §12).
+
+Bookings can also be entered by hand from the console's /bookings screen
+when the feed is wrong or does not carry them. Those rows are marked
+`source="manual"` and this sync never touches them — see the collision
+guard in `sync_bookings` (CLD-90).
 """
 
 from __future__ import annotations
@@ -57,8 +62,22 @@ def sync_bookings(session: Session, cfg: GuestConfig) -> int:
         end = _as_naive_utc(component["DTEND"].dt) if "DTEND" in component else start
         summary = str(component.get("SUMMARY", ""))
         booking = session.query(Booking).filter_by(uid=uid).first()
+        if booking is not None and booking.is_manual:
+            # A manual booking is an operator's correction to this very
+            # feed (CLD-90). `uid` is unique, so a feed carrying the same
+            # UID cannot be stored alongside it — and of the two, the row
+            # that must survive is the human's. Skipped loudly rather than
+            # silently: a correction the next sync reverts is worse than
+            # no correction at all.
+            log.warning(
+                "iCal uid %s collides with a manual booking (id=%s); "
+                "keeping the manual row",
+                uid,
+                booking.id,
+            )
+            continue
         if booking is None:
-            booking = Booking(uid=uid)
+            booking = Booking(uid=uid, source="ical")
             session.add(booking)
         booking.summary = summary
         booking.start = start

@@ -92,6 +92,57 @@ def is_derivative(path: Path) -> bool:
     return any(marker in path.stem for marker in DERIVATIVE_MARKERS)
 
 
+@dataclass
+class TreePreview:
+    """What a Takeout tree contains, counted without importing it.
+
+    The wizard needs real numbers before an operator commits to a
+    multi-hour run, and `LibraryIndexer.scan()` cannot supply them: scan
+    registers every media file it finds, including Google's `-edited`
+    derivatives, which `import_tree` deliberately skips. Running scan
+    over a Takeout tree therefore leaves those derivatives parked as
+    `pending` forever — invisible until some later `library index` picks
+    them up and seeds the gallery with near-duplicates of photos it
+    already has (the bias DERIVATIVE_MARKERS exists to prevent).
+
+    So this counts and registers nothing. Sidecars are counted by
+    extension rather than parsed: the question at this step is "does this
+    look like a Takeout export", and parsing 26k JSON files to answer it
+    would make step 1 as slow as the step it is meant to preview.
+    """
+
+    media: int = 0
+    derivatives: int = 0
+    sidecars: int = 0
+    sample: list[Path] = field(default_factory=list)
+
+    @property
+    def looks_like_takeout(self) -> bool:
+        """No sidecars means no people tags, which means the import has
+        nothing to propose — worth saying before, not after, the run."""
+        return self.sidecars > 0
+
+
+def preview_tree(root: str | Path, sample_size: int = 8) -> TreePreview:
+    """Count what `import_tree` would import. Walks names only."""
+    root = Path(root).expanduser().resolve()
+    preview = TreePreview()
+    for file in sorted(root.rglob("*")):
+        suffix = file.suffix.lower()
+        if suffix == ".json":
+            preview.sidecars += 1
+            continue
+        if suffix not in IMAGE_EXTS | VIDEO_EXTS:
+            continue
+        if is_derivative(file):
+            preview.derivatives += 1
+            continue
+        preview.media += 1
+        if len(preview.sample) < sample_size:
+            preview.sample.append(file)
+    return preview
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -630,46 +629,30 @@ def jobs_cancel(
     Sends the same signal Ctrl-C does, so the job finishes its batch,
     commits, records itself interrupted and leaves a resume command —
     the operator does not have to be at the terminal that started it.
-    """
-    import signal
 
-    from siteloom.health import hostname, process_alive
-    from siteloom.store import OperationRun
+    The mechanism is `progress.request_cancel`, which the /jobs console
+    also calls: one definition of what a cancelled run means.
+    """
+    from siteloom.progress import request_cancel
 
     _cfg, Session = _light_setup(config, level="WARNING")
     with Session() as session:
-        run = session.get(OperationRun, run_id)
-        if run is None:
-            typer.echo(f"no run #{run_id}", err=True)
-            raise typer.Exit(1)
-        if run.status != "running":
-            typer.echo(f"run #{run_id} is already {run.status}")
+        result = request_cancel(session, run_id, force=force)
+
+    if not result.ok:
+        # A run that already finished is not an error to shout about;
+        # everything else is a cancel that did not happen.
+        if result.reason == "not_running":
+            typer.echo(result.detail)
             return
-        pid, host, kind = run.pid, run.host, run.kind
-
-    if host and host != hostname():
-        typer.echo(
-            f"run #{run_id} belongs to {host}; cancel it there "
-            f"(this is {hostname()})",
-            err=True,
+        remedy = (
+            " — `siteloom jobs reap` clears it"
+            if result.reason == "no_process"
+            else ""
         )
+        typer.echo(result.detail + remedy, err=True)
         raise typer.Exit(1)
-    if not pid or not process_alive(pid):
-        typer.echo(
-            f"run #{run_id} ({kind}) has no live process — it died without "
-            f"recording an outcome; clear it with `siteloom jobs reap`",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    os.kill(pid, signal.SIGKILL if force else signal.SIGINT)
-    if force:
-        typer.echo(f"killed #{run_id} ({kind}, pid {pid}) — work since the last commit is lost")
-        return
-    typer.echo(
-        f"asked #{run_id} ({kind}, pid {pid}) to stop; it will finish the "
-        f"current batch and print a resume command in its own terminal"
-    )
+    typer.echo(result.detail)
 
 
 @jobs_app.command("reap")
@@ -682,20 +665,16 @@ def jobs_reap(
     A killed process leaves its row saying `running` forever, which makes
     every later `jobs list` ambiguous. This marks those rows `abandoned`,
     keeping their position and resume command intact.
-    """
-    from sqlalchemy import select
 
-    from siteloom.store import OperationRun
+    Shared with the /jobs console's reap buttons (`progress.reap_runs`),
+    so a row closed out from the browser reads the same as one closed out
+    here.
+    """
+    from siteloom.progress import reap_runs, stale_runs
 
     _cfg, Session = _light_setup(config, level="WARNING")
     with Session() as session:
-        stale = [
-            r
-            for r in session.scalars(
-                select(OperationRun).filter(OperationRun.status == "running")
-            ).all()
-            if r.is_stale
-        ]
+        stale = stale_runs(session)
         if not stale:
             typer.echo("nothing to reap — no abandoned runs")
             return
@@ -706,12 +685,8 @@ def jobs_reap(
             )
         if not yes and not typer.confirm(f"mark {len(stale)} run(s) abandoned?"):
             raise typer.Abort()
-        for run in stale:
-            run.status = "abandoned"
-            run.message = "process gone; closed out by `jobs reap`"
-            run.finished_at = _now()
-        session.commit()
-    typer.echo(f"reaped {len(stale)} run(s); resume commands are preserved")
+        reaped = reap_runs(session, stale)
+    typer.echo(f"reaped {reaped} run(s); resume commands are preserved")
 
 
 @jobs_app.command("watch")

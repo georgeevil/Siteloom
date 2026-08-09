@@ -15,7 +15,8 @@
     background: light-dark(#0a63c9, #2d6fd0); }
   .job.complete .bar > div { background: light-dark(#1c7c3c, #3f9d63); }
   .job.failed .bar > div, .job.stale .bar > div { background: light-dark(#b3261e, #d4453c); }
-  .job.interrupted .bar > div { background: light-dark(#8a6410, #c99a2e); }
+  .job.interrupted .bar > div, .job.abandoned .bar > div {
+    background: light-dark(#8a6410, #c99a2e); }
   .facts { display: flex; gap: 1.1rem; flex-wrap: wrap; font-size: 0.8rem; }
   .facts b { font-variant-numeric: tabular-nums; }
   .counters { margin-top: 0.35rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
@@ -24,6 +25,13 @@
   .resume { margin-top: 0.45rem; font-size: 0.78rem; }
   .resume code { background: light-dark(#f0f0f4, #26262b); padding: 0.15rem 0.4rem;
     border-radius: 5px; user-select: all; }
+  .actions { margin-top: 0.5rem; display: flex; gap: 0.6rem; align-items: baseline;
+    flex-wrap: wrap; font-size: 0.78rem; }
+  .actions button { padding: 0.25rem 0.7rem; border-radius: 6px; cursor: pointer;
+    font-size: 0.78rem; }
+  .notice { border: 1px solid light-dark(#c6d8f2, #2d6fd0); border-radius: 8px;
+    background: light-dark(#eef4fd, #17202c); padding: 0.5rem 0.75rem;
+    margin-bottom: 0.8rem; font-size: 0.82rem; }
 </style>
 
 <div style="display:flex; align-items:baseline; gap:0.8rem;">
@@ -37,6 +45,27 @@
   shows up here — and a run that died leaves its last position behind
   instead of disappearing.
 </p>
+
+{% if notice %}
+<div class="notice">{{ notice }}</div>
+{% endif %}
+
+{% if stale %}
+<div class="job stale" style="margin-bottom:1rem;">
+  <h3 style="margin-bottom:0.35rem;">{{ stale | length }} dead row{{ '' if stale | length == 1 else 's' }}</h3>
+  <p class="muted" style="font-size:0.78rem; margin:0 0 0.55rem; max-width:70ch;">
+    These still say <em>running</em> with no process behind them, which makes
+    every later reading of this page ambiguous. Reaping marks them
+    <em>abandoned</em> and keeps their position and resume command, so the work
+    they finished can still be continued.
+  </p>
+  <form method="post" action="/jobs/reap"
+        onsubmit="return confirm('Close out {{ stale | length }} dead run(s) as abandoned? Their positions and resume commands are kept.')"
+        class="actions">
+    <button type="submit">Reap all {{ stale | length }}</button>
+  </form>
+</div>
+{% endif %}
 
 {% if unifi_cameras %}
 <div class="job" style="margin-bottom:1rem;">
@@ -70,7 +99,7 @@
 
 <div id="jobs">
   {% for r in runs %}
-  <div class="job {{ r.status }}" data-id="{{ r.id }}">
+  <div class="job {{ r.status }}" data-id="{{ r.id }}" data-status="{{ r.status }}">
     <h3>
       <span class="badge">{{ r.kind }}</span>
       <span class="j-phase">{{ r.phase or '—' }}</span>
@@ -93,10 +122,30 @@
       {% for k, v in r.phase_timings.items() %}<span class="muted">{{ k }}: {{ v }}s</span>{% endfor %}
     </div>
     {% endif %}
-    {% if r.status in ('interrupted', 'stale') and r.resume_command %}
+    {% if r.status in ('interrupted', 'stale', 'abandoned') and r.resume_command %}
     <div class="resume">Resume: <code>{{ r.resume_command }}</code></div>
     {% elif r.message %}
     <div class="resume muted">{{ r.message }}</div>
+    {% endif %}
+    {% if r.status == 'running' %}
+    <form method="post" action="/jobs/{{ r.id }}/cancel" class="actions"
+          onsubmit="return confirm('Ask job #{{ r.id }} ({{ r.kind }}) to stop? It finishes the batch it is in, saves progress and keeps its resume command. This cannot be undone.')">
+      <button type="submit">Cancel</button>
+      <span class="muted">
+        A request, not a kill: the job finishes the batch it is in, commits,
+        records itself interrupted and keeps its resume command — so the
+        status here changes when the batch ends, not the instant you click.
+      </span>
+    </form>
+    {% elif r.status == 'stale' %}
+    <form method="post" action="/jobs/{{ r.id }}/reap" class="actions"
+          onsubmit="return confirm('Close out job #{{ r.id }} as abandoned? Its position and resume command are kept.')">
+      <button type="submit">Reap</button>
+      <span class="muted">
+        Nothing is working on this any more. Reaping records it
+        <em>abandoned</em>, keeping the position and resume command above.
+      </span>
+    </form>
     {% endif %}
   </div>
   {% else %}
@@ -117,6 +166,9 @@ async function refresh() {
     if (r.status === 'running') anyRunning = true;
     const el = document.querySelector(`.job[data-id="${r.id}"]`);
     if (!el) { window.location.reload(); return; }   // a new run appeared
+    // A status change moves which actions are offered — a Cancel button
+    // left on a run that already stopped is a lie. Re-render server-side.
+    if (el.dataset.status !== r.status) { window.location.reload(); return; }
     el.className = `job ${r.status}`;
     el.querySelector('.j-phase').textContent = r.phase || '—';
     el.querySelector('.j-status').textContent = r.status;
