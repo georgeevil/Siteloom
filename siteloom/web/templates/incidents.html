@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Incidents{% endblock %}
+{% block subtitle %}records that outlive the session{% endblock %}
+
+{#
+  Incidents (CLD-96). Open first, then closed — the list is read as "what
+  is still mine", and a closed incident is only ever looked up on purpose.
+
+  Each row is the incident as its events describe it: the window they
+  span, the cameras they came from, how many there are. None of that is
+  stored on the incident, because a cached copy would be wrong the moment
+  an event is attached or removed.
+
+  The empty state follows the /noise and /bookings rule (CLD-26): "nothing
+  has ever been escalated" is a fact about this install and has to say how
+  one is opened, while "nothing is open" is a fact about right now and is
+  exactly the good news it looks like.
+#}
+
+{% block content %}
+<style>
+  .in-head { margin-bottom: 14px; }
+  .in-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .in-head p { font-size: 12px; color: var(--muted); margin: 0; max-width: 78ch; }
+  .in-facts {
+    display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 16px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--faint);
+  }
+  .in-facts b { color: var(--muted); font-weight: 500; }
+
+  .in-section { margin-bottom: 20px; }
+  .in-section h3 {
+    margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--faint);
+    font-weight: 500;
+  }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .irow {
+    display: grid; grid-template-columns: 250px 1fr 180px 70px 120px;
+    align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .irow:last-child { border-bottom: 0; }
+  .irow.head {
+    padding: 0 14px; height: 32px; background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .irow.open { background: oklch(0.23 0.02 200); }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .in-sub { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .in-title { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+  .in-count { font-family: var(--font-mono); font-size: 12px; }
+  .in-zero { color: var(--faint); }
+
+  .in-empty {
+    border: 1px dashed var(--control-border); border-radius: 8px;
+    padding: 18px 20px; color: var(--muted); font-size: 12.5px; line-height: 1.65;
+  }
+  .in-empty h3 { margin: 0 0 8px; font-size: 13px; color: var(--text); font-weight: 600; }
+  .in-empty code {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--raised); padding: 1px 5px; border-radius: 3px;
+  }
+  .in-none {
+    padding: 12px 14px; color: var(--faint); font-size: 12px;
+    border: 1px dashed var(--row-rule); border-radius: 8px;
+  }
+</style>
+
+<div class="in-head">
+  <h2>Incidents</h2>
+  <p>
+    An incident is what <strong>Escalate</strong> on the triage rail opens: a
+    record that links the events of one occurrence — across cameras, over
+    hours — carries the operator's notes, and exports as a single file for a
+    reader who has no console.
+  </p>
+</div>
+
+<div class="in-facts">
+  <span><b>{{ total }}</b> incident{{ '' if total == 1 else 's' }}</span>
+  <span><b>{{ open_count }}</b> open</span>
+  <span><b>{{ closed_count }}</b> closed</span>
+</div>
+
+{% if empty %}
+<div class="in-empty">
+  <h3>No incidents have been opened</h3>
+  Nothing has been escalated on this site yet — which is not the same as
+  everything having been dealt with.
+  <p style="margin:10px 0 0;">
+    Open one from the triage rail: pick an event on <a href="/">Events</a> and
+    use <code>Escalate</code>. The event becomes the incident's first; add the
+    rest as you find them, on any camera.
+  </p>
+</div>
+
+{% else %}
+{% for section in sections %}
+<div class="in-section">
+  <h3>{{ section.title }}</h3>
+  {% if section.rows %}
+  <div class="tablecard">
+    <div class="irow head">
+      <div>Window (UTC)</div><div>Incident</div><div>Cameras</div>
+      <div>Events</div><div>Opened by</div>
+    </div>
+    {% for row in section.rows %}
+    <div class="irow{% if section.key == 'open' %} open{% endif %}">
+      <div>
+        {% if row.start %}
+        <div class="mono">{{ row.start.strftime('%Y-%m-%d %H:%M') }}
+          → {{ row.end.strftime('%Y-%m-%d %H:%M') }}</div>
+        {% else %}
+        <div class="mono in-zero">no events attached</div>
+        {% endif %}
+        <div class="in-sub">opened {{ row.incident.opened_at.strftime('%m-%d %H:%M') }}
+          {%- if row.incident.closed_at %} · closed
+          {{ row.incident.closed_at.strftime('%m-%d %H:%M') }}{% endif %}</div>
+      </div>
+      <div class="in-title">
+        <a href="/incidents/{{ row.incident.id }}">{{ row.incident.title }}</a>
+        {% if row.notes %}
+        <span class="in-sub">· {{ row.notes }} note{{ '' if row.notes == 1 else 's' }}</span>
+        {% endif %}
+      </div>
+      <div class="mono">{{ row.cameras | join(', ') if row.cameras else '—' }}</div>
+      <div class="in-count">
+        {% if row.event_count %}{{ row.event_count }}{% else %}<span class="in-zero">0</span>{% endif %}
+      </div>
+      <div class="mono">{{ row.incident.opened_by or '—' }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="in-none">{{ section.empty }}</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}
