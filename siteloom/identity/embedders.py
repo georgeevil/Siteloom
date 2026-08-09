@@ -15,14 +15,23 @@ matured (the reason identifiers are per-class configurable):
 Both expose `embed(bgr) -> np.ndarray | None` (L2-normalized) and `dim`,
 so the resolver treats them uniformly; only thresholds differ.
 
+The face weights are downloaded rather than vendored, so every file that
+reaches `cv2.FaceRecognizerSF` is pinned by SHA-256 and verified on every
+load — cached or fresh (CLD-50). Weights that decide who a face belongs
+to are worth the hash; a size heuristic only catches a truncated file.
+
 Embedders are backend-blind and stateless after warm-up, matching the
 processing-module rules (PRD §7).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import shutil
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -30,25 +39,190 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-MODELS_DIR = Path.home() / ".cache" / "siteloom" / "models"
+DEFAULT_MODELS_DIR = Path.home() / ".cache" / "siteloom" / "models"
+# Pre-seeded/offline installs point this at a directory they control.
+MODELS_DIR_ENV = "SITELOOM_MODELS_DIR"
 
 # opencv_zoo stores models in git-lfs; media.githubusercontent resolves
 # the actual blobs (raw.githubusercontent would return LFS pointers).
 _ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models"
-YUNET_URL = f"{_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-SFACE_URL = f"{_ZOO}/face_recognition_sface/face_recognition_sface_2021dec.onnx"
 
 
-def _download(url: str, min_bytes: int) -> Path:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = MODELS_DIR / url.rsplit("/", 1)[-1]
-    if not dest.exists() or dest.stat().st_size < min_bytes:
-        log.info("downloading %s", url)
-        urllib.request.urlretrieve(url, dest)
-        if dest.stat().st_size < min_bytes:
-            dest.unlink(missing_ok=True)
-            raise IOError(f"download of {url} looks truncated (LFS pointer?)")
+@dataclass(frozen=True)
+class ModelSpec:
+    """A weights file we are willing to load, named by its content.
+
+    The cache is a directory in the operator's home that any local
+    process can write, and these weights decide who the system thinks a
+    face belongs to — so the identity of the artifact is the digest, not
+    the URL it once came from and not its size. `size` is carried too
+    because it is the cheap pre-check that rules out the common failure
+    (a truncated download, or git-lfs's 130-byte pointer file) without
+    reading 39 MB.
+    """
+
+    url: str
+    sha256: str
+    size: int
+
+    @property
+    def filename(self) -> str:
+        return self.url.rsplit("/", 1)[-1]
+
+
+# Digests verified against opencv_zoo's git-lfs pointers (the `oid
+# sha256:` line raw.githubusercontent serves for each path), which is an
+# independent source from the blob download itself. See docs/operations.md
+# before changing either of these.
+YUNET = ModelSpec(
+    url=f"{_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+    sha256="8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+    size=232_589,
+)
+SFACE = ModelSpec(
+    url=f"{_ZOO}/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+    sha256="0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+    size=38_696_353,
+)
+FACE_MODELS = (YUNET, SFACE)
+
+
+class ModelIntegrityError(Exception):
+    """A weights file is not the artifact we pinned.
+
+    Raised rather than downgraded to a warning: loading unverified face
+    weights is exactly the thing this check exists to prevent.
+    """
+
+
+def models_dir() -> Path:
+    """Where face weights live. `SITELOOM_MODELS_DIR` overrides the cache."""
+    override = os.environ.get(MODELS_DIR_ENV)
+    return Path(override).expanduser() if override else DEFAULT_MODELS_DIR
+
+
+def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def mismatch(path: Path, spec: ModelSpec) -> str | None:
+    """Why `path` is not `spec`, or None if it is. Never raises for a
+    file that is merely wrong — only for one that cannot be read."""
+    size = path.stat().st_size
+    if size != spec.size:
+        return f"size {size} B, expected {spec.size} B"
+    digest = sha256_file(path)
+    if digest != spec.sha256:
+        return f"sha256 {digest}, expected {spec.sha256}"
+    return None
+
+
+def _recovery_advice(spec: ModelSpec, path: Path) -> str:
+    return (
+        "The file has been deleted, so the next run re-downloads it. If a clean "
+        "re-download fails the same way, the download is not corrupt — upstream "
+        "republished the artifact. Do not edit the pinned digest to make this "
+        f"pass: check {spec.filename} against opencv_zoo's git-lfs pointer "
+        f"(the 'oid sha256:' line at "
+        f"https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/...) "
+        f"and repin deliberately. To install without network access, pre-seed "
+        f"{path.parent} with a verified copy or point {MODELS_DIR_ENV} at one."
+    )
+
+
+def _fetch(url: str, dest: Path, timeout: float = 120.0) -> None:
+    """Stream `url` to `dest`. Split out so tests can make the network fail."""
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        with dest.open("wb") as out:
+            shutil.copyfileobj(response, out)
+
+
+def ensure_model(spec: ModelSpec, directory: Path | str | None = None) -> Path:
+    """Return a local path to `spec`, verified by digest.
+
+    A cached file is verified on every call, not just on the run that
+    downloaded it: verifying only at download time means the check is
+    skipped on every run after the first, which is every run that
+    matters. A file that fails is removed before anything else happens —
+    leaving it behind would mean the next run loads it without even
+    trying to re-download.
+
+    A cached file that verifies is returned without touching the
+    network, so an air-gapped install with a pre-seeded directory works.
+    """
+    directory = Path(directory) if directory is not None else models_dir()
+    dest = directory / spec.filename
+
+    if dest.exists():
+        problem = mismatch(dest, spec)
+        if problem is None:
+            return dest
+        dest.unlink()
+        log.warning(
+            "cached %s failed verification (%s) and was deleted; re-downloading",
+            dest,
+            problem,
+        )
+
+    directory.mkdir(parents=True, exist_ok=True)
+    # Download beside the target and rename only once verified, so the
+    # cache never holds a half-written or unverified file at any point.
+    # The pid keeps two processes warming up at once (serve and frigate
+    # both build a FaceEmbedder) out of each other's staging file; the
+    # rename onto `dest` is atomic, so whichever finishes last wins.
+    staging = dest.with_name(f"{dest.name}.{os.getpid()}.part")
+    staging.unlink(missing_ok=True)
+    log.info("downloading %s", spec.url)
+    try:
+        _fetch(spec.url, staging)
+    except Exception as exc:
+        staging.unlink(missing_ok=True)
+        raise IOError(
+            f"could not download {spec.url}: {type(exc).__name__}: {exc}. "
+            f"To install without network access, pre-seed {directory} with a "
+            f"verified copy of {spec.filename} or point {MODELS_DIR_ENV} at a "
+            f"directory containing one."
+        ) from exc
+
+    problem = mismatch(staging, spec)
+    if problem is not None:
+        staging.unlink(missing_ok=True)
+        raise ModelIntegrityError(
+            f"{spec.filename} downloaded from {spec.url} failed its integrity "
+            f"check: {problem}. {_recovery_advice(spec, dest)}"
+        )
+    staging.replace(dest)
     return dest
+
+
+@dataclass(frozen=True)
+class ModelStatus:
+    """What a diagnostic can say about one cached file without changing it."""
+
+    spec: ModelSpec
+    path: Path
+    state: str  # "ok" | "missing" | "corrupt" | "unreadable"
+    detail: str = ""
+
+
+def check_cached_model(spec: ModelSpec, directory: Path | str | None = None) -> ModelStatus:
+    """Verify one cached file in place. Read-only: a diagnostic reports,
+    it does not delete — `ensure_model` is what cleans up."""
+    directory = Path(directory) if directory is not None else models_dir()
+    path = directory / spec.filename
+    if not path.exists():
+        return ModelStatus(spec, path, "missing")
+    try:
+        problem = mismatch(path, spec)
+    except OSError as exc:
+        return ModelStatus(spec, path, "unreadable", f"{type(exc).__name__}: {exc}")
+    if problem is None:
+        return ModelStatus(spec, path, "ok")
+    return ModelStatus(spec, path, "corrupt", problem)
 
 
 class FaceEmbedder:
@@ -70,9 +244,13 @@ class FaceEmbedder:
     # A face smaller than this in either dimension is not worth embedding.
     MIN_FACE_PX = 32
 
-    def __init__(self, projection_path: str | Path | None = None) -> None:
-        det_path = _download(YUNET_URL, min_bytes=100_000)
-        rec_path = _download(SFACE_URL, min_bytes=10_000_000)
+    def __init__(
+        self,
+        projection_path: str | Path | None = None,
+        models_directory: Path | str | None = None,
+    ) -> None:
+        det_path = ensure_model(YUNET, models_directory)
+        rec_path = ensure_model(SFACE, models_directory)
         self._detector = cv2.FaceDetectorYN.create(
             str(det_path), "", (320, 320), score_threshold=0.7
         )
