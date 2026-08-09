@@ -47,7 +47,7 @@ PUBLIC_PATHS = {"/login", "/healthz", "/readyz"}
 EXEMPT_PREFIXES = ("/api/v1/",)
 #: Path prefixes whose mutations reconfigure the system rather than
 #: review its output — admin only.
-ADMIN_PREFIXES = ("/classes/detection", "/classes/events", "/jobs/reindex", "/users")
+ADMIN_PREFIXES = ("/backfill", "/classes/detection", "/classes/events", "/jobs/reindex", "/users")
 
 _SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 

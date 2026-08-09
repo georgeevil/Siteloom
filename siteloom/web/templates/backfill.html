@@ -1,0 +1,293 @@
+{% extends "base.html" %}
+{% block title %}Backfill{% endblock %}
+{% block subtitle %}fill a gap from the NVR's own recordings{% endblock %}
+
+{#
+  The backfill console (CLD-93). Two halves, and the table is the more
+  valuable one: the resumability model is "the remaining clips are the
+  ones still pending", which lived only in the backfill_clips table.
+
+  The empty states are three different nothings — no UniFi camera to
+  backfill from, nothing scanned yet, everything scanned processed — and
+  an operator does something different about each.
+
+  Scoped to backfill-unifi on purpose; the note at the foot says why
+  `siteloom backfill` over a media archive is not offered here (CLD-12).
+#}
+
+{% block content %}
+<style>
+  .bf-head { margin-bottom: 14px; }
+  .bf-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .bf-head p { font-size: 12px; color: var(--muted); margin: 0; max-width: 78ch; }
+  .bf-panel {
+    border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel);
+    padding: 14px 16px; margin-bottom: 14px;
+  }
+  .bf-panel h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .bf-panel p { margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.6; max-width: 78ch; }
+  .bf-form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .bf-field { display: flex; flex-direction: column; gap: 4px; }
+  .bf-field > span {
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .bf-field select, .bf-field input {
+    padding: 6px 9px; border-radius: 6px; font-family: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .bf-modes { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+  .bf-modes label { display: flex; gap: 6px; align-items: baseline; }
+  .bf-modes .why { color: var(--muted); }
+  .bf-go {
+    padding: 7px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px;
+    border: 1px solid transparent; background: var(--accent); color: var(--on-accent);
+  }
+  .bf-go:disabled { background: var(--raised); color: var(--faint); cursor: not-allowed; }
+  .bf-note {
+    border: 1px dashed var(--control-border); border-radius: 8px;
+    padding: 14px 16px; color: var(--muted); font-size: 12.5px; line-height: 1.65;
+  }
+  .bf-note h3 { margin: 0 0 8px; font-size: 13px; color: var(--text); font-weight: 600; }
+  .bf-note p { margin: 10px 0 0; }
+  .bf-note code, .bf-panel code, .bf-banner code {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--raised); padding: 1px 5px; border-radius: 3px;
+  }
+  .bf-banner {
+    border: 1px solid var(--hairline); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 12px 14px; margin-bottom: 14px;
+    background: var(--panel); font-size: 12.5px; line-height: 1.65;
+  }
+  .bf-banner.noop { border-left-color: var(--amber); }
+  .bf-banner.bad { border-left-color: var(--red); }
+  .bf-banner strong { color: var(--text); }
+  .bf-error {
+    border: 1px solid oklch(0.42 0.09 30); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 14px;
+    color: oklch(0.87 0.11 30); font-size: 12.5px;
+  }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel); margin-bottom: 14px;
+  }
+  .brow {
+    display: grid; grid-template-columns: 1fr 78px 78px 78px 230px 92px;
+    align-items: center; gap: 12px; padding: 0 14px; min-height: 48px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .brow:last-child { border-bottom: 0; }
+  .brow.head {
+    min-height: 32px; background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .num { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .num.zero { color: var(--faint); }
+  .num.work { color: var(--accent); }
+  .num.bad { color: var(--red); }
+  .bf-camname { font-size: 12.5px; }
+  .bf-camname .sub { display: block; color: var(--faint); font-size: 11px; }
+</style>
+
+<div class="bf-head">
+  <h2>Backfill from the NVR</h2>
+  <p>
+    Asks UniFi Protect what it recorded in a range, then runs those recordings
+    through the same pipeline live ingest uses. This is how a gap left by a
+    crashed or stopped <code>siteloom run</code> gets filled — and, because
+    audio never reaches the detector on a live stream, the only way real levels
+    reach <a href="/noise">Noise</a>.
+  </p>
+</div>
+
+{% if error %}
+<div class="bf-error">{{ error }}</div>
+{% endif %}
+
+{% if last %}
+<div class="bf-banner {% if last.status == 'failed' %}bad{% elif last.added == 0 and last.status != 'running' %}noop{% endif %}">
+  {% if last.status in ('running', 'processing') %}
+  <strong>Backfill of {{ last.camera }} is running.</strong>
+  {% if last.status == 'processing' %}
+  Scan registered {{ last.added }} new window(s); {{ last.skipped }} were already covered.
+  {% endif %}
+  Progress is on the <a href="/jobs">Jobs</a> board.
+  {% elif last.status == 'failed' %}
+  <strong>Backfill of {{ last.camera }} failed.</strong>
+  <span class="mono">{{ last.error }}</span>
+  {% elif last.status == 'stopped' %}
+  <strong>Backfill of {{ last.camera }} stopped early.</strong>
+  Whatever it finished is recorded; the rest is still pending. Continue with
+  <code>{{ last.resume }}</code>.
+  {% elif last.added == 0 %}
+  <strong>Nothing new to do — that range was already covered.</strong>
+  The scan matched {{ last.skipped }} recording window(s) and all of them were
+  already registered, so nothing was downloaded and no event was created twice.
+  Clips are keyed by the NVR's own event id, and
+  <code>(camera, event id)</code> is unique.
+  {% else %}
+  <strong>Backfill of {{ last.camera }} finished.</strong>
+  Registered {{ last.added }} new window(s) ({{ last.skipped }} already covered),
+  processed {{ last.processed }} clip(s) over {{ '{:,}'.format(last.frames or 0) }} frames.
+  {% if last.clip_failures %}{{ last.clip_failures }} clip(s) failed.{% endif %}
+  {% if last.remaining %}{{ last.remaining }} still pending — continue with
+  <code>{{ last.resume }}</code>.{% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
+{% if cameras %}
+<div class="bf-panel">
+  <h3>Index a range</h3>
+  <p>
+    Runs here in the console, one at a time — the pipeline holds per-camera
+    tracker state and the embedded vector store, which takes one client per
+    machine. Progress heartbeats to the <a href="/jobs">Jobs</a> board like any
+    other long job, and stopping the server leaves the remaining clips pending
+    rather than losing them.
+  </p>
+  <form class="bf-form" method="post" action="/backfill/start">
+    <label class="bf-field">
+      <span>Camera</span>
+      <select name="camera">
+        {% for cam in cameras %}
+        <option value="{{ cam.id }}" {% if form.camera == cam.id %}selected{% endif %}>
+          {{ cam.name or cam.id }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="bf-field">
+      <span>From</span>
+      <input type="datetime-local" name="start" value="{{ form.start or '' }}" required>
+    </label>
+    <label class="bf-field">
+      <span>To (blank = now)</span>
+      <input type="datetime-local" name="end" value="{{ form.end or '' }}">
+    </label>
+    <div class="bf-field">
+      <span>What to fetch</span>
+      <div class="bf-modes">
+        <label>
+          <input type="radio" name="mode" value="events"
+                 {% if form.mode != 'sweep' %}checked{% endif %}>
+          <span>Motion &amp; smart-detect windows
+            <span class="why">— only what the NVR saw move.</span></span>
+        </label>
+        <label>
+          <input type="radio" name="mode" value="sweep"
+                 {% if form.mode == 'sweep' %}checked{% endif %}>
+          <span>Full sweep, every
+            <select name="chunk_minutes">
+              {% for c in chunk_choices %}
+              <option value="{{ c }}"
+                {%- if form.chunk_minutes == c or (not form.chunk_minutes and c == 15.0) %} selected{% endif %}>{{ c|int }}</option>
+              {% endfor %}
+            </select> min
+            <span class="why">— downloads the whole range, motion or not:
+              hours of video and hours of detection, for footage the NVR's
+              motion gating would have skipped. Use it when that gating is not
+              trusted.</span></span>
+        </label>
+      </div>
+    </div>
+    <div class="bf-field">
+      <span>Failed clips</span>
+      <label style="font-size:12px; display:flex; gap:6px; align-items:center; padding-bottom:6px;">
+        <input type="checkbox" name="retry_failed" value="1"
+               {% if form.retry_failed %}checked{% endif %}>
+        Retry earlier failures
+      </label>
+    </div>
+    <button class="bf-go" type="submit" {% if running %}disabled{% endif %}>
+      {% if running %}Backfill running…{% else %}Scan &amp; index{% endif %}
+    </button>
+  </form>
+</div>
+{% endif %}
+
+{% if rows %}
+<div class="tablecard">
+  <div class="brow head">
+    <div>Camera</div>
+    <div>Pending</div>
+    <div>Done</div>
+    <div>Failed</div>
+    <div>Range covered</div>
+    <div>Frames</div>
+  </div>
+  {% for r in rows %}
+  <div class="brow">
+    <div class="bf-camname">
+      {{ r.name }}
+      {% if not r.configured %}
+      <span class="sub">clips recorded, but no camera with this id is configured any more</span>
+      {% elif r.total == 0 %}
+      <span class="sub">nothing scanned yet</span>
+      {% elif r.last_processed %}
+      <span class="sub">last clip processed {{ r.last_processed.strftime('%Y-%m-%d %H:%M') }}</span>
+      {% endif %}
+      {% if r.failed %}
+      {# `failed` is terminal: nothing picks these up again on its own. #}
+      <span class="sub">{{ r.failed }} failed and will not be retried unless asked</span>
+      {% endif %}
+    </div>
+    <div class="num {% if r.pending %}work{% else %}zero{% endif %}">{{ r.pending }}</div>
+    <div class="num {% if not r.done %}zero{% endif %}">{{ r.done }}</div>
+    <div class="num {% if r.failed %}bad{% else %}zero{% endif %}">{{ r.failed }}</div>
+    <div class="mono">
+      {% if r.covered_from %}
+      {{ r.covered_from.strftime('%Y-%m-%d %H:%M') }} → {{ r.covered_to.strftime('%Y-%m-%d %H:%M') }}
+      {% else %}—{% endif %}
+    </div>
+    <div class="num {% if not r.frames %}zero{% endif %}">{{ '{:,}'.format(r.frames) }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if empty_reason == 'no-cameras' %}
+<div class="bf-note">
+  <h3>No UniFi camera is configured</h3>
+  Backfill reads recordings from an NVR, so there is nothing here to fill a gap
+  from. A camera with <code>adapter: unifi</code> in the site config is what
+  this screen operates on.
+  <p>
+    <code>siteloom cameras --config …</code> lists the streams each adapter can
+    see, which is how a camera id is found in the first place.
+  </p>
+</div>
+
+{% elif empty_reason == 'no-clips' %}
+<div class="bf-note">
+  <h3>Nothing scanned yet</h3>
+  No recording window has been registered for
+  {% if cameras|length == 1 %}this camera{% else %}these cameras{% endif %} —
+  which is not the same as "there is nothing to fetch". Scanning is the cheap
+  half: it asks the NVR what it recorded in a range and registers each window
+  as pending. Downloading and indexing them is the expensive half, and it
+  resumes from whatever is still pending.
+</div>
+
+{% elif empty_reason == 'all-done' %}
+<div class="bf-note">
+  <h3>Every scanned clip has been indexed</h3>
+  Nothing is pending and nothing failed. The range above is what has been asked
+  for so far — scanning a wider one registers whatever it does not already
+  cover, and re-scanning a range that is covered adds nothing at all.
+</div>
+{% endif %}
+
+<div class="bf-note" style="margin-top:14px;">
+  <h3>Archives on disk are not offered here</h3>
+  <code>siteloom backfill &lt;path&gt;</code>, which walks a directory of photos
+  and video, has no per-file checkpointing yet (CLD-12): an interrupted run
+  restarts from the top rather than resuming. Everything on this screen —
+  pending, done, the covered range, the button — rests on the guarantee that a
+  stopped run picks up where it left off, and offering the archive path beside
+  it would extend that promise to a path that cannot keep it. Run it from a
+  shell until it is tracked the same way.
+</div>
+{% endblock %}
