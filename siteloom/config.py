@@ -503,6 +503,8 @@ class IntegrationsConfig(BaseModel):
 class StorageConfig(BaseModel):
     db_url: str = "sqlite:///siteloom.db"
     # Directory where detection crops / annotated frames are written.
+    # A relative value is relative to the config file, not the CWD — see
+    # _ANCHORED_PATHS below.
     media_dir: str = "media"
 
 
@@ -525,13 +527,58 @@ class SiteConfig(BaseModel):
     storage: StorageConfig = StorageConfig()
 
 
+# Filesystem paths a site config can name. A relative one is anchored to
+# the config file's own directory at load time, never to the process CWD
+# (CLD-64): `siteloom serve` started by a service manager from /, a
+# backfill run by hand from the repo root and a cron job launched from
+# $HOME must all mean the same `media_dir`. Otherwise the same YAML
+# writes crops in one tree and serves them from another — and because
+# the /media route's containment check is anchored on media_dir too, a
+# wrong root is a security-relevant answer, not just a 404.
+#
+# Anchoring happens once, in load_config, so that every consumer of the
+# config (ingest, the library indexer, the Frigate snapshot writer,
+# `doctor`, the web layer) inherits it without resolving anything itself.
+# `storage.db_url` is deliberately NOT here: it is a URL, not a path, and
+# a relative sqlite:/// URL still follows the CWD.
+_ANCHORED_PATHS: tuple[tuple[str, str], ...] = (
+    ("storage", "media_dir"),
+    ("identity", "vector_db_path"),
+    ("identity", "face_projection_path"),
+    ("training", "output_dir"),
+)
+
+
+def anchor_path(value: str, base: str | Path) -> Path:
+    """`value` as an absolute path, relative values taken from `base`.
+
+    `~` is expanded first: "~/media" is absolute to the operator who
+    typed it, and joining it onto the config directory would be wrong.
+    """
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else Path(base) / path
+
+
 def load_config(path: str | Path) -> SiteConfig:
+    source = Path(path).resolve()
     with open(path) as f:
         data = yaml.safe_load(f)
     config = SiteConfig.model_validate(data)
     # Remembered so operator edits made in the web UI (class list,
     # thresholds) can be written back to the file they came from.
-    object.__setattr__(config, "_source_path", str(Path(path).resolve()))
+    object.__setattr__(config, "_source_path", str(source))
+    raw: dict[tuple[str, str], str] = {}
+    for section, field in _ANCHORED_PATHS:
+        target = getattr(config, section)
+        value = getattr(target, field)
+        if not value:
+            continue
+        raw[(section, field)] = value
+        setattr(target, field, str(anchor_path(value, source.parent)))
+    # What the file actually said, so save_config can put it back: a
+    # console save must not freeze this machine's absolute paths into a
+    # config that gets copied to the next host.
+    object.__setattr__(config, "_raw_paths", raw)
     return config
 
 
@@ -540,5 +587,13 @@ def save_config(config: SiteConfig, path: str | Path | None = None) -> str:
     if not target:
         raise ValueError("no config path known; pass one explicitly")
     data = config.model_dump(mode="json")
+    source = getattr(config, "_source_path", None)
+    anchored = getattr(config, "_raw_paths", None) or {}
+    for (section, field), original in anchored.items():
+        # Only restore a value nothing has changed since it was loaded —
+        # a path the operator edited must be written as it now stands.
+        current = getattr(getattr(config, section), field)
+        if source and current == str(anchor_path(original, Path(source).parent)):
+            data[section][field] = original
     Path(target).write_text(yaml.safe_dump(data, sort_keys=False))
     return str(target)
