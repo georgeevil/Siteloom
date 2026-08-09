@@ -29,6 +29,7 @@ from siteloom.store import (
     OperationRun,
     TrainingRun,
 )
+from siteloom.web import paging
 
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,12 @@ def resolve_import_path(raw: str, roots: list[str]) -> Path:
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
+#: Rows in one keyset slice of each grid (CLD-104). Page sizes, not
+#: ceilings: every slice carries a cursor to the next, so these decide
+#: how much arrives at once and nothing else.
+LIBRARY_PAGE = 60
+TRAINING_PAGE = 48
 
 #: Crop-grid state filters, in the handoff's chip order.
 CROP_FILTERS = {
@@ -158,7 +165,13 @@ def _class_hue(name: str) -> int:
 
 
 def _library_url(base: dict, **overrides) -> str:
-    """A link to the library with some filters changed, keeping the rest."""
+    """A link to the library with some filters changed, keeping the rest.
+
+    Filters only, and deliberately no scroll position: this builds the
+    links an operator clicks, copies and sends, and every one of them has
+    to open at the top of the set it describes. The cursor is composed in
+    `_more_url` instead, which nothing but the load-more anchor calls.
+    """
     params: list[tuple[str, str]] = []
     merged = {**base, **overrides}
     for key in ("source_id", "status", "person"):
@@ -166,9 +179,53 @@ def _library_url(base: dict, **overrides) -> str:
             params.append((key, str(merged[key])))
     if merged.get("needs_review"):
         params.append(("needs_review", "true"))
-    if merged.get("page") and int(merged["page"]) > 1:
-        params.append(("page", str(merged["page"])))
     return "/library?" + urlencode(params) if params else "/library"
+
+
+def _more_url(base: dict, cursor: str) -> str:
+    """The load-more href: these filters, continued from one row.
+
+    Separate from `_library_url` rather than one more keyword on it, so
+    that a cursor can only reach a URL that a caller asked for by name.
+    The anchor is real and the cursor is really in it — a client with no
+    JavaScript walks the list by following it — but nothing composes it
+    into a filter chip.
+    """
+    url = _library_url(base)
+    joiner = "&" if "?" in url else "?"
+    return url + joiner + urlencode({"after": cursor})
+
+
+def _training_url(
+    *,
+    show: str,
+    kind: str,
+    group: str,
+    size: str,
+    source_id: int | None,
+    person: str | None,
+    cursor: str | None = None,
+) -> str:
+    """The crop grid's own URL, optionally continued from one row.
+
+    The facet links are composed by the `nav_url` macro in the template,
+    which never passes a cursor; this exists because the load-more anchor
+    is built server-side from the same whole view state, and composing a
+    query string by hand in Jinja is how a facet goes missing from it.
+    """
+    params: list[tuple[str, str]] = [
+        ("show", show),
+        ("kind", kind),
+        ("group", group),
+        ("size", size),
+    ]
+    if source_id:
+        params.append(("source_id", str(source_id)))
+    if person:
+        params.append(("person", person))
+    if cursor:
+        params.append(("after", cursor))
+    return "/training?" + urlencode(params)
 
 
 def _class_rows(config, seen: dict, precision: dict | None = None) -> list[dict]:
@@ -658,9 +715,29 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         status: str | None = None,
         needs_review: bool = False,
         person: str | None = None,
-        page: int = 1,
+        after: str | None = None,
     ):
-        page_size = 60
+        """The archive grid, one keyset slice at a time (CLD-104).
+
+        Ordered by `LibraryItem.id` ascending and nothing else, so the
+        cursor is that one column — the primary key, so no two rows tie
+        and there is no tie-break to leave out.
+
+        Ascending order means a freshly scanned file lands at the end and
+        shifts nothing. What does shift this window is a row *leaving* it
+        — a re-scan pruning files that are gone, a source cleaned up —
+        and under OFFSET that costs the operator exactly as many rows as
+        disappeared above them, chosen from the ones they had not reached
+        yet and dropped without a trace. A cursor names the last row
+        delivered, so nothing below it can move.
+        """
+        page_size = LIBRARY_PAGE
+        filters = {
+            "source_id": source_id or "",
+            "status": status or "",
+            "needs_review": needs_review,
+            "person": person or "",
+        }
         with Session() as session:
             q = select(LibraryItem).order_by(LibraryItem.id)
             if source_id:
@@ -685,13 +762,29 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                         )
                     )
                 )
-            items = (
-                session.scalars(q.offset((page - 1) * page_size).limit(page_size + 1))
-                .unique()
-                .all()
+            # The count is taken from the filtered query, never from the
+            # windowed one: "matched" describes the filter, and a cursor
+            # is not a filter — counting after it would report the tail
+            # the operator has not scrolled past yet as the whole set.
+            matched = session.scalar(select(func.count()).select_from(q.subquery()))
+            windowed = q
+            if after:
+                try:
+                    values = paging.decode_cursor(after, (int,))
+                except paging.CursorError as exc:
+                    # Refused, not ignored. Falling back to no cursor would
+                    # silently restart the list at the top mid-scroll, and
+                    # the operator would read the repeat as duplicate rows.
+                    raise HTTPException(400, f"bad library cursor: {exc}") from None
+                windowed = q.where(
+                    paging.after((LibraryItem.id,), values, descending=False)
+                )
+            slice_ = paging.take(
+                list(session.scalars(windowed.limit(page_size + 1)).unique().all()),
+                page_size,
+                lambda i: (i.id,),
             )
-            has_next = len(items) > page_size
-            items = items[:page_size]
+            items = slice_.rows
             sources = session.scalars(select(LibrarySource)).all()
             counts = dict(
                 session.execute(
@@ -717,7 +810,6 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     .group_by(Annotation.item_id)
                 ).all()
             )
-            matched = session.scalar(select(func.count()).select_from(q.subquery()))
             source_names = {s.id: (s.name or s.path) for s in sources}
         return templates.TemplateResponse(
             request,
@@ -733,14 +825,20 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 library_url=_library_url,
                 people=people,
                 box_counts=box_counts,
-                filters={
-                    "source_id": source_id or "",
-                    "status": status or "",
-                    "needs_review": needs_review,
-                    "person": person or "",
-                },
-                page=page,
-                has_next=has_next,
+                filters=filters,
+                # None exactly when the list is exhausted, which is what
+                # lets the footer say "that is everything" rather than
+                # leaving a list that has simply stopped.
+                more_url=(
+                    None
+                    if slice_.exhausted
+                    else _more_url(filters, slice_.next_cursor or "")
+                ),
+                # Only ever true on the no-JS walk: a client running
+                # infinite.js appends in place and never navigates to a
+                # cursor, so nobody with scripting can land mid-list
+                # without a way back to the top of it.
+                top_url=_library_url(filters) if after else None,
             ),
         )
 
@@ -1553,11 +1651,25 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         kind: str = "faces",
         group: str = "name",
         size: str = "m",
-        page: int = 1,
+        after: str | None = None,
     ):
-        page_size = 48
+        """The crop grid, one keyset slice at a time (CLD-104).
+
+        The order here is `verified, id` — unreviewed crops first — and
+        `verified` is a boolean, so it ties across thousands of rows. The
+        cursor therefore carries the pair: a cursor on `verified` alone
+        would skip every crop sharing the last delivered row's flag,
+        which is to say almost the whole queue.
+
+        It travels as 0/1 rather than "False"/"True" because a cursor
+        component is decoded by calling the type on the text, and
+        `bool("False")` is True.
+        """
+        page_size = TRAINING_PAGE
         show = show if show in CROP_FILTERS else "needs_review"
         kind = kind if kind in CROP_KINDS else "faces"
+        group = group if group == "name" else "flat"
+        size = size if size in ("s", "m", "l") else "m"
         with Session() as session:
             q = (
                 select(Annotation)
@@ -1579,13 +1691,25 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             crop_total = session.scalar(
                 select(func.count()).select_from(q.subquery())
             )
-            proposals = (
-                session.scalars(q.offset((page - 1) * page_size).limit(page_size + 1))
-                .unique()
-                .all()
+            windowed = q
+            if after:
+                try:
+                    verified, last_id = paging.decode_cursor(after, (int, int))
+                except paging.CursorError as exc:
+                    raise HTTPException(400, f"bad training cursor: {exc}") from None
+                windowed = q.where(
+                    paging.after(
+                        (Annotation.verified, Annotation.id),
+                        (bool(verified), last_id),
+                        descending=False,
+                    )
+                )
+            slice_ = paging.take(
+                list(session.scalars(windowed.limit(page_size + 1)).unique().all()),
+                page_size,
+                lambda a: (int(a.verified), a.id),
             )
-            has_next = len(proposals) > page_size
-            proposals = proposals[:page_size]
+            proposals = slice_.rows
 
             by_basis = dict(
                 session.execute(
@@ -1683,8 +1807,31 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     {"run": r, "metrics": json.loads(r.metrics or "{}")} for r in runs
                 ],
                 filters={"person": person or ""},
-                page=page,
-                has_next=has_next,
+                more_url=(
+                    None
+                    if slice_.exhausted
+                    else _training_url(
+                        show=show,
+                        kind=kind,
+                        group=group,
+                        size=size,
+                        source_id=source_id,
+                        person=person,
+                        cursor=slice_.next_cursor,
+                    )
+                ),
+                top_url=(
+                    _training_url(
+                        show=show,
+                        kind=kind,
+                        group=group,
+                        size=size,
+                        source_id=source_id,
+                        person=person,
+                    )
+                    if after
+                    else None
+                ),
                 min_samples=config.training.min_samples_per_person,
                 sources=sources,
                 groups=groups,
@@ -1692,12 +1839,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 crop_filters=CROP_FILTERS,
                 crop_kinds=CROP_KINDS,
                 crop_total=crop_total,
-                view={
-                    "show": show,
-                    "kind": kind,
-                    "group": group,
-                    "size": size if size in ("s", "m", "l") else "m",
-                },
+                view={"show": show, "kind": kind, "group": group, "size": size},
                 identities=identities,
                 custom_classes=custom_classes,
                 max_vectors=_face_max_vectors(config),

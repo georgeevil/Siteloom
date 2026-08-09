@@ -79,10 +79,27 @@
     color: oklch(0.82 0.12 30); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .empty { padding: 40px 4px; color: var(--muted); font-size: 13px; line-height: 1.7; }
-  .pager { display: flex; gap: 16px; margin-top: 20px; font-family: var(--font-mono); font-size: 11px; }
   .note {
     margin-top: 16px; padding: 11px; border: 1px dashed var(--control-border);
     border-radius: 7px; font-size: 11.5px; color: var(--muted); line-height: 1.6;
+  }
+  /* Load-more footer (CLD-104). Three states, none of which may read as
+     an empty list: a button, a full stop, and a failure that says so. */
+  .loadmore {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 20px 0 4px;
+  }
+  .lm-btn {
+    padding: 7px 16px; border-radius: 6px; text-decoration: none;
+    border: 1px solid var(--control-border); background: var(--raised);
+    color: var(--text); font-size: 12px;
+  }
+  .lm-btn:hover { border-color: oklch(0.5 0.03 250); color: var(--text); }
+  .lm-note { margin: 0; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); }
+  .lm-error { margin: 0; font-family: var(--font-mono); font-size: 10.5px; color: oklch(0.86 0.12 30); }
+  .loadmore[data-state="loading"]::before {
+    content: "Loading…"; font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--muted); animation: slpulse 1.2s infinite;
   }
 </style>
 {% endblock %}
@@ -91,16 +108,18 @@
 {%- set state = {'source_id': filters.source_id, 'status': filters.status,
                  'person': filters.person, 'needs_review': filters.needs_review} -%}
 <div class="filterbar">
+  {# Filter links carry filters and nothing else — no cursor, so one of
+     these sent to a colleague opens at the top of the set it names. #}
   {% for tab in status_tabs %}
     <a class="chip{% if filters.status == tab %} on{% endif %}"
-       href="{{ library_url(state, status=tab, page=1) }}">
+       href="{{ library_url(state, status=tab) }}">
       {{ tab | capitalize if tab else 'All' }}
       {%- if tab and counts.get(tab) %} · {{ counts[tab] }}{% endif %}
     </a>
   {% endfor %}
   <span class="chip-sep"></span>
   <a class="chip{% if filters.needs_review %} on{% endif %}"
-     href="{{ library_url(state, needs_review=not filters.needs_review, page=1) }}">Needs review</a>
+     href="{{ library_url(state, needs_review=not filters.needs_review) }}">Needs review</a>
 
   <form method="get" action="/library" style="display:flex; gap:6px;">
     {% if filters.status %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
@@ -130,7 +149,7 @@
 
 <div class="scroller">
   {% if items %}
-  <div class="grid">
+  <div class="grid" id="library-grid">
     {% for i in items %}
     <a class="mcard" href="/library/{{ i.id }}">
       <div class="media">
@@ -184,9 +203,24 @@
   </p>
   {% endif %}
 
-  <div class="pager">
-    {% if page > 1 %}<a href="{{ library_url(state, page=page-1) }}">&larr; previous</a>{% endif %}
-    {% if has_next %}<a href="{{ library_url(state, page=page+1) }}">next &rarr;</a>{% endif %}
+  {# A real anchor with the cursor in its href, inside the scroller so the
+     sentinel's observer takes .scroller as its root rather than the
+     viewport. infinite.js only removes the clicking. #}
+  <div class="loadmore" data-infinite data-infinite-target="#library-grid"
+       data-state="{{ 'idle' if more_url else 'end' }}">
+    <span data-load-sentinel aria-hidden="true"></span>
+    {% if more_url %}
+    <a class="lm-btn" href="{{ more_url }}" data-load-more data-retry-label="Retry">
+      Load more items
+    </a>
+    {% endif %}
+    <p class="lm-note" data-load-end {% if more_url %}hidden{% endif %}>
+      That is every item{% if filters.status or filters.person or filters.needs_review or filters.source_id %} matching these filters{% endif %} — {{ matched }} in all.
+    </p>
+    <p class="lm-error" data-load-error hidden role="status"></p>
+    {# Present only when this page was reached by following a cursor,
+       which only a client without JavaScript ever does. #}
+    {% if top_url %}<a class="lm-note" href="{{ top_url }}">&uarr; back to the start of this list</a>{% endif %}
   </div>
   {% else %}
   <p class="empty">
