@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block title %}Operators{% endblock %}
+{% block subtitle %}accounts, roles and live sessions{% endblock %}
+
+{#
+  Operator accounts (CLD-31). Admin only — the gate is the prefix floor in
+  web/auth.py, not anything on this page.
+
+  Two things the screen has to say out loud rather than imply:
+
+  * There is no "Add operator" button and there never will be. Creating an
+    account is what turns authentication on, and a web-creatable account
+    is a web-creatable admin — so `siteloom users add` is printed here.
+  * With no accounts at all the console is in open single-operator mode.
+    An empty table would read as "no colleagues yet"; it actually means
+    the gate has never been switched on.
+
+  Roles show the operator vocabulary (Viewer / Writer / Admin) while the
+  values posted back are the stored ones (view / edit / admin) — the two
+  vocabularies live in auth.ROLE_LABELS and are never swapped in storage.
+#}
+
+{% block content %}
+<style>
+  .us-head { margin-bottom: 14px; }
+  .us-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .us-head p { font-size: 12px; color: var(--muted); margin: 0; max-width: 78ch; }
+  .us-facts {
+    display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 16px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--faint);
+  }
+  .us-facts b { color: var(--muted); font-weight: 500; }
+
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .urow {
+    display: grid; grid-template-columns: 1.4fr 200px 110px 150px 1fr;
+    align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .urow:last-child { border-bottom: 0; }
+  .urow.head {
+    padding: 0 14px; height: 32px; background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .urow.me { background: oklch(0.23 0.02 200); }
+  .urow.off { opacity: .72; }
+  .us-name { font-size: 12.5px; font-weight: 600; }
+  .us-sub { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .us-never { color: var(--faint); }
+
+  .us-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .us-form select, .us-form button {
+    padding: 5px 8px; border-radius: 6px; font-family: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .us-form button { cursor: pointer; }
+  .us-form button:hover { border-color: oklch(0.5 0.03 250); }
+  .us-form button.danger { color: oklch(0.86 0.12 30); }
+  .us-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .us-self {
+    font-family: var(--font-mono); font-size: 10px; color: var(--faint);
+    align-self: center;
+  }
+
+  .us-error {
+    border: 1px solid oklch(0.42 0.1 30); border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 14px;
+    color: oklch(0.86 0.12 30); font-size: 12px; line-height: 1.6;
+  }
+  .us-note {
+    border: 1px dashed var(--control-border); border-radius: 8px;
+    padding: 14px 16px; margin-top: 16px;
+    color: var(--muted); font-size: 12.5px; line-height: 1.65;
+  }
+  .us-note h3 { margin: 0 0 8px; font-size: 13px; color: var(--text); font-weight: 600; }
+  .us-note code {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--raised); padding: 1px 5px; border-radius: 3px;
+  }
+  .us-ladder { margin: 0; padding: 0; list-style: none; }
+  .us-ladder li { margin-top: 5px; }
+  .us-ladder b { color: var(--text); font-weight: 600; }
+</style>
+
+<div class="us-head">
+  <h2>Operators</h2>
+  <p>
+    One role per account, on a strict ladder — each rung can do everything
+    the one below it can. Role changes, disables and revocations on this page
+    are audited like any other action; the
+    <a href="/audit">audit trail</a> is where they read back.
+  </p>
+</div>
+
+{% if error %}
+<div class="us-error">{{ error }}</div>
+{% endif %}
+
+{% if auth_on %}
+<div class="us-facts">
+  <span><b>{{ rows | length }}</b> account{{ '' if rows | length == 1 else 's' }}</span>
+  <span><b>{{ rows | selectattr('user.disabled') | list | length }}</b> disabled</span>
+  <span><b>{{ rows | sum(attribute='sessions') }}</b> live session{{ '' if rows | sum(attribute='sessions') == 1 else 's' }}</span>
+  <span>authentication <b>on</b></span>
+</div>
+
+<div class="tablecard">
+  <div class="urow head">
+    <div>Operator</div><div>Role</div><div>Status</div>
+    <div>Last sign-in (UTC)</div><div style="text-align:right">Sessions</div>
+  </div>
+  {% for row in rows %}
+  <div class="urow{% if row.user.id == actor_id %} me{% endif %}{% if row.user.disabled %} off{% endif %}">
+    <div>
+      <div class="us-name">{{ row.user.username }}</div>
+      <div class="us-sub">
+        #{{ row.user.id }} · added {{ row.user.created_at.strftime('%Y-%m-%d') }}
+        {%- if row.user.id == actor_id %} · you{% endif %}
+      </div>
+    </div>
+    <div>
+      {# The select posts the stored value; the option text is the label. #}
+      <form class="us-form" method="post" action="/users/{{ row.user.id }}/role">
+        <select name="role" aria-label="Role for {{ row.user.username }}">
+          {% for r in roles %}
+          <option value="{{ r }}" {% if r == row.user.role %}selected{% endif %}
+                  title="{{ role_summaries[r] }}">{{ role_labels[r] }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+    <div>
+      <span class="badge{{ ' unknown' if row.user.disabled else ' ok' }}">
+        {{ 'disabled' if row.user.disabled else 'active' }}</span>
+    </div>
+    <div class="mono">
+      {% if row.last_seen %}{{ row.last_seen.strftime('%Y-%m-%d %H:%M') }}
+      {% else %}<span class="us-never">never / expired</span>{% endif %}
+    </div>
+    <div class="us-actions">
+      <span class="us-self mono">{{ row.sessions }}</span>
+      {% if row.sessions %}
+      <form class="us-form" method="post" action="/users/{{ row.user.id }}/revoke">
+        <button type="submit"
+                onclick="return confirm('Sign {{ row.user.username }} out of every browser? The account keeps its role and can sign in again.')">
+          Revoke</button>
+      </form>
+      {% endif %}
+      {% if row.user.disabled %}
+      <form class="us-form" method="post" action="/users/{{ row.user.id }}/disabled">
+        <input type="hidden" name="disabled" value="0">
+        <button type="submit">Enable</button>
+      </form>
+      {% elif row.user.id != actor_id %}
+      <form class="us-form" method="post" action="/users/{{ row.user.id }}/disabled">
+        <input type="hidden" name="disabled" value="1">
+        <button type="submit" class="danger"
+                onclick="return confirm('Disable {{ row.user.username }}? Their sessions are revoked immediately and they cannot sign in until re-enabled.')">
+          Disable</button>
+      </form>
+      {% else %}
+      {# Not hidden to keep the row tidy: saying why is the point. #}
+      <span class="us-self">cannot disable yourself</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<p class="mono" style="margin:10px 0 0; color:var(--faint); max-width:80ch; line-height:1.6;">
+  Last sign-in is read from the session rows themselves, so it is blank for an
+  operator whose sessions have expired or been revoked — that is "no live
+  record of a sign-in", not "never signed in".
+</p>
+
+{% else %}
+<div class="us-note">
+  <h3>No accounts — the console is in open single-operator mode</h3>
+  Authentication turns on when the first account exists. Until then every
+  page is reachable without signing in and mutations are audited as
+  <code>(open)</code>. This is the mode the PoC started in, and nothing on
+  this screen has anything to act on yet.
+  <p style="margin:10px 0 0;">
+    Create the first account on the host with
+    <code>siteloom users add &lt;name&gt; --role admin</code>. Make it an admin:
+    the first account is the only one that can create the rest, and a console
+    whose only account is a viewer is recovered from a shell.
+  </p>
+</div>
+{% endif %}
+
+<div class="us-note">
+  <h3>Accounts are created from the shell, by design</h3>
+  There is no "Add operator" button. Creating the first account is what
+  switches authentication on, and a web-creatable account is a web-creatable
+  admin — so enrolment stays where a shell login is already the credential.
+  <p style="margin:10px 0 6px;">
+    <code>siteloom users add &lt;name&gt; --role {{ roles | join('|') }}</code> ·
+    <code>siteloom users passwd &lt;name&gt;</code> ·
+    <code>siteloom users role &lt;name&gt; &lt;role&gt;</code> ·
+    <code>siteloom users enable &lt;name&gt;</code>
+  </p>
+  <ul class="us-ladder">
+    {% for r in roles %}
+    <li><b>{{ role_labels[r] }}</b> <span class="mono">({{ r }})</span> —
+      {{ role_summaries[r] }}</li>
+    {% endfor %}
+  </ul>
+  <p style="margin:10px 0 0;">
+    An admin cannot remove their own admin or disable their own account: a
+    console with no reachable admin is recovered only from a shell, and
+    <code>siteloom users role</code> is that recovery.
+  </p>
+</div>
+{% endblock %}

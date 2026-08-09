@@ -236,7 +236,9 @@ def test_password_hashing_round_trip():
 
 
 def test_role_ladder_for_paths():
-    assert required_role("GET", "/") == "view"
+    # The triage queue is the floor of the console: `restricted` is the
+    # lowest rung and reads it, so every rung above does too (CLD-31).
+    assert required_role("GET", "/") == "restricted"
     assert required_role("POST", "/events/1/review") == "edit"
     assert required_role("POST", "/classes/detection") == "admin"
     assert required_role("POST", "/classes/events") == "admin"

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Audit trail{% endblock %}
+{% block subtitle %}who changed what, when{% endblock %}
+
+{#
+  The audit viewer (CLD-31). Admin only, like /users.
+
+  Every row here was written by the one middleware in create_app, which is
+  why the list is complete: a POST route cannot forget to audit, because
+  no route does the auditing.
+
+  The actor column is `AuditLog.username` — denormalized on purpose, never
+  a join to `users`. A deleted or renamed account must still be named by
+  its own history, and two kinds of actor have no User row at all:
+  `(open)` for mutations made before authentication was switched on, and
+  `(failed:name)` for a sign-in that never succeeded.
+#}
+
+{% block content %}
+<style>
+  .au-head { margin-bottom: 12px; }
+  .au-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .au-head p { font-size: 12px; color: var(--muted); margin: 0; max-width: 80ch; }
+  .au-facts {
+    display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 14px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--faint);
+  }
+  .au-facts b { color: var(--muted); font-weight: 500; }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .arow {
+    display: grid; grid-template-columns: 160px 190px 70px 1fr 60px;
+    align-items: center; gap: 12px; padding: 7px 14px;
+    border-bottom: 1px solid var(--row-rule);
+    font-family: var(--font-mono); font-size: 11px;
+  }
+  .arow:last-child { border-bottom: 0; }
+  .arow.head {
+    padding: 0 14px; height: 32px; background: var(--raised);
+    font-size: 9px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--faint);
+  }
+  .au-actor { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+  .au-ghost { color: var(--faint); }
+  .au-path { color: var(--muted); word-break: break-all; }
+  .au-status { text-align: right; }
+  .au-bad { color: oklch(0.86 0.12 30); }
+  .au-none {
+    padding: 14px; color: var(--faint); font-size: 12px;
+    border: 1px dashed var(--row-rule); border-radius: 8px;
+  }
+</style>
+
+<div class="au-head">
+  <h2>Audit trail</h2>
+  <p>
+    One row per mutating request that reached a handler, plus every sign-in
+    attempt. Denied requests are absent on purpose — nothing happened to
+    record. Back to <a href="/users">operators</a>.
+  </p>
+</div>
+
+<form class="filters" method="get" action="/audit">
+  <select name="actor">
+    <option value="">Every actor</option>
+    {% for name in actors %}
+    <option value="{{ name }}" {% if name == filters.actor %}selected{% endif %}>{{ name }}</option>
+    {% endfor %}
+  </select>
+  <input type="text" name="path" value="{{ filters.path }}"
+         placeholder="Path contains — e.g. /identities" style="min-width:26ch">
+  <button type="submit">Filter</button>
+  {% if filtered %}<a class="muted" href="/audit" style="align-self:center">clear</a>{% endif %}
+</form>
+
+<div class="au-facts">
+  <span><b>{{ total }}</b> matching row{{ '' if total == 1 else 's' }}</span>
+  <span>showing <b>{{ shown }}</b>{% if total > shown %} (most recent {{ limit }}){% endif %}</span>
+  {% if filters.actor %}<span>actor <b>{{ filters.actor }}</b></span>{% endif %}
+  {% if filters.path %}<span>path contains <b>{{ filters.path }}</b></span>{% endif %}
+</div>
+
+{% if rows %}
+<div class="tablecard">
+  <div class="arow head">
+    <div>When (UTC)</div><div>Actor</div><div>Method</div><div>Path</div>
+    <div class="au-status">Code</div>
+  </div>
+  {% for row in rows %}
+  <div class="arow">
+    <div>{{ row.at.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+    {# A row whose user_id is null had no account behind it: open mode, or
+       a sign-in that failed. Shown as it was written, greyed. #}
+    <div class="au-actor{{ '' if row.user_id else ' au-ghost' }}">{{ row.username }}</div>
+    <div>{{ row.method }}</div>
+    <div class="au-path">{{ row.path }}</div>
+    <div class="au-status{{ ' au-bad' if row.status_code >= 400 else '' }}">{{ row.status_code }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="au-none">
+  {% if filtered %}
+  No audited action matches this filter. Actors are matched on the name the
+  row recorded, which is the one the account had at the time.
+  {% else %}
+  Nothing has been audited yet — no mutation has reached a handler and no
+  sign-in has been attempted.
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -448,7 +448,9 @@ def test_the_resume_command_keeps_the_sweep_and_the_retry(tmp_path, monkeypatch)
 
 
 def test_starting_a_backfill_needs_admin_but_looking_does_not():
-    assert required_role("GET", "/backfill") == "view"
+    # Watching an import is not reading personal data, so the read floor
+    # is the bottom rung and only the start is admin (CLD-31).
+    assert required_role("GET", "/backfill") == "restricted"
     assert required_role("POST", "/backfill/start") == "admin"
 
 

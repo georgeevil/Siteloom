@@ -482,7 +482,10 @@ def test_parse_window_rejects_an_offset_rather_than_storing_a_mixed_frame():
 def test_writing_a_booking_is_edit_work_not_admin():
     """Correcting the calendar is judgment about what happened, not
     reconfiguration — so /bookings stays out of ADMIN_PREFIXES."""
-    assert required_role("GET", "/bookings") == "view"
+    # Reading the calendar is the bottom rung: "was an arrival expected at
+    # 21:40" is the context a restricted night-shift operator triages with
+    # (CLD-31), and it carries no biometric data.
+    assert required_role("GET", "/bookings") == "restricted"
     assert required_role("POST", "/bookings") == "edit"
     assert required_role("POST", "/bookings/1/edit") == "edit"
     assert required_role("POST", "/bookings/1/delete") == "edit"

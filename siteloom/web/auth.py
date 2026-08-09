@@ -2,9 +2,12 @@
 
 Design (CLD auth milestone):
 
-* Roles are a strict ladder: view < edit < admin. GETs need view,
-  mutations need edit, configuration needs admin. There is no permission
-  matrix — three rungs cover "look", "judge", "reconfigure".
+* Roles are a strict ladder: restricted < view < edit < admin. Reads need
+  restricted, reads of personal data need view, mutations need edit,
+  configuration needs admin. There is no permission matrix — the rungs
+  are "look at the queue", "look at everything", "judge", "reconfigure",
+  and which rung a request needs is decided by the prefix lists below,
+  never by a decorator on a handler.
 * Auth turns on when the first User row exists. Before that the console
   runs in the open single-operator mode the PoC started with, so adding
   this layer breaks nothing until someone opts in with
@@ -35,7 +38,39 @@ from sqlalchemy import delete, select
 
 from siteloom.store import AuditLog, User, WebSession
 
-ROLES = {"view": 0, "edit": 1, "admin": 2}
+#: The ladder, low to high. Stored on `User.role` as these strings and
+#: only ever compared through this mapping — adding `restricted` at the
+#: bottom renumbered every rung above it, and nothing migrated because
+#: nothing anywhere stores or compares the integer (CLD-31).
+ROLES = {"restricted": 0, "view": 1, "edit": 2, "admin": 3}
+#: Below every rung, for a role string this build does not recognise (a
+#: row written by a newer version, or edited by hand). It must stay below
+#: the *lowest* rung rather than at 0, which is now a real one.
+NO_ROLE = -1
+
+#: What each rung is called on screen, and what it means. The stored
+#: values are unchanged — a rename would touch every role comparison,
+#: every test asserting on a role string and every existing User row, and
+#: buy nothing the labels do not (CLD-31 product decision).
+ROLE_LABELS = {
+    "restricted": "Restricted",
+    "view": "Viewer",
+    "edit": "Writer",
+    "admin": "Admin",
+}
+ROLE_SUMMARIES = {
+    "restricted": "Triage queue only — no identities, gallery or training data",
+    "view": "Sees everything, changes nothing",
+    "edit": "Judges: verdicts, labels, corrections",
+    "admin": "Reconfigures: accounts, thresholds, models, jobs",
+}
+
+
+def role_label(role: str) -> str:
+    """The operator-facing name for a stored role value."""
+    return ROLE_LABELS.get(role, role)
+
+
 SESSION_COOKIE = "sl_session"
 SESSION_TTL = timedelta(days=14)
 
@@ -48,10 +83,14 @@ EXEMPT_PREFIXES = ("/api/v1/",)
 #: Path prefixes whose mutations reconfigure the system rather than
 #: review its output — admin only. A trailing slash is load-bearing on
 #: two of these: `/jobs/` covers every mutation on the jobs console
-#: (reindex, cancel, reap) while leaving GET /jobs a `view` screen, and
+#: (reindex, cancel, reap) while leaving GET /jobs a readable screen, and
 #: `/train/` keeps this off `/training`, which is labelling and needs
-#: only `edit`.
+#: only `edit`. `/audit` and `/users` appear here and in
+#: ADMIN_READ_PREFIXES below — reads *and* writes are admin there, and
+#: listing them twice is what stops a mutation added under either prefix
+#: tomorrow landing on `edit` by default.
 ADMIN_PREFIXES = (
+    "/audit",
     "/backfill",
     "/classes/detection",
     "/classes/events",
@@ -61,6 +100,45 @@ ADMIN_PREFIXES = (
     "/train/",
     "/users",
 )
+#: Prefixes whose *reads* are administrative too. Deliberately a separate
+#: list from ADMIN_PREFIXES rather than applying that one to GETs: the
+#: backfill and jobs screens are things a viewer may watch and only act
+#: on with admin, while the account list and the audit trail are not
+#: things a viewer may read at all.
+ADMIN_READ_PREFIXES = (
+    "/audit",
+    "/users",
+)
+#: The second floor (CLD-31), and the mirror image of ADMIN_PREFIXES: a
+#: read under one of these needs `view`, so the `restricted` rung below it
+#: cannot reach identities, the face gallery or the training corpus.
+#: Biometric data minimisation (NFR5) for a night-shift operator who
+#: should judge whether an event matters without browsing everyone's face.
+#:
+#: `/train` with no trailing slash on purpose — unlike ADMIN_PREFIXES this
+#: list wants `/training` too, and both are the labelling and modelling
+#: surface. `/search` is here because it is a directory of people and
+#: plates by another name: leaving it open would make the `/identities`
+#: floor cosmetic (see the module docstring of web/users_routes.py for
+#: what that costs).
+RESTRICTED_DENIED_PREFIXES = (
+    "/classes",
+    "/identities",
+    "/library",
+    "/search",
+    "/train",
+)
+#: Crops are served by one route for two purposes, so the prefix cannot
+#: tell them apart — the path below it can. Event crops are written to
+#: `media_dir/<camera-id>/<date>/`, while everything that makes up the
+#: face gallery and the training corpus (library thumbnails, library
+#: crops, Takeout faces) is written under `media_dir/library/`. So the
+#: gate is a path *segment*, which is what survives both spellings
+#: `/media/{path}` accepts — a relative path anchored on media_dir and an
+#: absolute one — and the case-insensitivity of the macOS filesystem this
+#: primarily targets.
+MEDIA_PREFIX = "/media/"
+GALLERY_MEDIA_SEGMENT = "library"
 
 _SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 
@@ -318,16 +396,71 @@ def failed_actor(attempted: str) -> str:
     return f"(failed:{name[:FAILED_ACTOR_MAX]})"
 
 
+def is_gallery_media(path: str) -> bool:
+    """Whether a /media request is for face-gallery or training material.
+
+    The one media route serves two kinds of image from two directory
+    trees: event crops under `media_dir/<camera-id>/<date>/`, which are
+    what an operator triaging a visit is looking at, and the library's
+    thumbnails, crops and imported faces under `media_dir/library/`,
+    which are the gallery and the training corpus. Only the second is
+    withheld from `restricted`.
+
+    Matching on the segment rather than on a URL prefix is what makes
+    that hold for every spelling the route accepts: `_media_candidates`
+    reads a relative path against media_dir *and* an absolute one, so
+    `/media/library/crops/x.jpg` and `/media//srv/media/library/crops/x.jpg`
+    are the same file, and only one of them starts with `/media/library`.
+    Lower-cased because the primary deployment target is a case-
+    insensitive filesystem, where `/media/Library/...` serves the same
+    file that `/media/library/...` does.
+
+    What this cannot see is a symlink inside media_dir under some other
+    name pointing at `library/` — the media route's containment check
+    stops paths escaping media_dir, not paths taking a scenic route
+    inside it. An operator who creates one has re-plumbed the crop
+    layout this reads.
+    """
+    if not path.startswith(MEDIA_PREFIX):
+        return False
+    rest = path[len(MEDIA_PREFIX) :]
+    return GALLERY_MEDIA_SEGMENT in (s.lower() for s in rest.split("/"))
+
+
+def withheld_from_restricted(path: str) -> bool:
+    """Whether reading `path` needs `view` rather than `restricted`."""
+    return any(
+        path.startswith(p) for p in RESTRICTED_DENIED_PREFIXES
+    ) or is_gallery_media(path)
+
+
 def required_role(method: str, path: str) -> str:
+    """The lowest rung that may make this request.
+
+    Four answers, decided by which prefix list the path falls in, so a
+    route added tomorrow lands on a floor without anyone remembering to
+    gate it. Reads are the interesting half now: the default read floor
+    is `restricted` (the triage queue, an event, the live view), reads of
+    people and training material need `view`, and the account list and
+    audit trail need `admin` — a read a viewer may not make at all.
+    """
     if method in ("GET", "HEAD", "OPTIONS"):
-        return "view"
+        if any(path.startswith(p) for p in ADMIN_READ_PREFIXES):
+            return "admin"
+        return "view" if withheld_from_restricted(path) else "restricted"
     if any(path.startswith(p) for p in ADMIN_PREFIXES):
         return "admin"
     return "edit"
 
 
 def has_role(user: User, role: str) -> bool:
-    return ROLES.get(user.role, -1) >= ROLES[role]
+    """Whether `user` stands at or above the `role` rung.
+
+    Every comparison in the console goes through here and through ROLES;
+    nothing compares a rung's integer, which is why adding a rung at the
+    bottom moved all three existing numbers and migrated no data.
+    """
+    return ROLES.get(user.role, NO_ROLE) >= ROLES[role]
 
 
 def record_audit(
