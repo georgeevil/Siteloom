@@ -80,6 +80,21 @@ class Event(Base):
     # event so accuracy queries stay one-table simple.
     missed_identity: Mapped[bool] = mapped_column(Boolean, default=False)
     missed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Operator-recorded tracking failure (CLD-103): this event's crops are
+    # not all the same subject. Distinct from `missed_identity`, which says
+    # a subject went unnamed — here the event itself is wrong, and no
+    # amount of identity work on it can be right.
+    #
+    # It is the corpus contribution the tuning harness needs. An operator
+    # marking this is already looking at the event; the mark carries the
+    # camera and time window, which is exactly a `track_ab.py` clip
+    # definition. `track_ab.py suggest` reads these rows.
+    multi_subject: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True
+    )
+    multi_subject_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     # Operator sign-off (CLD-20): "I have looked at this, it needs nothing
     # further". Explicit rather than inferred from identity verdicts,
     # because an event with no identity links at all — an unmatched car —

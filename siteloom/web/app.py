@@ -1082,25 +1082,20 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             if link is None or link.event_id != event_id or link.identity_id is None:
                 raise HTTPException(404)
             event = session.get(Event, event_id)
-            identity = session.get(Identity, link.identity_id)
             vectors = identity_ops.shared_store(config, "unlink")
-            removed = vectors.delete_by_crops(
-                identity.identifier_key,
-                identity.id,
-                identity_ops.event_crop_paths(session, event),
+            removed = identity_ops.unlink_claim(
+                session,
+                vectors,
+                event,
+                link,
+                when=datetime.now(timezone.utc).replace(tzinfo=None),
             )
             log.info(
                 "unlinked identity %s from event %s (%s vectors removed)",
-                identity.id,
+                link.identity_id,
                 event_id,
                 removed,
             )
-            link.unlinked_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            link.verdict = "wrong"
-            link.verdict_at = link.unlinked_at
-            identity_ops.revert_learned_plate(session, link, event_id)
-            identity.appearance_count = max(identity.appearance_count - 1, 0)
-            identity_ops.refresh_vector_count(session, vectors, identity)
             session.commit()
         return RedirectResponse(
             _safe_next(next_url, event_id) if next_url else f"/events/{event_id}",
@@ -1164,6 +1159,97 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             _safe_next(next_url, event_id) if next_url else f"/identities/{new_id}",
             status_code=303,
         )
+
+    @app.post("/events/{event_id}/multi-subject")
+    def set_multi_subject(
+        event_id: int,
+        multi: str = Form(...),
+        next_url: str = Form("/"),
+    ):
+        """Mark this event as containing more than one subject (CLD-103).
+
+        A different statement from every other control on this page. A
+        verdict grades one identity claim; this says the *event* is wrong
+        — its crops are not all the same subject — so no claim on it can
+        be right and grading them individually is wasted work.
+
+        It is also the cheapest corpus contribution available. The mark
+        carries a camera and a time window, which is exactly what
+        `scripts/track_ab.py` needs to define a clip, and the operator is
+        already looking at the event when they make it.
+
+        Identity links are deliberately left alone: this records a
+        tracking failure, and deciding which of the claims to keep is a
+        separate judgement the operator may not want to make now.
+        """
+        with Session() as session:
+            event = session.get(Event, event_id)
+            if event is None:
+                raise HTTPException(404)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            if multi == "1":
+                event.multi_subject = True
+                event.multi_subject_at = event.multi_subject_at or now
+            else:
+                event.multi_subject = False
+                event.multi_subject_at = None
+            session.commit()
+        return RedirectResponse(_safe_next(next_url, event_id), status_code=303)
+
+    @app.post("/events/{event_id}/identity/bulk")
+    def bulk_identity_action(
+        event_id: int,
+        action: str = Form(...),
+        keep_id: int | None = Form(None),
+        next_url: str = Form("/"),
+    ):
+        """Detach many identity claims at once (CLD-103).
+
+        A track that absorbed two people accumulates a dozen claims, and
+        clearing them one form at a time is the work this endpoint
+        removes — event 1401 had fifteen.
+
+        Unlinking, not deleting: `unlinked_at` is set and the row stays,
+        because "this event was once called someone else" is exactly what
+        a reviewer needs to see later, and re-attaching is how a
+        correction gets corrected (CLD-36).
+        """
+        if action not in ("unlink_all", "unlink_wrong", "keep_only"):
+            raise HTTPException(400, "unknown bulk action")
+        with Session() as session:
+            event = session.get(Event, event_id)
+            if event is None:
+                raise HTTPException(404)
+            links = [
+                link
+                for link in session.query(EventIdentity)
+                .filter_by(event_id=event_id)
+                .all()
+                if link.is_active
+            ]
+            if action == "keep_only":
+                if keep_id is None:
+                    raise HTTPException(400, "keep_only needs keep_id")
+                if not any(link.id == keep_id for link in links):
+                    raise HTTPException(404, "no such active link on this event")
+                targets = [link for link in links if link.id != keep_id]
+            elif action == "unlink_wrong":
+                targets = [link for link in links if link.verdict == "wrong"]
+            else:
+                targets = links
+
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            vectors = identity_ops.shared_store(config, "bulk-unlink")
+            for link in targets:
+                identity_ops.unlink_claim(
+                    session, vectors, event, link, when=now
+                )
+            session.commit()
+            log.info(
+                "bulk %s on event %s: detached %d of %d claims",
+                action, event_id, len(targets), len(links),
+            )
+        return RedirectResponse(_safe_next(next_url, event_id), status_code=303)
 
     @app.post("/events/{event_id}/missed")
     def set_missed_identity(
