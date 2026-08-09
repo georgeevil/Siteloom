@@ -21,7 +21,13 @@ backend:
   kind: local
 
 detection:
-  model: yolo11n.pt
+  # yolo11s, not the nano model (CLD-96). Measured over a real 60 s clip
+  # from these cameras, nano minted 14 tracks where s minted 7 for the
+  # same people — the extra ids are flicker, and every one of them is a
+  # chance to attach the wrong identity. On mps at this resolution the
+  # upgrade is effectively free: 39 ms/frame for nano against 40 ms for
+  # s, warm, which is ~60% of the budget for three cameras at 5 fps.
+  model: yolo11s.pt
   device: mps
   confidence: 0.4
 
