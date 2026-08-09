@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}Bookings{% endblock %}
+{% block subtitle %}guest windows behind the suppression{% endblock %}
+
+{#
+  Guest bookings (CLD-90). A dated list, not a calendar: the operator's
+  question is "was there a booking around 21:40 last Tuesday", and three
+  ordered sections answer it better than a month grid.
+
+  Each row's counts are links into the events list, built with app.py's
+  own `_triage_url`, so the number and the list it opens cannot drift.
+
+  The empty state follows the /noise rule (CLD-26): "no bookings in this
+  window" and "no iCal feed is configured" are different facts, and an
+  empty table must never read as a quiet week when nothing can fill it.
+#}
+
+{% block content %}
+<style>
+  .bk-head { margin-bottom: 14px; }
+  .bk-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .bk-head p { font-size: 12px; color: var(--muted); margin: 0; max-width: 78ch; }
+  .bk-facts {
+    display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 16px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--faint);
+  }
+  .bk-facts b { color: var(--muted); font-weight: 500; }
+
+  .bk-section { margin-bottom: 20px; }
+  .bk-section h3 {
+    margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--faint);
+    font-weight: 500;
+  }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .brow {
+    display: grid; grid-template-columns: 250px 1fr 90px 110px 120px;
+    align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .brow:last-child { border-bottom: 0; }
+  .brow.head {
+    padding: 0 14px; height: 32px; background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .brow.now { background: oklch(0.23 0.02 200); }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .bk-sub { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .bk-summary { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+  .bk-count { font-family: var(--font-mono); font-size: 12px; }
+  .bk-zero { color: var(--faint); }
+
+  .bk-edit { grid-column: 1 / -1; margin-top: 4px; }
+  .bk-edit summary {
+    cursor: pointer; font-family: var(--font-mono); font-size: 10px;
+    color: var(--faint); list-style: none;
+  }
+  .bk-edit summary:hover { color: var(--text); }
+  .bk-form {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    margin-top: 8px; font-size: 12px;
+  }
+  .bk-form input, .bk-form button {
+    padding: 6px 9px; border-radius: 6px; font-family: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .bk-form button { cursor: pointer; }
+  .bk-form button:hover { border-color: oklch(0.5 0.03 250); }
+  .bk-form .danger { color: oklch(0.86 0.12 30); }
+
+  .bk-add {
+    border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel);
+    padding: 12px 14px; margin-bottom: 18px;
+  }
+  .bk-add summary { cursor: pointer; font-size: 12.5px; font-weight: 600; }
+  .bk-add p { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); max-width: 78ch; }
+
+  .bk-error {
+    border: 1px solid oklch(0.42 0.1 30); border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 14px;
+    color: oklch(0.86 0.12 30); font-size: 12px;
+  }
+  .bk-empty {
+    border: 1px dashed var(--control-border); border-radius: 8px;
+    padding: 18px 20px; color: var(--muted); font-size: 12.5px; line-height: 1.65;
+  }
+  .bk-empty h3 { margin: 0 0 8px; font-size: 13px; color: var(--text); font-weight: 600; }
+  .bk-empty code {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--raised); padding: 1px 5px; border-radius: 3px;
+  }
+  .bk-none {
+    padding: 12px 14px; color: var(--faint); font-size: 12px;
+    border: 1px dashed var(--row-rule); border-radius: 8px;
+  }
+</style>
+
+<div class="bk-head">
+  <h2>Guest bookings</h2>
+  <p>
+    An event inside a booking's arrival window is stamped
+    <code class="mono">guest_window</code> at ingest, which is what stops an
+    expected arrival raising an unknown-vehicle alarm. This is the calendar
+    that decision is read from.
+  </p>
+</div>
+
+<div class="bk-facts">
+  <span><b>{{ total }}</b> booking{{ '' if total == 1 else 's' }}</span>
+  <span><b>{{ ical_count }}</b> from the feed</span>
+  <span><b>{{ manual_count }}</b> manual</span>
+  <span>arrival window <b>−{{ pre_hours | round(1) }} h</b> to
+    <b>+{{ post_hours | round(1) }} h</b> around check-in</span>
+  {% if feed %}<span>feed <b>{{ feed }}</b></span>{% endif %}
+  <span>now <b>{{ now.strftime('%Y-%m-%d %H:%M') }} UTC</b></span>
+</div>
+
+{% if error %}
+<div class="bk-error">{{ error }}</div>
+{% endif %}
+
+<details class="bk-add" {% if error %}open{% endif %}>
+  <summary>Add a booking</summary>
+  <p>
+    For a stay the feed does not carry, or to correct one it got wrong. A
+    manual booking survives <code>siteloom sync-bookings</code> — the sync
+    keys on the feed's own UID and leaves these rows alone. Times are UTC.
+  </p>
+  <form class="bk-form" method="post" action="/bookings">
+    <input type="text" name="summary" placeholder="Summary — e.g. Unit A, Okonjo"
+           style="min-width:24ch" required>
+    <label class="mono">check-in
+      <input type="datetime-local" name="start" required></label>
+    <label class="mono">check-out
+      <input type="datetime-local" name="end" required></label>
+    <button type="submit">Add booking</button>
+  </form>
+</details>
+
+{% if empty_reason == 'unconfigured' %}
+<div class="bk-empty">
+  <h3>No iCal feed is configured</h3>
+  This list is empty because nothing feeds it, not because nobody is staying.
+  With no calendar, <code>guest_window</code> is never stamped and every
+  arrival looks like an unknown vehicle.
+  <p style="margin:10px 0 0;">
+    Set <code>guests.ical</code> in the site config to the booking calendar's
+    URL or a local <code>.ics</code> path, then run
+    <code>siteloom sync-bookings</code>. Until then, bookings added above are
+    the only ones this site has.
+  </p>
+</div>
+
+{% elif empty_reason == 'unsynced' %}
+<div class="bk-empty">
+  <h3>The feed is configured, but no bookings have been read from it</h3>
+  <code>guests.ical</code> points at <strong>{{ feed }}</strong> and the
+  bookings table is empty — either the sync has not run yet or the calendar
+  currently carries no events.
+  <p style="margin:10px 0 0;">
+    Run <code>siteloom sync-bookings</code> to read it. The sync is an upsert,
+    so it is safe to run repeatedly.
+  </p>
+</div>
+
+{% else %}
+{% for section in sections %}
+<div class="bk-section">
+  <h3>{{ section.title }}</h3>
+  {% if section.rows %}
+  <div class="tablecard">
+    <div class="brow head">
+      <div>Window (UTC)</div><div>Summary</div><div>Source</div>
+      <div>Events</div><div>Guest-stamped</div>
+    </div>
+    {% for row in section.rows %}
+    <div class="brow{% if section.key == 'current' %} now{% endif %}">
+      <div>
+        <div class="mono">{{ row.booking.start.strftime('%Y-%m-%d %H:%M') }}
+          → {{ row.booking.end.strftime('%Y-%m-%d %H:%M') }}</div>
+        <div class="bk-sub">arrival
+          {{ row.arrival_start.strftime('%m-%d %H:%M') }}–{{ row.arrival_end.strftime('%m-%d %H:%M') }}</div>
+      </div>
+      <div class="bk-summary">{{ row.booking.summary or '—' }}</div>
+      <div>
+        {# Provenance is the column that decides whether the row can be
+           edited, so it is a badge rather than a word: green for what the
+           feed owns, accent for what this console minted. #}
+        <span class="badge{{ '' if row.booking.is_manual else ' guest' }}">
+          {{ 'manual' if row.booking.is_manual else 'ical' }}</span>
+      </div>
+      <div class="bk-count">
+        {% if row.events %}
+        <a href="{{ row.stay_url }}">{{ row.events }}</a>
+        {% else %}<span class="bk-zero">0</span>{% endif %}
+      </div>
+      <div class="bk-count">
+        {% if row.stamped %}
+        <a href="{{ row.arrival_url }}">{{ row.stamped }}</a>
+        {% else %}<span class="bk-zero">0</span>{% endif %}
+      </div>
+      {% if row.booking.is_manual %}
+      <details class="bk-edit">
+        <summary>edit / delete</summary>
+        <form class="bk-form" method="post"
+              action="/bookings/{{ row.booking.id }}/edit">
+          <input type="text" name="summary" value="{{ row.booking.summary }}"
+                 style="min-width:24ch" required>
+          <input type="datetime-local" name="start"
+                 value="{{ row.booking.start.strftime('%Y-%m-%dT%H:%M') }}" required>
+          <input type="datetime-local" name="end"
+                 value="{{ row.booking.end.strftime('%Y-%m-%dT%H:%M') }}" required>
+          <button type="submit">Save</button>
+        </form>
+        <form class="bk-form" method="post"
+              action="/bookings/{{ row.booking.id }}/delete">
+          <button type="submit" class="danger"
+                  onclick="return confirm('Delete this manual booking? Events already stamped keep their guest_window flag.')">
+            Delete booking</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="bk-none">{{ section.empty }}</div>
+  {% endif %}
+  {% if section.key == 'past' and truncated %}
+  <p class="mono" style="margin:8px 0 0; color:var(--faint);">
+    {{ truncated }} older booking{{ '' if truncated == 1 else 's' }} not shown
+    (most recent {{ past_limit }}).
+  </p>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}
