@@ -35,6 +35,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from rich.console import Console
@@ -49,7 +50,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from siteloom.health import hostname
+from siteloom.health import hostname, process_alive
 from siteloom.store import OperationRun
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,19 @@ def humanize(seconds: float | None) -> str:
 
 class Interrupted(Exception):
     """Raised inside the work loop after Ctrl-C so callers can commit."""
+
+
+#: Reporters heartbeating inside *this* process, keyed by run id.
+#:
+#: A job started from the console runs in a background thread of the
+#: serving process, where the signal handler below could not be
+#: installed (see `__enter__`) and where a signal would hit the web
+#: server rather than the job. `request_cancel` therefore looks here
+#: first and sets the same flag the handler sets, so a cancel means one
+#: thing whether it comes from a terminal, another host's terminal, or
+#: the browser.
+_LIVE_REPORTERS: dict[int, "ProgressReporter"] = {}
+_REGISTRY_LOCK = threading.Lock()
 
 
 class ProgressReporter:
@@ -145,6 +159,8 @@ class ProgressReporter:
             session.add(run)
             session.commit()
             self.run_id = run.id
+        with _REGISTRY_LOCK:
+            _LIVE_REPORTERS[self.run_id] = self
         for signum in STOP_SIGNALS:
             try:
                 self._prev_handlers[signum] = signal.getsignal(signum)
@@ -171,21 +187,27 @@ class ProgressReporter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        self._close_phase()
-        if self._progress is not None:
-            self._progress.stop()
-        for signum, handler in self._prev_handlers.items():
-            signal.signal(signum, handler)
+        try:
+            self._close_phase()
+            if self._progress is not None:
+                self._progress.stop()
+            for signum, handler in self._prev_handlers.items():
+                signal.signal(signum, handler)
 
-        if exc_type is Interrupted or self.interrupt_requested:
-            self.finish("interrupted", "stopped by user")
-            self._print_resume()
-            return exc_type is Interrupted  # swallow only our own signal
-        if exc_type is not None:
-            self.finish("failed", f"{exc_type.__name__}: {exc}")
+            if exc_type is Interrupted or self.interrupt_requested:
+                self.finish("interrupted", "stopped by user")
+                self._print_resume()
+                return exc_type is Interrupted  # swallow only our own signal
+            if exc_type is not None:
+                self.finish("failed", f"{exc_type.__name__}: {exc}")
+                return False
+            self.finish("complete")
             return False
-        self.finish("complete")
-        return False
+        finally:
+            # The row outlives the process; the registry entry must not —
+            # a finished run is not cancellable and must never look it.
+            with _REGISTRY_LOCK:
+                _LIVE_REPORTERS.pop(self.run_id, None)
 
     def _on_stop(self, signum, frame) -> None:
         # The first signal asks the loop to stop cleanly; a second one is
@@ -203,6 +225,27 @@ class ProgressReporter:
         self.console.print(
             f"\n[yellow]{name} received — finishing the current batch and "
             f"saving progress. Send it again to abort immediately.[/]"
+        )
+
+    def request_stop(self, reason: str = "cancel requested") -> None:
+        """Ask this run to stop cleanly, without a signal.
+
+        Exactly what the first Ctrl-C does — set the flag the work loop
+        checks after each commit — reachable from another thread of the
+        same process. A console-started job has no signal handler of its
+        own (it is not on the main thread) and shares its pid with the
+        web server, so this is the only stop it can be given that does
+        not take the server down with it.
+        """
+        with self._lock:
+            if self.interrupt_requested:
+                return
+            self.interrupt_requested = True
+        log.info(
+            "run %s (%s): %s — finishing the current batch and saving progress",
+            self.run_id,
+            self.kind,
+            reason,
         )
 
     def check_interrupt(self) -> None:
@@ -371,6 +414,173 @@ class ProgressReporter:
         for name, seconds in self.phase_timings.items():
             lines.append(f"  {name}: {humanize(seconds)}")
         return lines
+
+
+# -- stopping and closing out runs ------------------------------------------
+#
+# `siteloom jobs cancel|reap` and the /jobs console both act on runs they
+# did not start. Both go through the functions below rather than each
+# reaching for a signal of its own: two mechanisms that stop a job
+# differently are two definitions of what a cancelled run means, and the
+# resume command an operator is handed afterwards depends on which one
+# ran.
+
+#: What a reaped row records. It is not a failure — the work that was
+#: committed is still there, and the resume command still resumes it.
+REAP_MESSAGE = "process gone; closed out by reap"
+
+
+@dataclass
+class CancelResult:
+    """The outcome of asking a run to stop, honestly.
+
+    `ok` is False whenever the run was *not* asked — a run on another
+    host, a row whose process is already gone, a run that already
+    finished. Callers must render the reason rather than reporting a
+    cancellation that never happened: an operator who is told "cancelled"
+    and sees no change reaches for `kill -9` and loses the batch.
+    """
+
+    ok: bool
+    #: Machine-readable: requested | killed | not_found | not_running |
+    #: other_host | no_process
+    reason: str
+    detail: str
+    run_id: int
+    kind: str = ""
+    pid: int = 0
+    host: str = ""
+
+
+def request_cancel(session, run_id: int, force: bool = False) -> CancelResult:
+    """Ask a run to stop, from anywhere that can see the database.
+
+    A cancel is a request, not a kill: the run finishes its current
+    batch, commits, records itself `interrupted` and keeps its resume
+    command. `force` is the escape hatch — SIGKILL, losing the work since
+    the last commit — and is deliberately not offered in-process, where
+    it would take down whatever else that process is doing.
+    """
+    run = session.get(OperationRun, run_id)
+    if run is None:
+        return CancelResult(False, "not_found", f"no run #{run_id}", run_id)
+    if run.status != "running":
+        return CancelResult(
+            False,
+            "not_running",
+            f"run #{run_id} is already {run.status}",
+            run_id,
+            run.kind,
+            run.pid,
+            run.host,
+        )
+    pid, host, kind = run.pid, run.host, run.kind
+
+    with _REGISTRY_LOCK:
+        reporter = _LIVE_REPORTERS.get(run_id)
+    # The row must also claim this process. Run ids are per-database, so
+    # a registry hit alone would let a row restored from elsewhere, or
+    # written by another deployment against another database, be
+    # "cancelled" by stopping an unrelated local job.
+    if reporter is not None and pid == os.getpid() and host in ("", hostname()):
+        # Ours: a background thread of this very process. Signalling the
+        # pid would hit the process, not the job.
+        reporter.request_stop()
+        note = (
+            " (a hard kill would have taken this process down with it, "
+            "so it was asked to stop instead)"
+            if force
+            else ""
+        )
+        return CancelResult(
+            True,
+            "requested",
+            f"asked #{run_id} ({kind}) to stop{note}; it will finish the "
+            f"current batch, save progress and keep its resume command",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+
+    if host and host != hostname():
+        return CancelResult(
+            False,
+            "other_host",
+            f"run #{run_id} belongs to {host}; cancel it there "
+            f"(this is {hostname()})",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+    if not pid or not process_alive(pid):
+        return CancelResult(
+            False,
+            "no_process",
+            f"run #{run_id} ({kind}) has no live process — it died without "
+            f"recording an outcome; clear it with reap",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+
+    os.kill(pid, signal.SIGKILL if force else signal.SIGINT)
+    if force:
+        return CancelResult(
+            True,
+            "killed",
+            f"killed #{run_id} ({kind}, pid {pid}) — work since the last "
+            f"commit is lost",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+    return CancelResult(
+        True,
+        "requested",
+        f"asked #{run_id} ({kind}, pid {pid}) to stop; it will finish the "
+        f"current batch, save progress and keep its resume command",
+        run_id,
+        kind,
+        pid,
+        host,
+    )
+
+
+def stale_runs(session, run_ids: list[int] | None = None) -> list[OperationRun]:
+    """Rows still saying `running` that nothing is working on any more.
+
+    `is_stale` is a property, not a column (it asks the operating system
+    about a pid), so the filtering happens in Python over the small set
+    of rows that still claim to be running.
+    """
+    from sqlalchemy import select
+
+    query = select(OperationRun).filter(OperationRun.status == "running")
+    if run_ids is not None:
+        if not run_ids:
+            return []
+        query = query.filter(OperationRun.id.in_(run_ids))
+    return [run for run in session.scalars(query).all() if run.is_stale]
+
+
+def reap_runs(session, runs) -> int:
+    """Close dead rows out as `abandoned`, keeping what they knew.
+
+    Position, counters and resume command are left exactly as the dead
+    process last wrote them — reaping ends the ambiguity of a `running`
+    row with nobody behind it, it does not discard the run.
+    """
+    runs = list(runs)
+    for run in runs:
+        run.status = "abandoned"
+        run.message = REAP_MESSAGE
+        run.finished_at = _now()
+    session.commit()
+    return len(runs)
 
 
 def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:

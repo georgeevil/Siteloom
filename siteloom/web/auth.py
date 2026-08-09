@@ -46,8 +46,10 @@ PUBLIC_PATHS = {"/login", "/healthz", "/readyz"}
 #: Prefixes with their own auth scheme (x-api-key).
 EXEMPT_PREFIXES = ("/api/v1/",)
 #: Path prefixes whose mutations reconfigure the system rather than
-#: review its output — admin only.
-ADMIN_PREFIXES = ("/classes/detection", "/classes/events", "/jobs/reindex", "/users")
+#: review its output — admin only. `/jobs/` covers every mutation on the
+#: jobs console (reindex, cancel, reap): each one starts or stops work
+#: the whole site is doing, which is not a reviewer's call.
+ADMIN_PREFIXES = ("/classes/detection", "/classes/events", "/jobs/", "/users")
 
 _SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 

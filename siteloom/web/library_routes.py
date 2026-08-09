@@ -1244,7 +1244,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         }
 
     @app.get("/jobs")
-    def jobs_page(request: Request):
+    def jobs_page(request: Request, notice: str | None = None):
         with Session() as session:
             runs = session.scalars(
                 select(OperationRun).order_by(OperationRun.id.desc()).limit(25)
@@ -1256,10 +1256,89 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             ctx(
                 runs=payload,
                 running=[r for r in payload if r["status"] == "running"],
+                stale=[r for r in payload if r["status"] == "stale"],
+                # Echoed back after a cancel/reap; bounded because it
+                # arrives in a URL anyone can craft.
+                notice=(notice or "")[:300],
                 unifi_cameras=[c for c in config.cameras if c.adapter == "unifi"],
                 reindex_running=_reindex_state["thread"] is not None
                 and _reindex_state["thread"].is_alive(),
             ),
+        )
+
+    def _jobs_redirect(detail: str) -> RedirectResponse:
+        return RedirectResponse(
+            "/jobs?" + urlencode({"notice": detail}), status_code=303
+        )
+
+    @app.post("/jobs/{run_id}/cancel")
+    def cancel_job(run_id: int):
+        """Ask a running job to stop — the console half of `jobs cancel`.
+
+        The same `progress.request_cancel` the CLI calls, for the same
+        reason the issue asks for it: a job the wizard started in this
+        process has no terminal to Ctrl-C, and a second stop mechanism
+        would be a second definition of what a cancelled run means.
+
+        It is a request, not a kill. When it cannot be delivered — the
+        run belongs to another host, or nothing is behind it any more —
+        this says so with a status code rather than redirecting to a page
+        that looks like it worked.
+        """
+        from siteloom.progress import request_cancel
+
+        with Session() as session:
+            result = request_cancel(session, run_id)
+        if not result.ok:
+            return JSONResponse(
+                {"error": result.detail, "reason": result.reason},
+                status_code=404 if result.reason == "not_found" else 409,
+            )
+        return _jobs_redirect(result.detail)
+
+    @app.post("/jobs/{run_id}/reap")
+    def reap_job(run_id: int):
+        """Close one dead row out as `abandoned`.
+
+        Refuses anything that is not stale: a live run must be cancelled,
+        which asks it to save its work, not reaped, which would leave the
+        process running against a row that says it stopped.
+        """
+        from siteloom.progress import reap_runs, stale_runs
+
+        with Session() as session:
+            runs = stale_runs(session, [run_id])
+            if not runs:
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"run #{run_id} is not stale — only a row whose "
+                            f"process is gone can be reaped"
+                        ),
+                        "reason": "not_stale",
+                    },
+                    status_code=409,
+                )
+            reap_runs(session, runs)
+        return _jobs_redirect(
+            f"reaped #{run_id}; its position and resume command are preserved"
+        )
+
+    @app.post("/jobs/reap")
+    def reap_jobs():
+        """Bulk reap — every stale row at once, as `jobs reap` does."""
+        from siteloom.progress import reap_runs, stale_runs
+
+        with Session() as session:
+            runs = stale_runs(session)
+            if not runs:
+                return JSONResponse(
+                    {"error": "nothing to reap", "reason": "not_stale"},
+                    status_code=409,
+                )
+            count = reap_runs(session, runs)
+        return _jobs_redirect(
+            f"reaped {count} run(s); positions and resume commands are preserved"
         )
 
     @app.post("/jobs/reindex")
