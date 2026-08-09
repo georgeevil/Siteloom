@@ -292,5 +292,9 @@
       setInterval(tick, 1000);
     })();
   </script>
+{# Continuous scroll (CLD-104). Enhancement only: every list it touches
+   renders a working "Load more" link first, so a client that never runs
+   this file still reaches the end of the list. #}
+<script src="/static/infinite.js" defer></script>
 </body>
 </html>
