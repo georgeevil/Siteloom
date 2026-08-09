@@ -26,7 +26,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=6.0",
     "httpx>=0.27",
+    "ruff>=0.9",
+    "mypy>=1.14",
 ]
 # Plate detection + OCR (PRD §6.4 plate path) — onnx-based, optional:
 # without it the vehicle identifier degrades to visual re-ID only.
@@ -47,3 +50,144 @@ packages = ["siteloom"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Coverage rides along with every `pytest` run (CLD-71) rather than hiding behind a
+# separate command — a number nobody produces is a number nobody reads. `--cov` with
+# no value takes its source list from [tool.coverage.run] below, so the measured set
+# is defined in one place. `skip-covered` keeps the tail short: the report is a list
+# of gaps, not an inventory of the package.
+addopts = "--cov --cov-report=term-missing:skip-covered"
+
+# ---------------------------------------------------------------------------
+# Coverage (CLD-71)
+# ---------------------------------------------------------------------------
+# What is measured is the shipped package and nothing else. `tests/` is excluded
+# because a test file's own coverage is tautological, and `scripts/` because it is
+# operator tooling outside the wheel — `scripts/archive_report.py` does have tests,
+# so folding it in later is a real (small) improvement, not an oversight.
+#
+# Deliberately NOT omitted: the hardware-shaped modules (`adapters/unifi.py`,
+# `web/live.py`, `identity/embedders.py`). Omitting a module is how a coverage
+# number becomes a lie — those files are exactly the gaps this issue exists to
+# surface, and the tests are forbidden from reaching real cameras or weights
+# (CLAUDE.md), so their low numbers are the honest reading.
+[tool.coverage.run]
+source = ["siteloom"]
+# Branch coverage, because this codebase is mostly guard clauses: optional-import
+# fallbacks, `if verified and not rejected`, threshold/margin gates. A statement-only
+# percentage over that shape counts the `if` and ignores the branch it never took.
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# Only lines that *cannot* execute under the test contract are excluded — no blanket
+# pragmas for "hard to test". Each entry is a construct with no runtime body to reach.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "@(typing\\.)?overload",
+    "@(abc\\.)?abstractmethod",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\b.*\\):",
+]
+# fail_under lives in the CI workflow (`--cov-fail-under=70`), NOT here. Put it here and
+# `pytest tests/test_zones.py` — the single-test command CLAUDE.md documents — exits 1
+# reporting 2.69% coverage, because a floor asserted on a partial run is asserting
+# something false. The floor is a property of running the whole suite, so it is stated
+# where the whole suite is run. Baseline is 76%; 70 is six points of slack so an honest
+# refactor cannot redden main, while a module landing untested still does. Ratcheting it
+# is a deliberate edit to the workflow, never an automatic reading of HEAD.
+
+# ---------------------------------------------------------------------------
+# Lint (CLD-82)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+# 100, not 88. The house style runs to long prose comments that explain *why* a rule
+# exists, and reflowing them to 88 would shred paragraphs that are load-bearing
+# documentation. Only 5 lines in the tree exceed 100 today (max 130), and E501 is
+# deliberately not selected below — this value is for the formatter, not a gate.
+line-length = 100
+
+[tool.ruff.lint]
+# Scope: things that are wrong, not things that are unfashionable. E4/E7/E9 + F are
+# the import/syntax/name errors that bite at runtime; C90 caps runaway complexity.
+# Style-opinion families (I, UP, SIM, DTZ, B, …) are surveyed in
+# docs/testing/lint-and-types.md with counts, so tightening is a decision with a
+# price tag rather than a 40-file diff landing on top of everyone's branch.
+select = ["E4", "E7", "E9", "F", "C90"]
+
+[tool.ruff.lint.mccabe]
+# 20, not the default 10. Seventeen functions sit above 10 and the tree's real shape
+# is "≤19 everywhere, plus one outlier" — a 10 that flags a sixth of the codebase
+# gets switched off, a 20 that flags nothing today catches the next one that grows.
+max-complexity = 20
+
+[tool.ruff.lint.per-file-ignores]
+# BASELINE, not policy. Every entry is a real finding on the tree as it stands, pinned
+# to the one file it lives in so the rule stays live everywhere else. Deleting an entry
+# (after fixing the code) is the ratchet. Full detail in docs/testing/lint-and-types.md.
+"siteloom/cli_library.py" = ["F401"]        # unused `logging` import
+"siteloom/reindex.py" = ["F401"]            # unused `json`, `SiteConfig`
+"siteloom/web/app.py" = ["C901"]            # create_app: complexity 92, the one outlier
+"siteloom/web/library_routes.py" = ["F401"] # unused `fastapi.Query`
+"tests/test_identity.py" = ["F401"]         # unused `IdentifierConfig`
+"tests/test_integrations.py" = ["F401"]     # unused `pytest`
+"tests/test_library.py" = ["F401"]          # unused `CameraConfig`
+"tests/test_noise_page.py" = ["F401"]       # unused `pytest`
+"tests/test_resume_equivalence.py" = ["F821"]  # `Path` annotated but never imported
+"tests/test_search_sse.py" = ["E741"]       # `l` as a loop variable
+"tests/test_takeout.py" = ["F401"]          # unused `pytest`
+
+[tool.ruff.lint.flake8-bugbear]
+# Not selected today, but recorded so that whoever turns B on does not spend an hour
+# rediscovering that all 15 B008 hits are the typer/FastAPI declarative-default idiom.
+extend-immutable-calls = [
+    "fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query",
+    "typer.Argument", "typer.Option",
+]
+
+# ---------------------------------------------------------------------------
+# Types (CLD-82) — per-module opt-in, not a global switch
+# ---------------------------------------------------------------------------
+# The tree is not annotated enough for a global gate: 127 errors at mypy's own
+# defaults, 581 under --strict, across 40 of 58 modules. Turning that on globally
+# means either months of unrelated churn or a wall of `# type: ignore`, and neither
+# catches a bug. So: analyse everything (imports must still resolve), report only on
+# modules that are strict-clean today. New modules join the list; the list only grows.
+[tool.mypy]
+python_version = "3.12"
+files = ["siteloom"]
+# cv2, ultralytics, uiprotect, qdrant_client and friends ship no stubs.
+ignore_missing_imports = true
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# The strict seed. Chosen because they are already clean under --strict, and because
+# they are the contracts other layers are written against — the dispatch API that a
+# Celery/Ray backend must satisfy, the adapter and module base shapes, the training
+# dataset boundary. Type drift there is expensive; type drift in a Jinja route handler
+# is not, which is why the web layer is not on this list yet.
+module = [
+    "siteloom.adapters.file",
+    "siteloom.adapters.rtsp",
+    "siteloom.dispatch.*",
+    "siteloom.identity.plates",
+    "siteloom.modules.base",
+    "siteloom.store",
+    "siteloom.training.dataset",
+    "siteloom.web.nav",
+]
+ignore_errors = false
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
