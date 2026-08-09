@@ -61,9 +61,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
 
       # The pinned set, matching CLAUDE.md's documented install, so CI fails on the
-      # same resolution developers get. ~6.5 min cold on a clean venv (measured),
-      # ~5.4 GB installed — the linux pins pull the full CUDA wheel stack. See
-      # docs/testing/ci.md for the CPU-wheel follow-up that would cut both.
+      # same resolution developers get. Measured uncached on this runner: 1m24s and
+      # ~5.4 GB, the bulk of it a CUDA wheel stack for a torch nothing in the suite
+      # imports. See docs/testing/coverage.md for the CPU-wheel follow-up.
       - name: Install
         run: |
           python -m pip install --upgrade pip

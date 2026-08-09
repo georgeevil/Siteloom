@@ -58,6 +58,8 @@ Measured on a clean Python 3.12 venv built from `requirements-dev.txt`, 620 test
 TOTAL   7180 stmts   1522 missed   1982 branches   254 partial   76%
 ```
 
+CI, running the same thing against `main` merged in (622 tests), agrees: **76.25%**.
+
 13 modules are at 100%. The floor in CI is **70%** — six points of slack, so an honest
 refactor cannot redden `main` but an untested new module still does.
 
@@ -105,16 +107,34 @@ a ratchet that locks in a bad afternoon.
 
 ## CI cost
 
-Measured on a clean 3.12 venv:
+From the first real run, not an estimate ([run 31335639775][run]):
 
-* `pip install -r requirements-dev.txt`: **6m34s**, **5.4 GB** installed. The linux pins
-  pull the full CUDA wheel stack (`nvidia-*`, `torch`, `triton`) even though nothing in
-  the suite imports torch — `siteloom/identity/embedders.py` and `siteloom/training/face.py`
-  import it lazily, inside functions.
-* Suite: ~4 min with coverage.
+| Step | Time |
+| --- | --- |
+| `lint` job, end to end | **8s** |
+| `test`: apt (libgl1) | 6s |
+| `test`: `pip install -r requirements-dev.txt`, uncached | **1m24s** |
+| `test`: `mypy` | 39s |
+| `test`: `pytest` + coverage | **2m14s** — 622 passed, 76.25% |
+| `test` job, end to end | **4m47s** |
 
-So the `test` job is roughly 11 minutes cold, ~5 warm with the pip cache. The obvious
-follow-up is a CPU-only torch install for CI, which would cut several GB and most of the
-install time — but it means either a second constraints file or re-pinning
-`requirements.txt` off the CUDA wheels, and that changes what Linux developers get. Left
-as a deliberate follow-up rather than smuggled in here.
+[run]: https://github.com/georgeevil/Siteloom/actions/runs/31335639775
+
+Two things that only a real run tells you:
+
+* **The install is not the bottleneck anyone expects.** It took 6m34s on a clean local
+  venv and 1m24s on `ubuntu-latest` — the runner sits next to PyPI. It still lands
+  **5.4 GB**, and the saved pip cache is **2.9 GB**, because the linux pins pull the whole
+  CUDA wheel stack (`nvidia-*`, `torch`, `triton`) for a torch nothing in the suite
+  imports — `identity/embedders.py` and `training/face.py` import it lazily, inside
+  functions. A CPU-only torch install for CI is still worth doing, but the prize is disk
+  and cache size, not minutes. It needs a second constraints file or re-pinning
+  `requirements.txt` off the CUDA wheels, which changes what Linux developers get, so it
+  is a deliberate follow-up rather than something to smuggle in.
+* **The runner is faster than the dev box at the tests too** — 2m14s with coverage against
+  3m57s locally.
+
+Known warning, not fixed here: `actions/checkout@v4`, `actions/setup-python@v5` and
+`actions/upload-artifact@v4` target Node 20 and the runner logs a deprecation notice.
+Bumping the majors is a one-line change, but it is a change to a workflow that has been
+observed green, and re-verifying it costs another full run. Worth doing on its own.
