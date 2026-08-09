@@ -262,49 +262,107 @@ def report_training_gate(conn: sqlite3.Connection, present: set[str]) -> None:
     # by machine agreement is a floor cleared by Google's people-tags
     # agreeing with a face detector — which may well be fine, but it is
     # not human sign-off and should never be mistaken for it.
-    if "proposal_basis" in cols and "identity_id" in cols:
-        rule("Who verified the training data")
-        rows = conn.execute(
-            "SELECT COALESCE(proposal_basis, '') AS basis, COUNT(*) AS n "
-            "FROM annotations WHERE identity_id IS NOT NULL AND class_name='face' "
-            "AND verified=1 AND rejected=0 GROUP BY basis"
-        ).fetchall()
-        by_basis = {r["basis"]: r["n"] for r in rows}
-        total = sum(by_basis.values())
-        # Pass 1 is the only thing the importer auto-verifies
-        # (`verified=certain and self.auto_verify_unambiguous`). Anything
-        # else carrying verified=1 was confirmed by a person in the UI,
-        # which never rewrites `source`.
-        auto = by_basis.get("unambiguous", 0)
-        human = total - auto
-        if total:
-            print(f"      importer auto-verified  {auto:>8}  ({auto / total * 100:.0f}%)")
-            print(f"      human-confirmed         {human:>8}  ({human / total * 100:.0f}%)")
-        rejected = conn.execute(
-            "SELECT COUNT(*) AS n FROM annotations "
-            "WHERE class_name='face' AND rejected=1"
-        ).fetchone()["n"]
-        if rejected:
-            print(f"      human-rejected          {rejected:>8}  (excluded from training)")
-        if auto:
-            print(
-                f"\n  {auto} sample{'' if auto == 1 else 's'} cleared pass 1 — one face,\n"
-                "  one Google people-tag — and were auto-verified without anyone\n"
-                "  looking. training/dataset.py reads them as ground truth exactly\n"
-                "  like the human-confirmed ones."
-            )
-        # The split above is inferred, not recorded, and saying so matters:
-        # it holds only while pass 1 is the sole auto-verifying path.
-        print(
-            "\n  Note: nothing stores *who* verified a row. The split above is\n"
-            "  inferred from proposal_basis — `source` stays \"import\" after a\n"
-            "  human confirms, so it cannot answer this."
-        )
+    if "identity_id" in cols:
+        report_verifiers(conn, cols)
 
     print(
         "\n  Only the confirmed-identity row is training data — training/dataset.py\n"
         "  reads verified, non-rejected annotations and never reads proposals."
     )
+
+
+def verifier_split(conn: sqlite3.Connection, cols: set[str]) -> tuple[dict, bool]:
+    """{verifier: count} over the training set, and whether it was read.
+
+    Two eras of database reach this script.
+
+    Recorded (`verified_by` present, CLD-95): the column says who signed
+    each row off, and this is a plain GROUP BY. Rows still NULL there are
+    reported as "unattributed" rather than guessed at — they are rows this
+    project did not write, or whose migration never ran, and "unknown" is
+    not a synonym for either answer.
+
+    Inferred (no such column): the importer auto-verifies pass 1 and only
+    pass 1 (`verified=certain and self.auto_verify_unambiguous`), so a
+    verified row on basis "unambiguous" is the importer and anything else
+    was confirmed by a person. That inference is sound only while pass 1
+    is the sole auto-verifying path, which is why the recorded column
+    exists — so the caller is told which of the two it is looking at.
+    """
+    if "verified_by" in cols:
+        rows = conn.execute(
+            "SELECT COALESCE(verified_by, 'unattributed') AS who, COUNT(*) AS n "
+            "FROM annotations WHERE identity_id IS NOT NULL AND class_name='face' "
+            "AND verified=1 AND rejected=0 GROUP BY who"
+        ).fetchall()
+        return {r["who"]: r["n"] for r in rows}, True
+    if "proposal_basis" not in cols:
+        return {}, False
+    rows = conn.execute(
+        "SELECT COALESCE(proposal_basis, '') AS basis, COUNT(*) AS n "
+        "FROM annotations WHERE identity_id IS NOT NULL AND class_name='face' "
+        "AND verified=1 AND rejected=0 GROUP BY basis"
+    ).fetchall()
+    by_basis = {r["basis"]: r["n"] for r in rows}
+    total = sum(by_basis.values())
+    auto = by_basis.get("unambiguous", 0)
+    return {"import": auto, "human": total - auto}, False
+
+
+def report_verifiers(conn: sqlite3.Connection, cols: set[str]) -> None:
+    split, recorded = verifier_split(conn, cols)
+    if not split:
+        return
+    rule("Who verified the training data")
+    total = sum(split.values())
+    # Fixed captions so the two eras print the same shape; the difference
+    # between them is stated once, below, instead of in every line.
+    captions = {
+        "import": "importer auto-verified",
+        "human": "human-confirmed",
+        "auto": "auto-verified",
+        "unattributed": "unattributed",
+    }
+    for who, n in sorted(split.items(), key=lambda kv: -kv[1]):
+        if not n:
+            continue
+        caption = captions.get(who, who)
+        print(f"      {caption:<22}  {n:>8}  ({n / total * 100:.0f}%)")
+    rejected = conn.execute(
+        "SELECT COUNT(*) AS n FROM annotations "
+        "WHERE class_name='face' AND rejected=1"
+    ).fetchone()["n"]
+    if rejected:
+        print(f"      human-rejected          {rejected:>8}  (excluded from training)")
+    auto = split.get("import", 0) + split.get("auto", 0)
+    if auto:
+        print(
+            f"\n  {auto} sample{'' if auto == 1 else 's'} were verified by an\n"
+            "  importer, not a person — pass 1's one face, one Google people-tag.\n"
+            "  training/dataset.py reads them as ground truth exactly like the\n"
+            "  human-confirmed ones."
+        )
+    if split.get("unattributed"):
+        print(
+            f"\n  {split['unattributed']} verified rows carry no verifier. Run\n"
+            "  `siteloom init-db` against this database: it attributes pre-column\n"
+            "  rows once, from proposal_basis, and records the result."
+        )
+    if recorded:
+        print(
+            "\n  Read from annotations.verified_by — recorded when each row was\n"
+            "  signed off, not inferred here."
+        )
+    else:
+        # The split is derived, and saying so matters: it holds only while
+        # pass 1 is the sole auto-verifying path.
+        print(
+            "\n  Note: this database predates annotations.verified_by, so nothing\n"
+            "  stores *who* verified a row. The split above is inferred from\n"
+            '  proposal_basis — `source` stays "import" after a human confirms,\n'
+            "  so it cannot answer this. `siteloom init-db` adds the column and\n"
+            "  writes this same split into it, once."
+        )
 
 
 def report_identities(conn: sqlite3.Connection, present: set[str]) -> None:

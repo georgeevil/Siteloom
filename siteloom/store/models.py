@@ -11,7 +11,7 @@ joined by Identity.id, which is used as the vector point id's payload.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -32,6 +32,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+def _utcnow() -> datetime:
+    """Naive UTC, the shape every timestamp column in here stores."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Camera(Base):
@@ -505,14 +510,39 @@ class ItemTag(Base):
     item: Mapped[LibraryItem] = relationship(back_populates="tags")
 
 
+#: Who set `Annotation.verified`. `source` cannot answer this — it is the
+#: provenance of the *box* ("auto"/"human"/"import") and no reviewer ever
+#: rewrites it, so a human confirming an imported annotation stays
+#: "import" forever (CLD-95).
+#:
+#: * "human"  — a person clicked confirm/classify in the review UI.
+#: * "import" — an importer verified it with nobody looking (the Takeout
+#:              pass-1 auto-verify: one face, one people-tag).
+#: * "auto"   — reserved for a future in-product automatic verifier (a
+#:              model confirming its own proposals). Nothing writes it
+#:              yet; it exists so the next auto-verifying path does not
+#:              reuse "import" and quietly re-merge the two.
+VERIFIED_BY_HUMAN = "human"
+VERIFIED_BY_IMPORT = "import"
+VERIFIED_BY_AUTO = "auto"
+VERIFIED_BY = (VERIFIED_BY_HUMAN, VERIFIED_BY_IMPORT, VERIFIED_BY_AUTO)
+
+
 class Annotation(Base):
     """A box on a library item — machine-detected or human-drawn.
 
     One table serves detection review, identity labeling, custom-class
     labeling, and face-training data. `source` records provenance and
-    `verified` records human sign-off; training exports only ever read
-    verified rows, which is what keeps auto-assignments from silently
-    becoming ground truth.
+    `verified` records sign-off; training exports only ever read verified
+    rows, which is what keeps auto-assignments from silently becoming
+    ground truth.
+
+    `verified_by`/`verified_at` record *who* signed off and when, because
+    `verified` alone conflates a person clicking confirm with an importer
+    auto-verifying itself — and `training/dataset.py` reads both as ground
+    truth. The invariant to preserve: **`verified_by` is set exactly when
+    `verified` is True**, which is what lets a query trust it (see
+    `mark_verified`/`clear_verified`).
     """
 
     __tablename__ = "annotations"
@@ -542,8 +572,23 @@ class Annotation(Base):
     # "auto" (detector), "human" (drawn/corrected), "import" (sidecar)
     source: Mapped[str] = mapped_column(String, default="auto", index=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # One of VERIFIED_BY, or NULL when the row is not verified. Nullable
+    # on purpose: an unverified row has no verifier, and a pre-CLD-95
+    # database has rows whose verifier was never recorded — NULL there
+    # means "unknown", which a defaulted column could not say.
+    verified_by: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Explicitly rejected by a reviewer — kept as a negative example
     # rather than deleted, so the same bad proposal isn't re-suggested.
+    #
+    # Rejection deliberately does NOT get its own provenance column.
+    # `rejected` already carries it: no importer ever rejects (the Takeout
+    # passes only ever write proposals), so a rejected row is a human act
+    # by construction. Adding `rejected_by` would record the same fact
+    # twice and cost the invariant above — `verified_by` set exactly when
+    # `verified` is True is checkable; "set when verified or rejected" is
+    # not. Rejecting therefore *clears* verified_by, like any other return
+    # to unverified.
     rejected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # This annotation's embedding has been added to the identity's vector
     # collection — the idempotency marker for enrollment sweeps.
@@ -553,6 +598,31 @@ class Annotation(Base):
 
     item: Mapped[LibraryItem] = relationship(back_populates="annotations")
     identity: Mapped[Identity | None] = relationship()
+
+    def mark_verified(self, by: str, at: datetime | None = None) -> None:
+        """Sign this row off, recording who did it and when.
+
+        The only supported way to set `verified` — going through it is
+        what keeps `verified_by` from drifting out of step with
+        `verified`. `by` is re-stamped every time, so a human confirming
+        an annotation the importer had already auto-verified ends up
+        "human": that is precisely the transition the old schema lost.
+        """
+        if by not in VERIFIED_BY:
+            raise ValueError(f"unknown verifier {by!r}; expected one of {VERIFIED_BY}")
+        self.verified = True
+        self.verified_by = by
+        self.verified_at = at or _utcnow()
+
+    def clear_verified(self) -> None:
+        """Return the row to unverified, dropping the sign-off with it.
+
+        Used by reject and by un-review. Leaving a stale verifier on a row
+        whose `verified` is False would make the pair unreadable.
+        """
+        self.verified = False
+        self.verified_by = None
+        self.verified_at = None
 
 
 class CustomClass(Base):

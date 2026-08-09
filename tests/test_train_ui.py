@@ -496,7 +496,7 @@ def test_only_verified_annotations_count_as_training_data(env):
     with env.Session() as session:
         readiness = train_routes.face_readiness(session, 2, 0.25)
     assert readiness.samples == 4
-    assert [p for p, _n, _r in readiness.coverage] == ["Ana"]
+    assert [p for p, _n, _r, _h in readiness.coverage] == ["Ana"]
 
 
 def test_a_fine_tune_is_refused_when_the_data_cannot_support_one(env):

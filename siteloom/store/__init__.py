@@ -19,6 +19,10 @@ from siteloom.store.models import (
     User,
     WebSession,
     TrainingRun,
+    VERIFIED_BY,
+    VERIFIED_BY_AUTO,
+    VERIFIED_BY_HUMAN,
+    VERIFIED_BY_IMPORT,
 )
 
 __all__ = [
@@ -41,6 +45,10 @@ __all__ = [
     "WebSession",
     "TrainingRun",
     "Detection",
+    "VERIFIED_BY",
+    "VERIFIED_BY_AUTO",
+    "VERIFIED_BY_HUMAN",
+    "VERIFIED_BY_IMPORT",
     "make_engine",
     "get_session",
     "init_db",

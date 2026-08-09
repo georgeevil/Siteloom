@@ -217,10 +217,34 @@
     </div>
   </div>
 
+  {# The same floor over human sign-off only. Shown next to the tiles
+     above, never instead of them: the importer's auto-verified matches
+     are still training data by default, and this is the number that says
+     how much of that gate a person actually stood behind. #}
+  <div class="tr-tiles" style="margin-top:6px;">
+    <div class="tr-tile"><b>{{ readiness.human_samples }}</b><span>human-confirmed</span></div>
+    <div class="tr-tile {{ 'good' if readiness.human_ready_people >= 2 else 'warn' }}">
+      <b>{{ readiness.human_ready_people }}</b>
+      <span>at {{ readiness.min_samples }}+ human-confirmed</span>
+    </div>
+  </div>
+  {% if readiness.samples and readiness.human_samples < readiness.samples %}
+  <p class="note muted" style="margin-top:6px;">
+    {{ readiness.samples - readiness.human_samples }} of these samples were verified
+    without anyone looking
+    ({% for who, n in readiness.provenance.items() %}{% if who != 'human' %}{{ n }} {{ who }}{{ ', ' if not loop.last }}{% endif %}{% endfor %}) —
+    the Takeout importer signs off its own one-face-one-tag matches. They count as
+    training data exactly like the confirmed ones; whether that is good enough is a
+    judgement, not a default. <span class="tr-cmd">siteloom train face --human-only</span>
+    trains on the confirmed half alone.
+  </p>
+  {% endif %}
+
   {% if readiness.coverage %}
   <div class="tr-people">
-    {% for person, n, ready in readiness.coverage[:30] %}
-    <span class="tr-person {{ 'ready' if ready else 'short' }}"><b>{{ n }}</b> {{ person }}</span>
+    {% for person, n, ready, human in readiness.coverage[:30] %}
+    <span class="tr-person {{ 'ready' if ready else 'short' }}"
+          title="{{ human }} confirmed by a person, {{ n - human }} auto-verified"><b>{{ n }}</b> {{ person }}</span>
     {% endfor %}
     {% if readiness.coverage | length > 30 %}
     <span class="tr-person short">+{{ readiness.coverage | length - 30 }} more</span>
