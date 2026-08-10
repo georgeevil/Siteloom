@@ -69,6 +69,55 @@ def _light_setup(config_path, level: str = "INFO"):
     return config, get_session(engine)
 
 
+def invocation_tokens(params, values: dict) -> list[str]:
+    """`values` rendered back into the tokens that would produce them.
+
+    The rules for turning parsed parameters back into a command line —
+    which defaults to skip, how a bool becomes a flag, that `--config` is
+    never omitted — live here and nowhere else, because there are now two
+    callers that must agree: `_resume_command` (a pasteable shell string
+    printed after an interrupt) and `siteloom/service/spec.py` (the argv
+    a generated service unit execs).
+
+    Returns raw, unquoted tokens. Quoting is the caller's business: a
+    resume line is read by a shell, an `ExecStart=` argv is not.
+
+    `params` is the *target* command's parameter list, which is why this
+    takes it as an argument rather than reading it off a context. The
+    unit builder is reconstructing an invocation of `serve` while running
+    as `service install`.
+    """
+    tokens: list[str] = []
+    for param in params:
+        if param.name not in values:
+            continue
+        value = values[param.name]
+        if value is None:
+            continue
+        # Positionals carry a bare name where options carry flags. Don't
+        # test the class — typer's TyperArgument is not a click.Argument.
+        if param.opts and not param.opts[0].startswith("-"):
+            tokens.append(str(value))
+            continue
+        # --config even at its default: it decides which deployment the
+        # command touches, and a resume line read out of `jobs list` has
+        # to be unambiguous about that.
+        if value == param.default and param.name != "config":
+            continue
+        if isinstance(value, bool):
+            # A bool that differs from its default is expressed by one of
+            # the two flags typer generated for it.
+            flags = param.opts if value else (param.secondary_opts or param.opts)
+            if flags:
+                tokens.append(flags[0])
+            continue
+        if not param.opts:
+            continue
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            tokens.extend([param.opts[0], str(item)])
+    return tokens
+
+
 def _resume_command(ctx: typer.Context) -> str:
     """This invocation, rebuilt from the parsed parameters.
 
@@ -86,33 +135,7 @@ def _resume_command(ctx: typer.Context) -> str:
     # starts with whatever argv[0] happened to be (a venv path, "root"
     # under a test runner), and a resume line has to be pasteable.
     parts = ["siteloom", *ctx.command_path.split()[1:]]
-    for param in ctx.command.params:
-        if param.name not in ctx.params:
-            continue
-        value = ctx.params[param.name]
-        if value is None:
-            continue
-        # Positionals carry a bare name where options carry flags. Don't
-        # test the class — typer's TyperArgument is not a click.Argument.
-        if param.opts and not param.opts[0].startswith("-"):
-            parts.append(shlex.quote(str(value)))
-            continue
-        # --config even at its default: it decides which deployment the
-        # command touches, and a resume line read out of `jobs list` has
-        # to be unambiguous about that.
-        if value == param.default and param.name != "config":
-            continue
-        if isinstance(value, bool):
-            # A bool that differs from its default is expressed by one of
-            # the two flags typer generated for it.
-            flags = param.opts if value else (param.secondary_opts or param.opts)
-            if flags:
-                parts.append(flags[0])
-            continue
-        if not param.opts:
-            continue
-        for item in value if isinstance(value, (list, tuple)) else [value]:
-            parts.extend([param.opts[0], shlex.quote(str(item))])
+    parts.extend(shlex.quote(t) for t in invocation_tokens(ctx.command.params, ctx.params))
     return " ".join(parts)
 
 

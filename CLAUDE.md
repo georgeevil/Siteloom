@@ -14,7 +14,8 @@ The project uses a plain `venv` + `pip` at `./.venv` (Python ≥3.12). Commands 
 - `.venv/bin/pytest` — full test suite, with coverage (it is in `addopts`); single test: `.venv/bin/pytest tests/test_ingest.py::test_ingest_end_to_end`. Add `--cov-report=html` for `htmlcov/`; add `--no-cov` for a fast iteration loop — coverage roughly doubles the suite's wall clock.
 - `.venv/bin/ruff check .` (`--fix` to apply) and `.venv/bin/mypy` — the lint and type gates. Both pass clean on `main` and both run in CI.
 - `.venv/bin/siteloom run --config config/site.example.yaml` — ingest configured cameras (add `--max-frames N` for a quick debug run)
-- `.venv/bin/siteloom serve --config ...` — event-browser web UI on :8000
+- `.venv/bin/siteloom serve --config ...` — event-browser web UI on :8000 (host/port/log level default to the config's `service:` section)
+- `.venv/bin/siteloom service install|start|stop|restart|status|logs|print-unit|uninstall` — run `serve`/`run`/`frigate` under launchd or systemd (`docs/operations.md`)
 - `.venv/bin/siteloom cameras --config ...` — list streams each adapter can see (used to find UniFi camera ids)
 - `.venv/bin/siteloom init-db --config ...` — create tables (run/serve also do this implicitly)
 
@@ -81,6 +82,15 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 - **Read-only CLI commands must use `_light_setup`, not `_setup`** (`cli_library.py`). The full bootstrap opens the vector store, and embedded Qdrant is one client per path per machine — so `jobs list`/`watch` built on `_setup` crash exactly when a job is running, which is the only time anyone runs them.
 - `health.py` holds every environmental check as a function returning a `Check`, never raising: a diagnostic that dies on the first problem hides the other four. `CHECKS` backs `siteloom doctor`; the cheap `LIVE_CHECKS` subset backs `/readyz` and must never open the vector store the serving process already holds.
 - **A dead run must not look healthy**: `OperationRun.is_stale` checks the recorded pid on the recording host first (immediate) and falls back to a cold heartbeat (120 s) elsewhere or after pid reuse; `eta_s` returns None once stale. `jobs reap` closes dead rows out as `abandoned` while preserving position and resume command.
+
+### Service control (`siteloom/service/`, `siteloom service`, `siteloom/serve.py`)
+
+- **Siteloom is never its own daemon.** No `--daemon`, no PID file, no double fork: the process runs in the foreground, stops on SIGTERM, and the OS supervisor owns backgrounding, restart and boot ordering. A PID file would be a second, worse liveness source next to `OperationRun.pid` and `/healthz`.
+- The split mirrors `health.py`: `ServiceSpec` (`service/spec.py`) knows nothing about plist XML or systemd INI, `render(spec) -> str` is pure in both backends, and `service/manager.py` is the only module that touches the filesystem or a subprocess (behind an injectable runner). That is what makes unit generation testable on a box with neither `launchctl` nor `systemctl`.
+- **A unit's argv is reflected off the target command's Typer params, never hand-listed.** `invocation_tokens` in `cli_library.py` holds the rules for both callers — `_resume_command` (a shell string) and `unit_argv` (an argv). That function exists because a hand-composed invocation dropped `--no-auto-verify`; a hand-written flag list in `spec.py` is the same bug with a longer fuse.
+- Directives are chosen, including the absent ones, and each carries its reason in the renderer: `Type=exec` not `simple`, `SuccessExitStatus=130` on `run`/`frigate` so a `jobs cancel` is not restarted as a crash, `TimeoutStopSec` sized to a commit batch, `ProtectSystem=full` not `strict`, no `ProtectHome` (the weights cache is in `$HOME`), no `RuntimeDirectory`/`StateDirectory` (the config decides where state lives — CLD-64), no launchd `ProcessType=Background` (it would throttle YOLO on the Apple Silicon target). Do not add `--workers`: one Qdrant client per path per machine.
+- **`doctor` never shells out to a service manager** — it runs as a unit's own `ExecStartPre`, so `check_services` reads unit files only. Live state is `siteloom service status`, which is never on a boot path.
+- `serve` heartbeats an `OperationRun` row like `run` does, via `serve.serve_supervised` with an injectable `run_server` so it is testable without binding a port. uvicorn owns the signals, so the reporter takes `signals=False` — a third switch alongside `bar` and `enabled`, giving up signal ownership and nothing else. The heartbeat thread is what turns a `jobs cancel` into `server.should_exit`; without it, cancel would report success against a server that keeps serving.
 
 ### Auth & audit (`siteloom/web/auth.py`, `siteloom users`)
 

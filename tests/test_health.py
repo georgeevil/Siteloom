@@ -215,6 +215,102 @@ def test_cancel_signals_a_live_process(config, config_file):
         child.wait()
 
 
+# -- installed service units ------------------------------------------------
+
+
+def _install_unit(directory, label, config_path, unit="serve"):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{label}.service").write_text(
+        "[Unit]\n"
+        f"X-Siteloom-Unit={unit}\n"
+        f"X-Siteloom-Config={config_path}\n"
+        "X-Siteloom-Generator=siteloom 0.1.0\n"
+        "[Service]\nExecStart=/bin/true\n"
+    )
+
+
+def test_check_services_reports_installed_units(tmp_path, config_file, monkeypatch):
+    from siteloom.service.manager import SystemdBackend
+
+    units = tmp_path / "units"
+    monkeypatch.setattr(SystemdBackend, "unit_dir", lambda self, scope: units)
+    _install_unit(units, "siteloom-test-serve", config_file)
+
+    report = run_checks(_load(config_file), [health.check_services])
+    check = report.checks[0]
+    assert check.status == OK
+    assert "siteloom-test-serve" in check.detail
+
+
+def test_check_services_catches_a_vector_store_collision(
+    tmp_path, config_file, monkeypatch
+):
+    """The rule check_vector_store enforces at runtime, applied to what
+    is configured to start. Two units sharing an embedded Qdrant
+    directory can never both run, and a boot is a late time to find out.
+    """
+    import yaml
+
+    from siteloom.service.manager import SystemdBackend
+
+    units = tmp_path / "units"
+    monkeypatch.setattr(SystemdBackend, "unit_dir", lambda self, scope: units)
+
+    shared = str(tmp_path / "shared-vectors")
+    paths = []
+    for name in ("a", "b"):
+        cfg = SiteConfig(
+            site_id=name,
+            storage=StorageConfig(db_url=f"sqlite:///{tmp_path}/{name}.db"),
+            identity=IdentityConfig(enabled=True, vector_db_path=shared),
+        )
+        path = tmp_path / f"{name}.yaml"
+        path.write_text(yaml.safe_dump(cfg.model_dump(mode="json")))
+        paths.append(path)
+        _install_unit(units, f"siteloom-{name}-serve", path)
+
+    report = run_checks(_load(config_file), [health.check_services])
+    check = report.checks[0]
+    assert check.status == FAIL
+    assert shared in check.detail
+    assert "one client per path per machine" in check.remedy
+
+
+def test_check_services_never_shells_out(tmp_path, config_file, monkeypatch):
+    """`doctor` runs as this unit's own ExecStartPre. Asking the service
+    manager about the service it is in the middle of starting is a
+    question with no good answer and a plausible hang, so the check reads
+    unit files and nothing else."""
+    import subprocess as _subprocess
+
+    from siteloom.service.manager import SystemdBackend
+
+    units = tmp_path / "units"
+    monkeypatch.setattr(SystemdBackend, "unit_dir", lambda self, scope: units)
+    _install_unit(units, "siteloom-test-serve", config_file)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("check_services must not run a subprocess")
+
+    monkeypatch.setattr(_subprocess, "run", forbidden)
+    monkeypatch.setattr(_subprocess, "Popen", forbidden)
+    report = run_checks(_load(config_file), [health.check_services])
+    assert report.checks[0].status == OK
+
+
+def test_check_services_is_not_a_readiness_check():
+    """/readyz runs in the serving process and must stay milliseconds;
+    walking unit directories and loading other configs is neither."""
+    assert health.check_services in health.CHECKS
+    assert health.check_services not in health.LIVE_CHECKS
+
+
+def _load(path):
+    from siteloom.config import load_config
+
+    return load_config(path)
+
+
 # -- helpers ----------------------------------------------------------------
 
 

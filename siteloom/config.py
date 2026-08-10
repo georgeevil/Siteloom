@@ -521,6 +521,32 @@ class StorageConfig(BaseModel):
     media_dir: str = "media"
 
 
+class ServiceConfig(BaseModel):
+    """How this deployment runs as a service (`siteloom service`).
+
+    These live in the config rather than in `service install` flags for
+    one reason: a value computed at install time freezes *this machine*
+    into the generated unit, and the operator who copies site.yaml to the
+    next host gets it wrong. `log_dir` is anchored like every other path
+    (see _ANCHORED_PATHS), so the YAML keeps saying `logs` while the unit
+    says the absolute path this host resolves it to.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 8000
+    log_level: str = "INFO"
+    # Where the rotating log and (on launchd, which has no journal) the
+    # crash streams go. Relative to the config file.
+    log_dir: str = "logs"
+    # Long enough for an in-flight batch to commit — see the batch-timing
+    # note in docs/operations.md. Units raise this to 60 s for `run` and
+    # `frigate`, which drain per-camera work rather than a single loop.
+    stop_timeout_s: int = 30
+    restart: str = "on-failure"  # on-failure | always | never
+    restart_delay_s: int = 10
+    start_at_boot: bool = True
+
+
 class SiteConfig(BaseModel):
     site_id: str
     site_name: str = ""
@@ -538,6 +564,7 @@ class SiteConfig(BaseModel):
     training: TrainingConfig = TrainingConfig()
     integrations: IntegrationsConfig = IntegrationsConfig()
     storage: StorageConfig = StorageConfig()
+    service: ServiceConfig = ServiceConfig()
 
 
 # Filesystem paths a site config can name. A relative one is anchored to
@@ -559,6 +586,7 @@ _ANCHORED_PATHS: tuple[tuple[str, str], ...] = (
     ("identity", "vector_db_path"),
     ("identity", "face_projection_path"),
     ("training", "output_dir"),
+    ("service", "log_dir"),
 )
 
 

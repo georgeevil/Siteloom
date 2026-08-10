@@ -106,6 +106,7 @@ class ProgressReporter:
         console: Console | None = None,
         enabled: bool = True,
         bar: bool = True,
+        signals: bool = True,
     ):
         self.Session = session_factory
         self.kind = kind
@@ -118,6 +119,16 @@ class ProgressReporter:
         # handler are what make a run observable and resumable — a user
         # who only wants a quieter terminal must not silently lose them.
         self.interactive = self.console.is_terminal and enabled and bar
+        # `signals=False` leaves the process's stop handlers alone, for a
+        # caller whose runtime already owns them — uvicorn installs its
+        # own SIGINT/SIGTERM handling and drives the shutdown. Two owners
+        # racing for SIGINT is how a Ctrl-C gets swallowed, which is the
+        # same hazard `IngestService._stop_signals(active=…)` exists for,
+        # with ownership inverted. It is a third switch, not a shade of
+        # the other two: the row and the heartbeat stay on, and the
+        # reporter still registers in _LIVE_REPORTERS, so `jobs cancel`
+        # still reaches it. The caller owns polling `interrupt_requested`.
+        self.signals = signals
 
         self.counters: dict[str, int] = defaultdict(int)
         self.phase_timings: dict[str, float] = {}
@@ -161,7 +172,7 @@ class ProgressReporter:
             self.run_id = run.id
         with _REGISTRY_LOCK:
             _LIVE_REPORTERS[self.run_id] = self
-        for signum in STOP_SIGNALS:
+        for signum in STOP_SIGNALS if self.signals else ():
             try:
                 self._prev_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, self._on_stop)
@@ -318,6 +329,16 @@ class ProgressReporter:
                 )
             self._beat()
             self._maybe_log()
+
+    def heartbeat(self) -> None:
+        """Write the row without claiming any work happened.
+
+        A daemon has no items to advance — `serve` least of all — but it
+        still has to prove it is alive, because a row whose `updated_at`
+        goes cold is exactly what `OperationRun.is_stale` reads. Forced,
+        because the caller is a timer that already decided it is time.
+        """
+        self._beat(force=True)
 
     def bump(self, **counters: int) -> None:
         """Update counters without advancing the item count."""

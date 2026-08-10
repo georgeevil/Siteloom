@@ -27,6 +27,22 @@ storage:
   db_url: sqlite:///siteloom.db
   media_dir: media
 
+# How `siteloom serve` binds, and what `siteloom service install` writes
+# into the generated launchd plist / systemd unit. Defaults shown. These
+# live here rather than in install flags so that copying this file to
+# another host copies the deployment's shape with it.
+service:
+  host: 127.0.0.1
+  port: 8000
+  log_level: INFO
+  log_dir: logs           # relative to this file, like media_dir
+  # Long enough for an in-flight batch to commit. `run` and `frigate`
+  # units raise this to 60s; see docs/operations.md.
+  stop_timeout_s: 30
+  restart: on-failure     # on-failure | always | never
+  restart_delay_s: 10
+  start_at_boot: true
+
 # Event consolidation & significance (defaults shown). One physical visit
 # arrives as many short samples; these rules decide what becomes one event
 # and what shows in default triage. After changing them, `siteloom events
