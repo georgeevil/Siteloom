@@ -455,6 +455,101 @@ class IncidentNote(Base):
     incident: Mapped[Incident] = relationship(back_populates="notes")
 
 
+#: Verdicts an operator can record on a plate read. Same vocabulary as
+#: `EventIdentity.verdict` deliberately — "was this claim right" is the
+#: same question, and two spellings of it would need two readers.
+PLATE_VERDICTS = ("confirmed", "wrong")
+
+
+class PlateRead(Base):
+    """One plate-OCR attempt on one detection crop, kept whether or not
+    it produced a plate (CLD-85).
+
+    Before this table the OCR threw away everything by which it could be
+    judged: the detector's box confidence picked a region and was
+    discarded, no OCR confidence was captured, `normalize_plate` is lossy
+    and irreversible, and a read under the four-character floor returned
+    None leaving no trace that a read had been attempted. What survived
+    downstream was `Identity.plate` (one string, write-once),
+    `EventIdentity.matched_by` and `learned_plate` — enough to say how
+    many matches were plate matches, not enough to say whether any of
+    them were right.
+
+    Three things make this row worth writing:
+
+    * **Failures are rows.** `reason` records why nothing came back
+      (`no-box`, `empty-crop`, `no-text`, `too-short`) — the same
+      negatives-are-data philosophy as `Annotation.rejected`. Motorcycle
+      plates are the short/angled case that fails the floor, so the rows
+      that answer CLD-9 are precisely the ones the old code dropped.
+    * **`raw_text` is kept beside `text`.** Normalization strips every
+      non-[A-Z0-9] character irreversibly, which makes a near-miss read
+      indistinguishable from a clean one. `min_chars` rides along so a
+      row says which bar it was judged against, and lowering that bar is
+      a re-query rather than a re-run.
+    * **`crop_path` is a third image.** Not `Detection.crop_path`, which
+      is both the display thumbnail and the embedder input ("one crop,
+      two jobs") — this is the plate sub-region, so a human can see what
+      the OCR saw without disturbing a single stored vector.
+
+    `class_name` and `camera_id` are denormalized off the detection so
+    the review screen's class filter (isolate motorcycles) is one indexed
+    predicate rather than a join through a mutable Event.class_name.
+    """
+
+    __tablename__ = "plate_reads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
+    # The detection whose crop was read. Nullable because a read is
+    # meaningful without one — and because a future replay path may hand
+    # over a crop that is not a Detection row.
+    detection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("detections.id"), nullable=True, index=True
+    )
+    camera_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    class_name: Mapped[str] = mapped_column(String, default="", index=True)
+    # Which identifier's OCR this was ("vehicle"), so per-identifier
+    # accuracy stays computable if a second plate identifier ever exists.
+    identifier_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # Exactly what the OCR returned, before normalization.
+    raw_text: Mapped[str | None] = mapped_column(String, nullable=True)
+    # normalize_plate(raw_text) — set even when it fell under the floor.
+    text: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # True when this read was handed to the resolver as a plate.
+    accepted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # One of plates.REASONS when nothing usable came back, else NULL.
+    reason: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Plate-region box confidence, and mean per-character OCR probability
+    # where the installed OCR reports one. Both nullable: a confidence
+    # that was never reported must read as absent, not as zero.
+    detector_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The floor in force when this read was judged.
+    min_chars: Mapped[int] = mapped_column(Integer, default=4)
+    # The plate sub-crop (see the class docstring) and the detection crop
+    # it was cut from, so a reviewer can see the vehicle as well.
+    crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Operator judgement of the read itself — the thing that turns CLD-9
+    # from "eyeball ten crops once" into "judge 20 rows", persistently.
+    verdict: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    verdict_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    event: Mapped[Event] = relationship()
+
+    @property
+    def display_text(self) -> str:
+        """What to show for a read, preferring the raw OCR output.
+
+        A rejected read has no `text` by definition; showing the raw
+        string is the whole point of keeping it, and "(no text)" is a
+        different fact from an empty cell.
+        """
+        return self.raw_text or self.text or ""
+
+
 class NoiseEvent(Base):
     """A sustained loud episode (PRD §6.5, NoiseAware/Minut model).
 

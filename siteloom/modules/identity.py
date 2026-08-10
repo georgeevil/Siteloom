@@ -10,7 +10,14 @@ Job payload:
     crop_jpeg:  bytes — the detection crop (first-pass filter output)
     class_name: str
 Result:
-    {"embeddings": [{identifier, algo, vector: [float], plate: str|None}]}
+    {"embeddings": [{identifier, algo, vector: [float], plate: str|None,
+                     plate_read: dict|None}]}
+
+`plate_read` is the whole OCR attempt (CLD-85), flattened to a plain dict
+by `PlateRead.as_payload()` — scalars plus the plate sub-crop as JPEG
+**bytes**. Nothing here may be an ndarray or a live handle: this result
+crosses a process boundary under a Celery/Ray backend. Ingest writes the
+row; this module still writes nothing anywhere.
 """
 
 from __future__ import annotations
@@ -52,11 +59,20 @@ class IdentityModule:
             embedder = self.registry.embedder_for(key)
             vector = embedder.embed(crop)
             plate = None
+            plate_read = None
             if ident.plate_ocr:
                 reader = self._get_plate_reader()
                 if reader is not None:
-                    plate = reader.read(crop)
-            if vector is None and plate is None:
+                    read = reader.read(crop, min_chars=ident.plate_min_chars)
+                    plate = read.text
+                    plate_read = read.as_payload()
+                    if not ident.plate_save_crops:
+                        # Recording the attempt is cheap; keeping every
+                        # plate crop is a disk-space decision an operator
+                        # may reasonably decline. The row still gets its
+                        # text, confidences and reason.
+                        plate_read["plate_jpeg"] = None
+            if vector is None and plate is None and plate_read is None:
                 continue  # e.g. no face found in the person crop
             out.append(
                 {
@@ -64,6 +80,10 @@ class IdentityModule:
                     "algo": ident.algo,
                     "vector": vector.tolist() if vector is not None else None,
                     "plate": plate,
+                    # A failed read still travels: the entry may carry
+                    # nothing resolvable and exist only so ingest can
+                    # record the attempt (see `_identify`).
+                    "plate_read": plate_read,
                 }
             )
         return {"embeddings": out}

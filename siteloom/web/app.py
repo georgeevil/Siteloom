@@ -1552,6 +1552,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         bookings_routes,
         incidents_routes,
         library_routes,
+        plates_routes,
         train_routes,
         users_routes,
     )
@@ -1560,6 +1561,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         library_routes,
         bookings_routes,
         backfill_routes,
+        plates_routes,
         train_routes,
         incidents_routes,
         users_routes,

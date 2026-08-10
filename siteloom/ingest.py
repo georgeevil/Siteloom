@@ -33,6 +33,7 @@ from siteloom.store import (
     Event,
     EventIdentity,
     NoiseEvent,
+    PlateRead,
     get_session,
     init_db,
     make_engine,
@@ -305,17 +306,16 @@ class IngestService:
             for det in detections:
                 event = self._find_or_create_event(session, cam.id, det, ts, rules)
                 crop_path = self._save_crop(cam.id, det, ts)
-                session.add(
-                    Detection(
-                        event_id=event.id,
-                        timestamp=ts,
-                        class_name=det["class_name"],
-                        confidence=det["confidence"],
-                        bbox=json.dumps(det["bbox"]),
-                        zones=json.dumps(det["zones"]),
-                        crop_path=crop_path,
-                    )
+                detection = Detection(
+                    event_id=event.id,
+                    timestamp=ts,
+                    class_name=det["class_name"],
+                    confidence=det["confidence"],
+                    bbox=json.dumps(det["bbox"]),
+                    zones=json.dumps(det["zones"]),
+                    crop_path=crop_path,
                 )
+                session.add(detection)
                 event.last_seen = ts
                 event.detection_count += 1
                 event.confidence_sum += det["confidence"]
@@ -325,7 +325,9 @@ class IngestService:
                 # Flip significance before identifying so the frame that
                 # crosses the gate still gets identity resolution.
                 self._update_significance(event, rules)
-                self._identify(session, cam, event, det, ts, crop_path, rules)
+                self._identify(
+                    session, cam, event, det, ts, crop_path, rules, detection
+                )
             session.commit()
 
     def _rules_for(self, cam: CameraConfig) -> EventConfig:
@@ -362,6 +364,7 @@ class IngestService:
         ts: datetime,
         crop_path: str | None,
         rules: EventConfig,
+        detection: Detection | None = None,
     ) -> None:
         """Second-pass identification on a detection crop (PRD §6.3/6.4).
 
@@ -399,6 +402,18 @@ class IngestService:
         registry = identity_cfg.identifiers
         for emb in result.result["embeddings"]:
             ident_cfg = registry.get(emb["identifier"])
+            # The OCR attempt is recorded before anything is decided with
+            # it, and whether or not it produced a plate (CLD-85). The
+            # module computed it; writing rows is this layer's job, which
+            # is what keeps the compute/state split intact.
+            self._record_plate_read(
+                session, cam, event, detection, ts, emb, crop_path
+            )
+            if emb["vector"] is None and emb.get("plate") is None:
+                # Nothing to resolve — the entry exists only to carry a
+                # failed read upstream. Resolving it would mint an
+                # identity out of an embedding that does not exist.
+                continue
             resolution = self.resolver.resolve(
                 session,
                 identifier_key=emb["identifier"],
@@ -484,6 +499,63 @@ class IngestService:
                     payload,
                 )
 
+    def _record_plate_read(
+        self,
+        session,
+        cam: CameraConfig,
+        event: Event,
+        detection: Detection | None,
+        ts: datetime,
+        emb: dict,
+        crop_path: str | None,
+    ) -> None:
+        """Persist one OCR attempt, successful or not (CLD-85).
+
+        Everything on the row was computed by IdentityModule and travelled
+        here as scalars and JPEG bytes; nothing is recomputed and no
+        second detector or OCR pass is bought. A failure is a row like any
+        other — `reason` says which of the four ways it failed — because
+        the reads that answer "how is plate OCR doing on motorcycles?"
+        are precisely the short ones the old code dropped on the floor.
+        """
+        read = emb.get("plate_read")
+        if not read:
+            return
+        if detection is not None and detection.id is None:
+            # Assign the FK. Flushed only when there is a read to hang off
+            # it, so the ordinary detection path is unchanged.
+            session.flush()
+        session.add(
+            PlateRead(
+                event_id=event.id,
+                detection_id=detection.id if detection is not None else None,
+                camera_id=cam.id,
+                # Per-frame truth, not the event's class: an event's
+                # class_name absorbs detector flapping (car↔truck), and
+                # the screen's whole job is isolating motorcycles.
+                class_name=(
+                    detection.class_name if detection is not None else event.class_name
+                ),
+                identifier_key=emb["identifier"],
+                at=ts,
+                raw_text=read.get("raw_text"),
+                text=read.get("normalized") or read.get("text"),
+                accepted=read.get("text") is not None,
+                reason=read.get("reason"),
+                detector_confidence=read.get("detector_confidence"),
+                ocr_confidence=read.get("ocr_confidence"),
+                min_chars=int(read.get("min_chars") or 4),
+                crop_path=self._save_plate_crop(
+                    cam.id,
+                    ts,
+                    read.get("plate_jpeg"),
+                    f"{detection.id if detection is not None else 'x'}"
+                    f"-{emb['identifier']}",
+                ),
+                source_crop_path=crop_path,
+            )
+        )
+
     def _merge_with_prior(
         self, session, event: Event, identity_id: int, rules: EventConfig
     ) -> Event:
@@ -527,6 +599,14 @@ class IngestService:
             session.query(Detection).filter(Detection.event_id == source.id).all()
         ):
             row.event_id = target.id
+        # Plate reads follow their detections. Missing this would leave
+        # rows pointing at an event about to be deleted — and a read whose
+        # event no longer exists is unreviewable, which defeats the point
+        # of keeping failures at all.
+        for read in (
+            session.query(PlateRead).filter(PlateRead.event_id == source.id).all()
+        ):
+            read.event_id = target.id
         for link in (
             session.query(EventIdentity)
             .filter(EventIdentity.event_id == source.id)
@@ -699,6 +779,27 @@ class IngestService:
         name = f"{ts.strftime('%H%M%S_%f')}_{det['class_name']}_{det['track_id']}.jpg"
         path = day_dir / name
         path.write_bytes(crop_jpeg)
+        return str(path)
+
+    def _save_plate_crop(
+        self, camera_id: str, ts: datetime, plate_jpeg: bytes | None, tag: str
+    ) -> str | None:
+        """Write the plate sub-crop — a third image, its own directory.
+
+        `crop_jpeg` is doing two jobs already (display thumbnail and
+        embedder input) and changing it is a re-enroll event, so the
+        evidence image for an OCR read is written beside it and never
+        over it. `_save_crop` above is untouched by this.
+        """
+        if not plate_jpeg:
+            return None
+        day_dir = self.media_dir / camera_id / ts.strftime("%Y-%m-%d") / "plates"
+        day_dir.mkdir(parents=True, exist_ok=True)
+        # `tag` disambiguates two vehicles read in the same frame — the
+        # timestamp alone collides and the second would overwrite the
+        # first, silently attaching one read's evidence to another's row.
+        path = day_dir / f"{ts.strftime('%H%M%S_%f')}_{tag}.jpg"
+        path.write_bytes(plate_jpeg)
         return str(path)
 
     def run(self, max_frames: int | None = None, progress=None) -> None:

@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block title %}Plate reads{% endblock %}
+{% block subtitle %}what the OCR actually read{% endblock %}
+
+{#
+  Plate reads (CLD-85). One row per OCR attempt, failures included.
+
+  The rejected rows are the point. A read under the character floor used
+  to return None and leave nothing behind, which is why "how is plate OCR
+  doing on motorcycle plates?" (CLD-9) could only ever be answered by eye,
+  once. Here a rejection carries its reason, its raw text before
+  normalization, both confidences and the crop the OCR saw — so lowering
+  the floor is a re-read of this table rather than a re-run of anything.
+
+  The empty state follows the /noise rule: an empty table must never read
+  as "no vehicles came past" when the real answer is that nothing on this
+  install can produce a row.
+#}
+
+{% block content %}
+<style>
+  .pl-head { margin-bottom: 12px; }
+  .pl-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .pl-head p { font-size: 12px; color: var(--muted); margin: 0; }
+  .pl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .pl-chips .grp {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding-right: 10px; margin-right: 4px; border-right: 1px solid var(--hairline);
+  }
+  .pl-chips .grp:last-child { border-right: 0; }
+  .chip {
+    display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--control-border); background: var(--raised);
+    color: var(--muted); text-decoration: none; font-size: 11.5px;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .chip.active { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .prow {
+    display: grid;
+    grid-template-columns: 88px 1fr 110px 120px 96px 96px 150px;
+    align-items: center; gap: 12px; padding: 8px 14px; min-height: 56px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .prow:last-child { border-bottom: 0; }
+  .prow.head {
+    min-height: 30px; height: 30px; padding-top: 0; padding-bottom: 0;
+    background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .prow img {
+    display: block; width: 88px; height: 40px; object-fit: cover;
+    border-radius: 4px; background: var(--raised); border: 1px solid var(--hairline);
+  }
+  .nocrop {
+    display: flex; align-items: center; justify-content: center;
+    width: 88px; height: 40px; border-radius: 4px;
+    border: 1px dashed var(--control-border);
+    font-family: var(--font-mono); font-size: 8.5px; color: var(--faint);
+  }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .plate {
+    font-family: var(--font-mono); font-size: 14px; letter-spacing: .08em;
+    color: var(--text);
+  }
+  .plate.rejected { color: var(--faint); text-decoration: line-through; }
+  .raw { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .why { font-size: 11px; color: var(--amber); }
+  .verdicts { display: flex; gap: 5px; }
+  .verdicts form { margin: 0; }
+  .vbtn {
+    font: inherit; font-size: 11px; padding: 3px 9px; border-radius: 5px;
+    cursor: pointer; border: 1px solid var(--control-border);
+    background: var(--raised); color: var(--muted);
+  }
+  .vbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .vbtn.on-yes { border-color: var(--green); color: var(--green); }
+  .vbtn.on-no { border-color: var(--red); color: var(--red); }
+  .pl-empty {
+    border: 1px dashed var(--control-border); border-radius: 8px;
+    padding: 18px 20px; color: var(--muted); font-size: 12.5px; line-height: 1.65;
+  }
+  .pl-empty h3 { margin: 0 0 8px; font-size: 13px; color: var(--text); font-weight: 600; }
+  .pl-empty code, .pl-head code {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--raised); padding: 1px 5px; border-radius: 3px;
+  }
+</style>
+
+<div class="pl-head">
+  <h2>Plate reads</h2>
+  <p>
+    One row per OCR attempt on a vehicle crop — the failures too, with the
+    reason and the raw text before normalization.
+    {%- if total %}
+      <span class="mono">· {{ total }} read{{ '' if total == 1 else 's' }},
+        {{ accepted }} accepted, {{ judged }} judged{% if wrong %}, {{ wrong }} wrong{% endif %}</span>
+    {%- endif %}
+    {%- for key, floor in min_chars.items() %}
+      <br><span class="mono">{{ key }}: floor is {{ floor }} characters
+        (<code>identity.identifiers.{{ key }}.plate_min_chars</code>) — move it and
+        re-read this table; nothing needs re-running.</span>
+    {%- endfor %}
+  </p>
+</div>
+
+{% if total %}
+<div class="pl-chips">
+  <span class="grp">
+    {% for chip in class_chips %}
+    <a class="chip{{ ' active' if chip.active }}" href="{{ chip.url }}">{{ chip.label }}</a>
+    {% endfor %}
+  </span>
+  <span class="grp">
+    {% for chip in status_chips %}
+    <a class="chip{{ ' active' if chip.active }}" href="{{ chip.url }}">{{ chip.label }}</a>
+    {% endfor %}
+  </span>
+</div>
+{% endif %}
+
+{% if reads %}
+<div class="tablecard">
+  <div class="prow head">
+    <div>Plate crop</div><div>Read</div><div>Class</div><div>When</div>
+    <div>Box conf</div><div>OCR conf</div><div>Verdict</div>
+  </div>
+  {# Own container: infinite.js appends the next slice's rows here, and
+     appending into .tablecard would push them under the header row. #}
+  <div id="plate-rows">
+  {% for r in reads %}
+  <div class="prow">
+    <div>
+      {% if r.crop_path %}
+      <img src="/media/{{ r.crop_path }}" alt="plate crop" loading="lazy">
+      {% else %}
+      <span class="nocrop">no crop</span>
+      {% endif %}
+    </div>
+    <div>
+      <div class="plate{{ '' if r.accepted else ' rejected' }}">{{ r.display_text or '—' }}</div>
+      {% if r.raw_text and r.text and r.raw_text != r.text %}
+        {# Normalization is lossy and irreversible; showing both is what
+           keeps a near-miss distinguishable from a clean read. #}
+        <div class="raw">normalized: {{ r.text }}</div>
+      {% endif %}
+      {% if r.reason %}
+        <div class="why">{{ reason_labels.get(r.reason, r.reason) }}
+          <span class="raw">({{ r.reason }}{% if r.reason == 'too-short' %}, floor {{ r.min_chars }}{% endif %})</span>
+        </div>
+      {% endif %}
+    </div>
+    <div class="mono">{{ r.class_name or '—' }}<br>{{ r.camera_id or '' }}</div>
+    <div class="mono">{{ r.at.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+    <div class="mono">
+      {{ '%.2f'|format(r.detector_confidence) if r.detector_confidence is not none else '—' }}
+    </div>
+    <div class="mono">
+      {# An unreported confidence is absent, never zero. #}
+      {{ '%.2f'|format(r.ocr_confidence) if r.ocr_confidence is not none else 'n/a' }}
+    </div>
+    <div class="verdicts">
+      <form method="post" action="/plates/{{ r.id }}/verdict">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input type="hidden" name="verdict" value="{{ '' if r.verdict == 'confirmed' else 'confirmed' }}">
+        <button class="vbtn{{ ' on-yes' if r.verdict == 'confirmed' }}" type="submit">Correct</button>
+      </form>
+      <form method="post" action="/plates/{{ r.id }}/verdict">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input type="hidden" name="verdict" value="{{ '' if r.verdict == 'wrong' else 'wrong' }}">
+        <button class="vbtn{{ ' on-no' if r.verdict == 'wrong' }}" type="submit">Wrong</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+</div>
+
+{% include "_load_more.html" %}
+
+{% elif total %}
+<div class="pl-empty">
+  <h3>No read matches this filter</h3>
+  {{ total }} read{{ '' if total == 1 else 's' }} recorded in total — the filters
+  above narrow them. Clearing them shows everything.
+</div>
+
+{% elif empty_reason == 'waiting' %}
+<div class="pl-empty">
+  <h3>No plate has been read yet</h3>
+  Plate OCR is configured on
+  <strong>{{ plate_identifiers | join(', ') }}</strong>, so a row appears the
+  first time a vehicle crop goes through it — including when the OCR reads
+  nothing, which is a row with a reason rather than silence.
+  <p style="margin:10px 0 0;">
+    If reads never appear, the optional dependencies may be missing:
+    <code>pip install -r requirements-plates.txt</code>. Without them the
+    vehicle path degrades to visual re-ID and logs a warning.
+  </p>
+</div>
+
+{% elif empty_reason == 'no-identifier' %}
+<div class="pl-empty">
+  <h3>No identifier runs plate OCR</h3>
+  This table is empty because nothing feeds it, not because no vehicle came
+  past. Set <code>plate_ocr: true</code> on a vehicle identifier under
+  <code>identity.identifiers</code>.
+</div>
+
+{% else %}
+<div class="pl-empty">
+  <h3>Identity resolution is off</h3>
+  <code>identity.enabled</code> is false, so no crop reaches the plate
+  reader and this table cannot fill.
+</div>
+{% endif %}
+{% endblock %}
