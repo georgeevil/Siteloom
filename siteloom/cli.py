@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 
 import typer
 
 from siteloom.cli_users import users_app
+from siteloom.cli_service import service_app
 from siteloom.cli_library import (
     classes_app,
     jobs_app,
@@ -26,6 +26,7 @@ app.add_typer(classes_app, name="classes")
 app.add_typer(train_app, name="train")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(users_app, name="users")
+app.add_typer(service_app, name="service")
 
 events_app = typer.Typer(help="Event maintenance.")
 app.add_typer(events_app, name="events")
@@ -178,34 +179,51 @@ def run(
 
 @app.command()
 def serve(
+    ctx: typer.Context,
     config: Path = CONFIG_OPT,
-    host: str = "127.0.0.1",
-    port: int = 8000,
+    host: str = typer.Option(None, "--host", help="Bind address (default: service.host)"),
+    port: int = typer.Option(None, "--port", help="Bind port (default: service.port)"),
     log_file: str = typer.Option(None, "--log-file", help="Also write logs here"),
-    log_level: str = typer.Option("INFO", "--log-level", help="DEBUG|INFO|WARNING"),
+    log_level: str = typer.Option(
+        None, "--log-level", help="DEBUG|INFO|WARNING (default: service.log_level)"
+    ),
 ):
     """Serve the event-browser web UI.
 
-    Long-lived, so run it under a service manager (docs/operations.md).
-    It stops on SIGINT/SIGTERM, and exposes /healthz and /readyz for
-    whatever is watching it.
-    """
-    import uvicorn
+    Long-lived, so run it under a service manager — `siteloom service
+    install` generates one. It stops on SIGINT/SIGTERM, exposes /healthz
+    and /readyz for whatever is watching it, and heartbeats an
+    OperationRun row so `siteloom jobs` sees it like any other long
+    operation.
 
+    Bind address, port and log level fall back to the `service:` section
+    of the config, so the generated unit and a hand-run server agree
+    without repeating themselves.
+    """
+    from siteloom.cli_library import INTERRUPTED_EXIT, _resume_command
     from siteloom.config import load_config
     from siteloom.progress import setup_logging
-    from siteloom.web.app import create_app
+    from siteloom.serve import serve_supervised
 
+    cfg = load_config(config)
+    host = host if host is not None else cfg.service.host
+    port = port if port is not None else cfg.service.port
+    log_level = log_level if log_level is not None else cfg.service.log_level
     # The project's own logging, so a service-managed run writes the same
     # lines to the same file as everything else rather than uvicorn's.
     setup_logging(level=log_level, log_file=log_file)
-    cfg = load_config(config)
-    logging.getLogger(__name__).info(
-        "serving %s on http://%s:%d (pid %d)", cfg.site_id, host, port, os.getpid()
+    stopped = serve_supervised(
+        cfg,
+        host=host,
+        port=port,
+        log_level=log_level,
+        resume_command=_resume_command(ctx),
     )
-    uvicorn.run(
-        create_app(cfg), host=host, port=port, log_level=log_level.lower()
-    )
+    if stopped:
+        # 128 + SIGINT, same as every other interruptible command: a
+        # server the operator stopped is neither a success nor a crash,
+        # and a supervisor told otherwise restarts it.
+        raise typer.Exit(INTERRUPTED_EXIT)
 
 
 @app.command()

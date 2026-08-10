@@ -23,8 +23,14 @@ siteloom doctor --config site.yaml --json
 Checks the database and its schema, the media directory (writable, and space
 left), the vector store (openable — *and who is holding it*), detector weights,
 face weights (by SHA-256, see below), optional plate-OCR dependencies, abandoned
-jobs, and integration config coherence. Every check reports a remedy, and one broken check never hides
-the others.
+jobs, integration config coherence, and installed service units. Every check
+reports a remedy, and one broken check never hides the others.
+
+The service check reads unit *files* and nothing else — no `systemctl`, no
+`launchctl`. `doctor` runs as a unit's own `ExecStartPre`, and asking the
+service manager about the service it is in the middle of starting is a question
+with no good answer and a plausible hang. Live state is
+`siteloom service status`, which is never on a boot path.
 
 It is deliberately safe to run at any time, including as an `ExecStartPre` or a
 monitoring probe. Exit code 1 means at least one check failed; warnings alone
@@ -143,10 +149,15 @@ reuse, a two-minute cold heartbeat is the backstop.
 | Signal | Sent by | Effect |
 |---|---|---|
 | SIGINT | Ctrl-C, `jobs cancel` | finish batch, commit, record `interrupted`, print resume command |
-| SIGTERM | `systemctl stop`, launchd, shutdown | same as SIGINT |
+| SIGTERM | `siteloom service stop`, shutdown | same as SIGINT |
 | SIGHUP | closing the terminal | same as SIGINT |
 | the same signal twice | an impatient operator | immediate abort; the batch in flight is lost |
 | SIGKILL | `kill -9` | immediate death; committed work survives, the row needs reaping |
+
+`serve` follows the same table. uvicorn owns the live shutdown, but the signal
+is recorded underneath it, so a `systemctl stop` or a `jobs cancel` leaves the
+run marked `interrupted` with a resume command and exits 130 — rather than
+dying where the row still says `running` and only a reap can close it out.
 
 Give a job **at least a batch's worth of time** to stop. Batch size is
 `library.batch_size` (default 100) for indexing and `--batch-size` (default 200)
@@ -155,70 +166,102 @@ for Takeout imports, so a 30-second stop timeout is usually generous and a
 
 ## Running as a service
 
-### macOS (launchd) — the primary target
-
-`~/Library/LaunchAgents/dev.siteloom.serve.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>            <string>dev.siteloom.serve</string>
-  <key>WorkingDirectory</key> <string>/Users/you/dev/Siteloom</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/you/dev/Siteloom/.venv/bin/siteloom</string>
-    <string>serve</string>
-    <string>--config</string><string>site.yaml</string>
-    <string>--host</string><string>127.0.0.1</string>
-    <string>--port</string><string>8000</string>
-    <string>--log-file</string><string>/Users/you/dev/Siteloom-data/serve.log</string>
-  </array>
-  <key>RunAtLoad</key>     <true/>
-  <key>KeepAlive</key>     <true/>
-  <key>StandardErrorPath</key> <string>/Users/you/dev/Siteloom-data/serve.err</string>
-</dict>
-</plist>
+```bash
+siteloom service install --unit serve --config site.yaml
+siteloom service status                # 0 running, 3 stopped, 4 not installed
+siteloom service stop | start | restart
+siteloom service logs -f
+siteloom service uninstall
 ```
+
+One verb set over both supervisors: a LaunchAgent plist on macOS
+(`launchctl bootstrap`/`bootout`/`kickstart` — the modern calls, not the
+deprecated `load`/`unload`), a unit file on Linux (`systemctl --user`).
+`--unit` selects `serve` (default), `run`, or `frigate`; `--scope system` writes
+a system unit instead of a per-user one.
+
+Siteloom does not daemonize itself. There is no `--daemon` and no PID file: the
+process stays in the foreground, logs where it is told, and stops on SIGTERM,
+and the supervisor owns backgrounding, restart and boot ordering. The liveness
+answer is `/healthz` and the `OperationRun` row, both of which know more than a
+pid file could. On a box with no service manager at all, run `siteloom serve`
+under whatever supervises things there — the unit `print-unit` renders is a
+reasonable starting point.
+
+### Review before you install
 
 ```bash
-launchctl load  ~/Library/LaunchAgents/dev.siteloom.serve.plist
-launchctl unload ~/Library/LaunchAgents/dev.siteloom.serve.plist   # stops it
+siteloom service print-unit --unit serve --config site.yaml
 ```
 
-launchd sends SIGTERM on unload, which `serve` and any job handle gracefully.
+Renders exactly what `install` would write, and writes nothing. It works on any
+platform, including ones with neither supervisor, because rendering is pure —
+so it is also the way to hand a unit to config management or to hand-edit one.
+The catch: `status` and `uninstall` recognise a unit by the marker `install`
+puts in it (`X-Siteloom-Generator`, or `SITELOOM_SERVICE_UNIT` in the plist's
+environment), so a hand-edited copy that loses the marker becomes yours to
+manage. `install` and `uninstall` both refuse to touch an unmarked file rather
+than clobber somebody's deliberate work; `--force` overrides.
 
-### Linux (systemd)
+Reinstalling after a config change shows a diff and asks. Changing
+`service.port` alone produces *no* diff, and that is the design: the unit reads
+the config rather than copying it, so there is one place to change a port.
 
-```ini
-[Unit]
-Description=Siteloom web UI
-After=network.target
+### What the generated unit says, and why
 
-[Service]
-WorkingDirectory=/opt/siteloom
-ExecStartPre=/opt/siteloom/.venv/bin/siteloom doctor --config site.yaml
-ExecStart=/opt/siteloom/.venv/bin/siteloom serve --config site.yaml --port 8000
-Restart=on-failure
-# Long enough for an in-flight batch to commit.
-TimeoutStopSec=60
+Everything below comes from the `service:` section of the config, so copying
+`site.yaml` to another host copies the deployment's shape with it.
 
-[Install]
-WantedBy=multi-user.target
-```
+| Directive | Value | Reason |
+|---|---|---|
+| `ExecStart` | absolute program, absolute `--config` | a bare `siteloom` resolves against systemd's minimal PATH — the classic "works in my shell" failure |
+| `WorkingDirectory` | the config file's own directory | `_ANCHORED_PATHS` makes that the one place every relative path in the YAML resolves correctly, and `storage.db_url` is deliberately *not* anchored, so a relative `sqlite:///` follows it |
+| `ExecStartPre` | `siteloom doctor --config …` | `doctor` is safe to run at any time and exits non-zero only on a real failure, so it gates a boot into a broken deployment. launchd has no equivalent: on macOS the gate runs at install time instead |
+| `Type=exec` | not `simple` | `simple` calls a start successful before the exec is attempted, so a moved venv looks like a healthy service that is not there. `--notify` opts into `Type=notify` (see below) |
+| `Restart=on-failure`, `RestartSec`, `StartLimitBurst=5` / `StartLimitIntervalSec=300` | | without a brake a config error respawns forever at full speed. launchd: `KeepAlive={SuccessfulExit: false}` and `ThrottleInterval` — a bare `KeepAlive=true` also resurrects a server you stopped on purpose |
+| `SuccessExitStatus=130` | every unit | a stopped process exits 130 by design — `serve` included, since it records the stop and then says so. Without this, `Restart=on-failure` reads a deliberate stop as a crash and brings it straight back. **launchd cannot express it** — on macOS, stop a service-managed process with `siteloom service stop`, not `jobs cancel` |
+| `TimeoutStopSec` | 30 s for `serve`, 60 s for `run`/`frigate` | a batch's worth of time; see the stop-signal table above |
+| `KillSignal`, `KillMode` | *absent* | the defaults (SIGTERM, control-group) are already right. `KillMode=mixed` is the tempting wrong answer: ingest's workers are threads, not children |
+| `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ReadWritePaths=…` | | `ProtectSystem=strict` fails minutes into a run when one write path is missing, so `full` is the default and the computed `ReadWritePaths` (media dir, vector store, the sqlite *directory* — WAL and SHM are siblings — training output, log dir, models dir) is emitted anyway so tightening it by hand is a one-word edit |
+| `ProtectHome` | *absent* | the face weights cache is `~/.cache/siteloom/models` unless `SITELOOM_MODELS_DIR` moves it |
+| `RuntimeDirectory`, `StateDirectory`, `LogsDirectory` | *absent* | the config file decides where state lives (CLD-64). Two mechanisms answering that question is the bug those directives would reintroduce |
+| `ProcessType` (launchd) | *absent* | `Background` puts the job in a throttled task-policy band that would starve YOLO inference on the Apple Silicon target |
+| no `--workers` | | embedded Qdrant is one client per path per machine, so a second uvicorn worker cannot open the vector store. The generated unit says so in a comment |
 
-A second unit for `siteloom frigate` follows the same shape. **Do not** run
-`serve` and `frigate` against the same `identity.vector_db_path` — see below.
+Logging: every unit passes `--log-file`, so the project's own rotating handler
+(10 MB × 3) owns the real log. launchd does not rotate `StandardOutPath`, so the
+plist's streams stay a crash channel and nothing else. `siteloom service logs`
+knows the difference — `journalctl` on Linux, a `tail` over both files on macOS.
+
+### Two things the CLI reports rather than doing
+
+- **`loginctl enable-linger`.** A `--user` unit stops at logout and does not
+  start at boot without it. `install` checks and prints the exact
+  `sudo loginctl enable-linger <you>` command; it never runs `sudo` for you.
+- **`--scope system` on macOS.** Writing to `/Library/LaunchDaemons` needs
+  root, so `install` renders the plist and prints the two `sudo` commands
+  instead of running them.
+
+### `Type=notify` is opt-in
+
+`siteloom service install --notify` emits `Type=notify` and `serve` sends
+`READY=1` once the sockets are actually bound, so `systemctl start` blocks until
+the server can answer rather than returning as soon as the process exists.
+
+It is not the default because `Type=exec` already catches the failure that
+actually happens — a bad exec — and a readiness signal has to be told the truth
+by hand. `WatchdogSec` is deliberately not offered at all: the only place to
+ping from is a background thread, and a thread keeps pinging happily while the
+event loop is wedged. A watchdog that lies is worse than none; `/readyz` is a
+better liveness probe because it goes through the loop.
 
 ### One vector store, one process
 
 `serve`, `frigate` and every indexing/enrolling job open the embedded Qdrant
 directory exclusively. Options, in order of preference:
 
-1. Run the long job when the server is stopped (`launchctl unload …`,
-   `systemctl stop siteloom`), which is what `doctor` will tell you to do.
+1. Run the long job when the server is stopped (`siteloom service stop`), which
+   is what `doctor` will tell you to do.
 2. Give the job a config whose `identity.enabled` is false, when it does not
    need identification (`library index --no-identify`).
 3. Move to a real Qdrant server for `identity.vector_db_path` — the same client
@@ -227,6 +270,13 @@ directory exclusively. Options, in order of preference:
 
 `siteloom doctor` reports exactly this failure with the remedy, so "why won't my
 job start?" is one command rather than a stack trace.
+
+Two units that would collide are now caught earlier than that: `service install`
+refuses to write a second unit whose config names the same
+`identity.vector_db_path` as one already installed (`--force` if you are about
+to change one of them), and `doctor`'s `services` check reports the clash
+between installed units. Both quote the same remedy. A restart at 4am is a late
+time to discover a configuration that could never have worked.
 
 ## Logs
 

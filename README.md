@@ -198,17 +198,36 @@ site YAML and use each camera's Protect id as its `source`.
 ## Running it as a service
 
 ```bash
+siteloom service install --config site.yaml   # writes the unit, starts it
+siteloom service status                       # 0 running, 3 stopped, 4 not installed
+siteloom service stop | start | restart | logs -f
+```
+
+One verb set over launchd (macOS) and systemd (Linux). The unit is generated
+from your config, so it carries an absolute program and config path, the right
+working directory, a `doctor` preflight, a restart policy with a crashloop
+brake, a stop timeout sized to a commit batch, and `SuccessExitStatus=130` so a
+`jobs cancel` is not read as a crash and undone. `--unit run|frigate` supervises
+the other long-lived commands; `siteloom service print-unit` shows the file
+without writing it, and install refuses to clobber a unit it did not write.
+
+Siteloom does not daemonize itself — no `--daemon`, no PID file. The process
+runs in the foreground and stops on SIGTERM; the supervisor owns the rest.
+
+```bash
 siteloom doctor --config site.yaml   # is this deployment fit to run? exit 1 if not
 ```
 
 `doctor` checks the database and schema, media dir and free space, the vector
 store (including *who is holding it*), model weights, optional plate-OCR deps,
-abandoned jobs, and integration coherence — each with a remedy. The server
-exposes `/healthz` (liveness) and `/readyz` (readiness, 503 when it cannot
-work).
+abandoned jobs, integration coherence, and installed service units — each with a
+remedy. The server exposes `/healthz` (liveness) and `/readyz` (readiness, 503
+when it cannot work), and now heartbeats an `OperationRun` row like every other
+long operation, so `siteloom jobs` sees it too.
 
-launchd and systemd unit templates, stop-signal semantics, and the
-one-process-per-vector-store rule are in [docs/operations.md](docs/operations.md).
+Which directives are emitted and which are deliberately left out, stop-signal
+semantics, and the one-process-per-vector-store rule are in
+[docs/operations.md](docs/operations.md).
 
 ## Web UI
 

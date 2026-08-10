@@ -330,6 +330,58 @@ def check_integrations(report: Report, config) -> None:
     report.add("integrations", OK, ", ".join(enabled) or "none enabled")
 
 
+def check_services(report: Report, config) -> None:
+    """Installed service units, and whether two of them would collide.
+
+    Reads unit *files* only — no `systemctl`, no `launchctl`. `doctor`
+    runs as this unit's own `ExecStartPre`, so asking the manager about
+    the service it is in the middle of starting is a question with no
+    good answer and a plausible hang. Live state is
+    `siteloom service status`, which is never on a boot path.
+    """
+    import platform as _platform
+
+    from siteloom.config import load_config
+    from siteloom.service import ServiceError, backend_for_platform
+
+    try:
+        backend = backend_for_platform(system=_platform.system().lower())
+    except ServiceError:
+        report.add("services", OK, "no supported service manager on this platform")
+        return
+    units = backend.installed("user") + backend.installed("system")
+    if not units:
+        report.add("services", OK, "no units installed")
+        return
+
+    # The same rule check_vector_store enforces at runtime, applied to
+    # what is configured to start rather than to what is running: two
+    # units sharing an embedded Qdrant directory can never both run, and
+    # finding that out at boot is finding it out too late.
+    by_store: dict[str, list[str]] = {}
+    for unit in units:
+        try:
+            other = load_config(unit.config_path)
+        except Exception:
+            continue
+        if other.identity.enabled and other.identity.vector_db_path:
+            by_store.setdefault(other.identity.vector_db_path, []).append(unit.label)
+    clashes = {path: labels for path, labels in by_store.items() if len(labels) > 1}
+    names = ", ".join(u.label for u in units)
+    if clashes:
+        path, labels = next(iter(clashes.items()))
+        report.add(
+            "services",
+            FAIL,
+            f"{' and '.join(labels)} both use identity.vector_db_path {path}",
+            "embedded qdrant is one client per path per machine — point one at a "
+            "different identity.vector_db_path, disable identity on one, or move "
+            "to a qdrant server",
+        )
+        return
+    report.add("services", OK, f"{len(units)} installed: {names}")
+
+
 # -- entry points -----------------------------------------------------------
 
 # Ordered cheapest-and-most-fundamental first, so the output reads as a
@@ -343,6 +395,7 @@ CHECKS = [
     check_plate_ocr,
     check_jobs,
     check_integrations,
+    check_services,
 ]
 
 # What a readiness probe can answer in milliseconds, without opening the
