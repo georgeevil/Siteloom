@@ -264,6 +264,19 @@ class IdentifierConfig(BaseModel):
     # Vehicle path only: also try plate OCR on crops and match by plate
     # first (PRD §6.4). Requires the "plates" optional dependencies.
     plate_ocr: bool = False
+    # Shortest normalized OCR read accepted as a plate. Configuration
+    # rather than a literal because it is the exact bar short/angled
+    # motorcycle plates fall under (CLD-9), and the answer to "is the
+    # floor in the right place" is "move it and re-read the table".
+    # Reads under it are still recorded — a `PlateRead` row with reason
+    # "too-short" keeps the raw text — so lowering it is a question about
+    # existing data, not a reason to re-run anything.
+    plate_min_chars: int = 4
+    # Keep the plate sub-crop for each read, under `<media_dir>/plates/`.
+    # A third image with its own purpose: `crop_jpeg` is simultaneously
+    # the display thumbnail and the embedder input, so the evidence image
+    # for an OCR read must not touch it.
+    plate_save_crops: bool = True
     # Required score gap between the best and second-best *identity*
     # before a visual match is accepted. Two identities inside this band
     # are an ambiguous read: the frame is left unresolved (after the

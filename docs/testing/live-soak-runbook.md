@@ -158,13 +158,19 @@ they are not attempted and quietly marked done:
   the honest version of this spike is: export a few evening windows with
   `backfill-unifi`, then check `/noise` against what those clips actually
   sound like. That is a rescope, not a run of this runbook.
-- **Motorcycle plate OCR (CLD-9)** — nothing records what the OCR read.
-  `PlateReader.read()` returns a bare string or None; the plate detector's
-  confidence is used to pick a box and then discarded, and a hard
-  `len(text) >= 4` filter drops short reads without trace. Counting hits by
-  eye produces a number that cannot be reproduced or compared. This needs a
-  plate-read audit trail (raw text, confidence, plate crop) before it is
-  worth anyone's afternoon.
+- **Motorcycle plate OCR (CLD-9)** — *was* blocked here and is not any
+  more (CLD-85). Nothing used to record what the OCR read: `read()`
+  returned a bare string or None, the plate detector's confidence picked a
+  box and was discarded, and a hard `len(text) >= 4` filter dropped short
+  reads without trace — so counting hits by eye produced a number that
+  could not be reproduced or compared. Every attempt is now a `PlateRead`
+  row (raw text before normalization, both confidences, the plate
+  sub-crop, and the reason a read was rejected), and `/plates` lists them
+  filtered by class with a confirm/reject per row. The spike is now: run
+  the soak, open `/plates?class=motorcycle`, judge twenty rows. If the
+  four-character floor is the problem, move
+  `identity.identifiers.vehicle.plate_min_chars` and re-read the same
+  table — the rejected reads kept their text, so nothing is re-run.
 
 ## 6. Scenario F — the archive, in parallel
 

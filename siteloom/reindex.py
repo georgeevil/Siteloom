@@ -5,9 +5,10 @@ the events/detections a window produced under old rules, then re-run the
 UniFi backfill over the same window so the live pipeline (with today's
 stitching, gating, and confidence settings) rebuilds it.
 
-Purge is deliberately narrow: it deletes Events, their Detections and
-EventIdentity links, their crop files, and the BackfillClip bookkeeping
-for the window (so the re-scan re-registers the NVR windows). It does
+Purge is deliberately narrow: it deletes Events, their Detections,
+EventIdentity links and PlateRead rows, their crop files, and the
+BackfillClip bookkeeping for the window (so the re-scan re-registers the
+NVR windows). It does
 NOT touch Identity rows or their vectors — identities are the durable
 layer that reindexed events re-match against; pruning them is a
 separate, human decision.
@@ -24,7 +25,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from siteloom.config import CameraConfig, SiteConfig
-from siteloom.store import BackfillClip, Detection, Event, EventIdentity
+from siteloom.store import BackfillClip, Detection, Event, EventIdentity, PlateRead
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class PurgeResult:
     events: int = 0
     detections: int = 0
     links: int = 0
+    plate_reads: int = 0
     clips: int = 0
     crop_files: int = 0
 
@@ -97,6 +99,17 @@ def purge_window(
                 for link in links:
                     session.delete(link)
                     result.links += 1
+                # Plate reads hang off the event like detections do
+                # (CLD-85); leaving them behind would keep rows on
+                # /plates whose event no longer exists.
+                reads = session.scalars(
+                    select(PlateRead).filter(PlateRead.event_id == event.id)
+                ).all()
+                for read in reads:
+                    if read.crop_path:
+                        crop_paths.add(read.crop_path)
+                    session.delete(read)
+                    result.plate_reads += 1
                 session.delete(event)
                 result.events += 1
             clips = session.scalars(
