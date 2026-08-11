@@ -70,9 +70,12 @@
   {% for l in identity_links %}
   <div class="claim{% if l.verdict == 'wrong' %} is-wrong{% endif %}">
     <span class="who">
+      {# The full event page is on the same `restricted` floor the rail
+         is, so it takes the same substitution (CLD-111) — one screen
+         with two URLs, and a fix in one of them is a fix in neither. #}
       <a href="/identities/{{ l.identity.id }}">
-        <span class="badge {% if not l.identity.label %}unknown{% endif %}">{{ l.identity.display_name }}</span></a>
-      {% if l.identity.plate %}<span class="badge plate">{{ l.identity.plate }}</span>{% endif %}
+        <span class="badge {% if may_name() and not l.identity.label %}unknown{% endif %}">{{ identity_name(l.identity) }}</span></a>
+      {% if identity_plate(l.identity) %}<span class="badge plate">{{ identity_plate(l.identity) }}</span>{% endif %}
       <span class="sim">{{ l.identity.identifier_key }} · {{ '%.2f'|format(l.similarity) }}</span>
     </span>
 
@@ -109,7 +112,7 @@
           <input type="hidden" name="next_url" value="/events/{{ event.id }}">
           <select name="identity_id" aria-label="Reassign to">
             {% for i in candidates if i.id != l.identity_id %}
-              <option value="{{ i.id }}">{{ i.display_name }}</option>
+              <option value="{{ i.id }}">{{ identity_name(i) }}</option>
             {% endfor %}
             <option value="new">+ new identity</option>
           </select>
@@ -132,7 +135,7 @@
   </summary>
   <div class="muted" style="font-size:0.8rem; line-height:1.7; margin-top:4px;">
     {% for l in unlinked %}
-      {{ l.identity.display_name }}{% if l.unlinked_at %}
+      {{ identity_name(l.identity) }}{% if l.unlinked_at %}
       <span class="mono">({{ l.unlinked_at.strftime('%m-%d %H:%M') }})</span>{% endif %}{{ "," if not loop.last }}
     {% endfor %}
   </div>
@@ -144,7 +147,7 @@
       style="margin:0.3rem 0 0.6rem;">
   <select name="identity_id" aria-label="Attach identity">
     {% for i in candidates %}
-      <option value="{{ i.id }}">{{ i.display_name }}</option>
+      <option value="{{ i.id }}">{{ identity_name(i) }}</option>
     {% endfor %}
     <option value="new">+ new identity</option>
   </select>
