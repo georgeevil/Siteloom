@@ -939,6 +939,14 @@ class OperationRun(Base):
     # later, to tell one site's runs from another's.
     pid: Mapped[int] = mapped_column(Integer, default=0)
     host: Mapped[str] = mapped_column(String, default="")
+    # Which process, not just which pid (CLD-57): the OS-reported start
+    # time of the recording process, as `health.process_identity` renders
+    # it. A pid outlives its process and the OS hands it out again, so
+    # without this a cancel can signal a stranger. Empty means the row
+    # cannot prove whose pid that is — every row written before this
+    # column existed (the migration fills them with ''), and any row
+    # written where the platform would not report a start time.
+    process_start: Mapped[str] = mapped_column(String, default="")
 
     @property
     def percent(self) -> float:
@@ -966,20 +974,22 @@ class OperationRun(Base):
     def is_stale(self) -> bool:
         """A 'running' row that nothing is working on any more.
 
-        Two signals. On the host that recorded the run, the pid answers
-        immediately — waiting out a heartbeat timeout to notice a process
-        that is provably gone helps nobody. Everywhere else (and when a
-        recycled pid makes a dead run look alive) the cold heartbeat is
-        the backstop.
+        Two signals. On the host that recorded the run, the recorded
+        process answers immediately — waiting out a heartbeat timeout to
+        notice a process that is provably gone helps nobody, and a pid
+        now worn by an unrelated process is just as provably gone
+        (`process_verdict`, the same question `request_cancel` asks).
+        Everywhere else, and whenever the identity cannot be established
+        at all, the cold heartbeat is the backstop.
         """
         if self.status != "running":
             return False
         from datetime import timezone as _tz
 
-        from siteloom.health import hostname, process_alive
+        from siteloom.health import PROVEN_GONE, hostname, process_verdict
 
         if self.pid and self.host and self.host == hostname():
-            if not process_alive(self.pid):
+            if process_verdict(self.pid, self.process_start or "") in PROVEN_GONE:
                 return True
 
         now = datetime.now(_tz.utc).replace(tzinfo=None)

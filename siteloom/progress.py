@@ -50,7 +50,15 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from siteloom.health import hostname, process_alive
+from siteloom.health import (
+    MATCH,
+    MISMATCH,
+    NO_PROCESS,
+    UNREADABLE,
+    hostname,
+    process_identity,
+    process_verdict,
+)
 from siteloom.store import OperationRun
 
 log = logging.getLogger(__name__)
@@ -166,6 +174,11 @@ class ProgressReporter:
                 resume_command=self.resume_command,
                 pid=os.getpid(),
                 host=hostname(),
+                # Which process, not just which pid: without it, anyone
+                # acting on this row later can only hope the pid still
+                # means us (CLD-57). "" where the platform will not say,
+                # which `request_cancel` reads as "cannot prove it".
+                process_start=process_identity(os.getpid()) or "",
             )
             session.add(run)
             session.commit()
@@ -456,15 +469,16 @@ class CancelResult:
     """The outcome of asking a run to stop, honestly.
 
     `ok` is False whenever the run was *not* asked — a run on another
-    host, a row whose process is already gone, a run that already
-    finished. Callers must render the reason rather than reporting a
-    cancellation that never happened: an operator who is told "cancelled"
-    and sees no change reaches for `kill -9` and loses the batch.
+    host, a row whose process is already gone or whose pid has since
+    been handed to something else, a run that already finished. Callers
+    must render the reason rather than reporting a cancellation that
+    never happened: an operator who is told "cancelled" and sees no
+    change reaches for `kill -9` and loses the batch.
     """
 
     ok: bool
     #: Machine-readable: requested | killed | not_found | not_running |
-    #: other_host | no_process
+    #: other_host | no_process | pid_reused | unverified
     reason: str
     detail: str
     run_id: int
@@ -481,6 +495,14 @@ def request_cancel(session, run_id: int, force: bool = False) -> CancelResult:
     command. `force` is the escape hatch — SIGKILL, losing the work since
     the last commit — and is deliberately not offered in-process, where
     it would take down whatever else that process is doing.
+
+    Nothing is signalled until the row's pid is *proven* to still be the
+    process that wrote it (CLD-57). A pid outlives its process, so the
+    row's recorded process identity is checked first and a signal is
+    refused on anything short of a match — including a row too old to
+    carry one. Refusing costs an operator one `reap`; guessing costs
+    whatever else happened to be wearing that pid, which on a
+    single-operator box is likely their own shell.
     """
     run = session.get(OperationRun, run_id)
     if run is None:
@@ -503,6 +525,13 @@ def request_cancel(session, run_id: int, force: bool = False) -> CancelResult:
     # a registry hit alone would let a row restored from elsewhere, or
     # written by another deployment against another database, be
     # "cancelled" by stopping an unrelated local job.
+    #
+    # This path needs no process-identity check and must not grow one:
+    # the reporter is a live object in *this* interpreter, registered
+    # under the id of the row it itself created, so "is that still the
+    # process that wrote this row" is answered by construction. Requiring
+    # a token here would only break in-process cancel on a platform that
+    # cannot produce one — and nothing is signalled either way.
     if reporter is not None and pid == os.getpid() and host in ("", hostname()):
         # Ours: a background thread of this very process. Signalling the
         # pid would hit the process, not the job.
@@ -535,12 +564,55 @@ def request_cancel(session, run_id: int, force: bool = False) -> CancelResult:
             pid,
             host,
         )
-    if not pid or not process_alive(pid):
+    verdict = process_verdict(pid, run.process_start or "")
+    if verdict == NO_PROCESS:
         return CancelResult(
             False,
             "no_process",
             f"run #{run_id} ({kind}) has no live process — it died without "
             f"recording an outcome; clear it with reap",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+    if verdict == MISMATCH:
+        return CancelResult(
+            False,
+            "pid_reused",
+            f"run #{run_id} ({kind}) recorded pid {pid}, but that pid now "
+            f"belongs to a different process — the run is gone and the "
+            f"pid was reused; signalling it would hit a stranger. Clear "
+            f"the row with reap",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+    if verdict == UNREADABLE:
+        return CancelResult(
+            False,
+            "unverified",
+            f"run #{run_id} ({kind}): {hostname()} will not report process "
+            f"start times, so pid {pid} cannot be shown to still be this "
+            f"run — refusing rather than risk signalling an unrelated "
+            f"process. Stop it where it runs (Ctrl-C), or reap the row "
+            f"once its heartbeat goes cold",
+            run_id,
+            kind,
+            pid,
+            host,
+        )
+    if verdict != MATCH:  # UNRECORDED: written before pids were qualified
+        return CancelResult(
+            False,
+            "unverified",
+            f"run #{run_id} ({kind}) recorded no process identity — it "
+            f"predates that column, so pid {pid} cannot be shown to still "
+            f"be this run — refusing rather than risk signalling an "
+            f"unrelated process. Stop it where it runs (Ctrl-C), or reap "
+            f"the row once its heartbeat goes cold; runs started since "
+            f"the upgrade cancel normally",
             run_id,
             kind,
             pid,

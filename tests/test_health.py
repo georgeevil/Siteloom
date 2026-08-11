@@ -204,7 +204,15 @@ def test_cancel_signals_a_live_process(config, config_file):
     try:
         Session = _session(config)
         with Session() as session:
-            session.add(_run(pid=child.pid, host=health.hostname()))
+            session.add(
+                _run(
+                    pid=child.pid,
+                    host=health.hostname(),
+                    # As the child's own reporter would have recorded it:
+                    # an unqualified pid is refused, by design (CLD-57).
+                    process_start=health.process_identity(child.pid) or "",
+                )
+            )
             session.commit()
         result = runner.invoke(jobs_app, ["cancel", "1", "--config", str(config_file)])
         assert result.exit_code == 0, result.output
