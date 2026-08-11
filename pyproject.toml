@@ -112,10 +112,20 @@ line-length = 100
 [tool.ruff.lint]
 # Scope: things that are wrong, not things that are unfashionable. E4/E7/E9 + F are
 # the import/syntax/name errors that bite at runtime; C90 caps runaway complexity.
-# Style-opinion families (I, UP, SIM, DTZ, B, …) are surveyed in
+# Style-opinion families (I, UP, SIM, DTZ, …) are surveyed in
 # docs/testing/lint-and-types.md with counts, so tightening is a decision with a
 # price tag rather than a 40-file diff landing on top of everyone's branch.
-select = ["E4", "E7", "E9", "F", "C90"]
+#
+# B023 is pulled out of B ahead of the rest of the family (CLD-99): a closure over a
+# loop variable is a defect, not a preference — it shipped as "the wrong camera on the
+# live page". The other 11 B hits on the tree are real but are niceties, and each wants
+# a judgement call rather than a bulk fix, so B stays unselected as a whole:
+#   B904 ×5 (cli.py, web/identity_ops.py, web/recognition_api.py ×3) — `raise ... from`
+#          inside an except clause
+#   B007 ×4 (cli_service.py, tests ×3) — unused loop control variable
+#   B905 ×2 (track_eval.py, web/paging.py) — `zip()` without explicit `strict=`
+# (B008's 15 hits are already answered by extend-immutable-calls below.)
+select = ["E4", "E7", "E9", "F", "C90", "B023"]
 
 [tool.ruff.lint.mccabe]
 # 20, not the default 10. Seventeen functions sit above 10 and the tree's real shape
@@ -140,8 +150,9 @@ max-complexity = 20
 "tests/test_takeout.py" = ["F401"]          # unused `pytest`
 
 [tool.ruff.lint.flake8-bugbear]
-# Not selected today, but recorded so that whoever turns B on does not spend an hour
-# rediscovering that all 15 B008 hits are the typer/FastAPI declarative-default idiom.
+# Only B023 of the family is selected today, but this is recorded so that whoever turns
+# the rest of B on does not spend an hour rediscovering that all 15 B008 hits are the
+# typer/FastAPI declarative-default idiom.
 extend-immutable-calls = [
     "fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query",
     "typer.Argument", "typer.Option",

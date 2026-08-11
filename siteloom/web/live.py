@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 import cv2
 
@@ -118,6 +119,19 @@ class _Feed(threading.Thread):
             cap.release()
 
 
+def _has_new_frame(feed: _Feed, seen: int) -> Callable[[], bool]:
+    """A `Condition.wait_for` predicate bound to *this* feed and *this* seq.
+
+    `LiveHub.frames` rebinds both names inside its loop — a feed that dies
+    is replaced mid-stream, and `seen` advances with every frame — and a
+    closure captures the variable, not its value. An inline lambda would
+    therefore ask whichever feed the loop currently holds about whichever
+    seq it currently has: on a multi-camera site, the wrong camera's
+    reader (CLD-99). Passing them through a call freezes both.
+    """
+    return lambda: feed.seq != seen
+
+
 class LiveHub:
     def __init__(self, config: SiteConfig):
         self.config = config
@@ -209,7 +223,7 @@ class LiveHub:
             seen = 0
             while True:
                 with feed.cond:
-                    feed.cond.wait_for(lambda: feed.seq != seen, timeout=2.0)
+                    feed.cond.wait_for(_has_new_frame(feed, seen), timeout=2.0)
                     frame, seq = feed.frame, feed.seq
                     alive = feed.is_alive() and not feed.stopping.is_set()
                 if seq != seen and frame is not None:
