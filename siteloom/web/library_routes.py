@@ -29,10 +29,44 @@ from siteloom.store import (
     OperationRun,
     TrainingRun,
 )
-from siteloom.web import paging
+from siteloom.web import paging, params
 
 
 log = logging.getLogger(__name__)
+
+#: The site-wide event rules `/classes/events` may write, each paired
+#: with the parser that says what kind of value it is (web/params.py).
+#: The bounds are part of the rule, not decoration: `stitch_min_iou: 4`
+#: asks for an overlap no two boxes can have, so stitching stops
+#: entirely — and it used to be accepted, written to YAML, and noticed
+#: days later as fragmentation nobody could explain. Zero is left
+#: allowed wherever it means "gate off" (which is most of them);
+#: negative is what has no meaning.
+EVENT_RULES = {
+    "min_detections": lambda v, f: params.as_int(v, f, low=0),
+    "min_duration_s": lambda v, f: params.as_float(v, f, low=0.0),
+    "min_confidence": params.as_confidence,
+    "stitch_gap_s": lambda v, f: params.as_float(v, f, low=0.0),
+    "stitch_min_iou": lambda v, f: params.as_float(v, f, low=0.0, high=1.0),
+    "identify_min_confidence": params.as_confidence,
+    "identify_min_crop_px": lambda v, f: params.as_int(v, f, low=0),
+    "identify_only_significant": params.as_bool,
+}
+
+#: Top-level fields `/classes/detection` writes, and the per-identifier
+#: settings it accepts inside them.
+DETECTION_FIELDS = (
+    "classes",
+    "confidence",
+    "class_confidence",
+    "identifiers",
+    "auto_add_classes",
+    "auto_add_threshold",
+)
+IDENTIFIER_FIELDS = ("threshold", "applies_to", "plate_ocr")
+
+#: What a review decision may ask for (`/api/training/review`).
+REVIEW_ACTIONS = ("confirm", "classify", "reject", "unset")
 
 #: The UI-triggered reindex runs as a background thread in the serve
 #: process (which is what lets it reuse the shared vector store). One at
@@ -86,6 +120,76 @@ def resolve_import_path(raw: str, roots: list[str]) -> Path:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _optional_text(box: dict, key: str, where: str) -> str | None:
+    """A text field the editor may send as a name, empty, or null."""
+    value = box.get(key)
+    if value is None or value == "":
+        return None
+    return params.as_name(value, f"{where}.{key}")
+
+
+def _parse_box(box: object, index: int) -> dict:
+    """One box from the annotation editor, read before it is stored.
+
+    Every field is checked here rather than at the row it becomes,
+    because this endpoint replaces an item's boxes wholesale: a value it
+    cannot read halfway down the list would otherwise take the boxes
+    before it with it.
+    """
+    where = f"annotations[{index}]"
+    fields = params.as_object(box, where)
+    if "bbox" not in fields:
+        raise HTTPException(400, f"{where} must carry a bbox")
+    corners = params.as_list(fields["bbox"], f"{where}.bbox")
+    if len(corners) != 4:
+        raise HTTPException(
+            400,
+            f"{where}.bbox must be four numbers [x1, y1, x2, y2], "
+            f"got {len(corners)}",
+        )
+    frame_index = fields.get("frame_index")
+    return {
+        "id": (
+            None
+            if fields.get("id") is None
+            else params.as_row_id(fields["id"], f"{where}.id")
+        ),
+        # Clamped rather than refused: dragging a box past the edge of
+        # the frame is ordinary editing, and 0..1 is simply where it
+        # lands. A bbox of the wrong *shape* is a different thing, and
+        # is refused above.
+        "bbox": [
+            max(0.0, min(1.0, params.as_float(v, f"{where}.bbox[{i}]")))
+            for i, v in enumerate(corners)
+        ],
+        "frame_index": (
+            0
+            if frame_index is None
+            else params.as_int(frame_index, f"{where}.frame_index", low=0)
+        ),
+        "class_name": _optional_text(fields, "class_name", where) or "object",
+        "custom_class": _optional_text(fields, "custom_class", where),
+        "identity_id": (
+            None
+            if not fields.get("identity_id")
+            else params.as_row_id(fields["identity_id"], f"{where}.identity_id")
+        ),
+        "verified": params.as_bool(
+            fields.get("verified", False), f"{where}.verified"
+        ),
+        "rejected": params.as_bool(
+            fields.get("rejected", False), f"{where}.rejected"
+        ),
+        # Absent means "leave whatever the row says"; present-and-empty
+        # means "clear it". The two are not the same instruction.
+        **(
+            {"proposed_name": _optional_text(fields, "proposed_name", where)}
+            if fields.get("proposed_name") is not None
+            else {}
+        ),
+    }
 
 
 #: Rows in one keyset slice of each grid (CLD-104). Page sizes, not
@@ -460,18 +564,21 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
     def _build_indexer():
         """A LibraryIndexer wired for the *serving* process.
 
-        The vector store comes from get_shared_store, never a fresh
+        The vector store comes from the process-wide one, never a fresh
         VectorStore: embedded Qdrant takes an exclusive lock per path,
-        and the recognition API and enrollment already hold this one.
+        and the recognition API and enrollment already hold this one. A
+        store held by *another* process is an actionable 503, not a
+        traceback — `identity_ops.shared_store` is where that is said.
         """
-        from siteloom.identity import IdentityResolver, get_shared_store
+        from siteloom.identity import IdentityResolver
         from siteloom.ingest import build_dispatcher
         from siteloom.library import LibraryIndexer
+        from siteloom.web.identity_ops import shared_store
 
         resolver = None
         if config.identity.enabled:
             resolver = IdentityResolver(
-                config.identity, get_shared_store(config.identity.vector_db_path)
+                config.identity, shared_store(config, "import")
             )
         return LibraryIndexer(config, Session, build_dispatcher(config), resolver)
 
@@ -598,6 +705,18 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
 
         wants_identify = identify == "1"
         wants_auto_verify = auto_verify == "1"
+
+        if config.identity.enabled:
+            # Resolved here rather than inside the worker, for the reason
+            # /train/enroll gives: embedded Qdrant allows one client per
+            # path per machine, so a backfill or live ingest holding it
+            # is ordinary — and a 503 naming it beats a job that starts,
+            # dies in a thread, and leaves the operator watching /jobs
+            # for a run that never appears. The store is process-wide, so
+            # the indexer built below reuses this one.
+            from siteloom.web.identity_ops import shared_store
+
+            shared_store(config, "index run")
 
         def work():
             from siteloom.progress import ProgressReporter
@@ -949,9 +1068,21 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         Boxes are sent whole rather than diffed: the editor is the source
         of truth for an item while it is open, and a full replace avoids
         an entire class of merge bugs from partial updates.
+
+        Which makes the shape check load-bearing: a full replace deletes
+        every box it was not sent, so a body this endpoint cannot read is
+        refused outright rather than half-applied. Coordinates are
+        normalized 0..1 (they have to survive thumbnailing), and a bbox
+        that is not four numbers is malformed — clamping whatever arrived
+        used to store a two-element box that the editor could not draw.
         """
-        body = await request.json()
-        boxes = body.get("annotations", [])
+        body = await params.json_object(request)
+        boxes = [
+            _parse_box(box, index)
+            for index, box in enumerate(
+                params.as_list(body.get("annotations", []), "annotations")
+            )
+        ]
         with Session() as session:
             item = session.get(LibraryItem, item_id)
             if item is None:
@@ -964,24 +1095,24 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             }
             kept: set[int] = set()
             for box in boxes:
-                bbox = [max(0.0, min(1.0, float(v))) for v in box["bbox"]]
-                annotation_id = box.get("id")
+                bbox = box["bbox"]
+                annotation_id = box["id"]
                 annotation = existing.get(annotation_id) if annotation_id else None
                 if annotation is None:
                     annotation = Annotation(
                         item_id=item_id,
                         created_at=_now(),
                         source="human",
-                        frame_index=int(box.get("frame_index", 0)),
+                        frame_index=box["frame_index"],
                     )
                     session.add(annotation)
                 elif json.loads(annotation.bbox) != bbox and annotation.source == "auto":
                     # A moved machine box becomes a human correction.
                     annotation.source = "human"
                 annotation.bbox = json.dumps(bbox)
-                annotation.class_name = box.get("class_name") or "object"
-                annotation.custom_class = box.get("custom_class") or None
-                annotation.identity_id = box.get("identity_id") or None
+                annotation.class_name = box["class_name"]
+                annotation.custom_class = box["custom_class"]
+                annotation.identity_id = box["identity_id"]
                 # Transitions only. This endpoint replaces an item's boxes
                 # wholesale, so it re-sends `verified` for rows nobody
                 # touched; stamping on every save would relabel the
@@ -989,14 +1120,14 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 # because somebody opened the editor and pressed save.
                 # Flipping the flag on *is* an explicit act, so that one
                 # is recorded.
-                wants_verified = bool(box.get("verified", False))
+                wants_verified = box["verified"]
                 if wants_verified and not annotation.verified:
                     annotation.mark_verified(VERIFIED_BY_HUMAN, _now())
                 elif not wants_verified:
                     annotation.clear_verified()
-                annotation.rejected = bool(box.get("rejected", False))
-                if box.get("proposed_name") is not None:
-                    annotation.proposed_name = box["proposed_name"] or None
+                annotation.rejected = box["rejected"]
+                if "proposed_name" in box:
+                    annotation.proposed_name = box["proposed_name"]
                 session.flush()
                 kept.add(annotation.id)
             for annotation_id, annotation in existing.items():
@@ -1009,8 +1140,8 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
 
     @app.post("/api/items/{item_id}/tags")
     async def save_tags(item_id: int, request: Request):
-        body = await request.json()
-        values = [v.strip() for v in body.get("tags", []) if v.strip()]
+        body = await params.json_object(request)
+        values = params.as_names(body.get("tags", []), "tags")
         with Session() as session:
             if session.get(LibraryItem, item_id) is None:
                 raise HTTPException(404)
@@ -1075,51 +1206,104 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         Writes back to the live config object AND to the YAML file so the
         change survives a restart — class definition is meant to be an
         operator action, not an edit-the-file-and-redeploy action (NFR3).
+
+        Which is exactly why the whole body is parsed before any of it is
+        applied (CLD-61). This mutates the config the serving process is
+        running on and then writes it to disk; a body that fails on its
+        fourth field after three have landed leaves a half-edited site
+        config in memory *and* in YAML, with nothing to say so.
         """
-        body = await request.json()
-        classes = [
-            c.strip()
-            for c in body.get("classes", [])
-            if isinstance(c, str) and c.strip()
-        ]
-        if classes:
-            config.detection.classes = classes
-        if "confidence" in body:
-            config.detection.confidence = float(body["confidence"])
+        body = await params.json_object(request)
+        params.only_keys(body, DETECTION_FIELDS, "detection setting")
+
+        # -- parse ---------------------------------------------------------
+        classes = None
+        if "classes" in body:
+            classes = params.as_names(body["classes"], "classes")
+            if not classes:
+                raise HTTPException(
+                    400,
+                    "classes must name at least one class to track — a "
+                    "detector with an empty class list finds nothing",
+                )
+        confidence = (
+            params.as_confidence(body["confidence"], "confidence")
+            if "confidence" in body
+            else None
+        )
+        class_confidence = None
         if "class_confidence" in body:
             # Full-replace semantics: the page always posts the complete
             # per-class map; a class matching the global floor is omitted
             # by the UI so it keeps following the global value.
-            config.detection.class_confidence = {
-                str(k): float(v)
-                for k, v in (body["class_confidence"] or {}).items()
-            }
-        for key, values in (body.get("identifiers") or {}).items():
-            ident = config.identity.identifiers.get(key)
-            if ident is None:
-                continue
-            if "threshold" in values:
-                threshold = float(values["threshold"])
-                if not (0.0 <= threshold <= 1.0):
-                    raise HTTPException(
-                        400, f"{key} threshold must be a cosine similarity in 0..1"
-                    )
-                ident.threshold = threshold
-            if "applies_to" in values:
-                ident.applies_to = [v for v in values["applies_to"] if v]
-            if "plate_ocr" in values:
-                ident.plate_ocr = bool(values["plate_ocr"])
-        if "auto_add_classes" in body:
-            config.identity.auto_add_classes = bool(body["auto_add_classes"])
-        if "auto_add_threshold" in body:
-            # The threshold a class with no identifier of its own gets on
-            # first sighting — always the generic scale, since auto-added
-            # identifiers are always generic.
-            auto_threshold = float(body["auto_add_threshold"])
-            if not (0.0 <= auto_threshold <= 1.0):
-                raise HTTPException(
-                    400, "auto_add_threshold must be a cosine similarity in 0..1"
+            raw = params.as_object(
+                body["class_confidence"] or {}, "class_confidence"
+            )
+            class_confidence = {
+                params.as_name(key, "every key of class_confidence"): (
+                    params.as_confidence(value, f"class_confidence[{key}]")
                 )
+                for key, value in raw.items()
+            }
+        identifier_updates: list[tuple[str, dict]] = []
+        for key, values in params.as_object(
+            body.get("identifiers") or {}, "identifiers"
+        ).items():
+            if key not in config.identity.identifiers:
+                # Skipping it silently reported success for a threshold
+                # that was never stored — the operator's next look at the
+                # page showed the old value with no explanation.
+                raise HTTPException(
+                    400,
+                    f"unknown identifier {key!r} — configured identifiers: "
+                    + ", ".join(sorted(config.identity.identifiers)),
+                )
+            settings = params.as_object(values, f"identifiers[{key}]")
+            params.only_keys(
+                settings, IDENTIFIER_FIELDS, f"setting for identifier {key}"
+            )
+            parsed: dict = {}
+            if "threshold" in settings:
+                parsed["threshold"] = params.as_similarity(
+                    settings["threshold"], f"{key} threshold"
+                )
+            if "applies_to" in settings:
+                parsed["applies_to"] = params.as_names(
+                    settings["applies_to"], f"{key} applies_to"
+                )
+            if "plate_ocr" in settings:
+                parsed["plate_ocr"] = params.as_bool(
+                    settings["plate_ocr"], f"{key} plate_ocr"
+                )
+            identifier_updates.append((key, parsed))
+        auto_add = (
+            params.as_bool(body["auto_add_classes"], "auto_add_classes")
+            if "auto_add_classes" in body
+            else None
+        )
+        # The threshold a class with no identifier of its own gets on
+        # first sighting — always the generic scale, since auto-added
+        # identifiers are always generic.
+        auto_threshold = (
+            params.as_similarity(body["auto_add_threshold"], "auto_add_threshold")
+            if "auto_add_threshold" in body
+            else None
+        )
+
+        # -- apply ---------------------------------------------------------
+        if classes is not None:
+            config.detection.classes = classes
+        if confidence is not None:
+            config.detection.confidence = confidence
+        if class_confidence is not None:
+            config.detection.class_confidence = class_confidence
+        for key, parsed in identifier_updates:
+            ident = config.identity.identifiers[key]
+            for field, value in parsed.items():
+                setattr(ident, field, value)
+        if auto_add is not None:
+            config.identity.auto_add_classes = auto_add
+        if auto_threshold is not None:
             config.identity.auto_add_threshold = auto_threshold
         written = _persist_config(config)
         return JSONResponse({"ok": True, "written_to": written})
@@ -1148,25 +1332,20 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         """Rewrite the site-wide event rules (significance + stitching).
 
         Same contract as /classes/detection: live config object + YAML
-        write-back. Applies to ingest on restart — `siteloom serve` and
-        `siteloom run` are separate processes. Per-camera overrides stay
-        YAML-only (CameraConfig.events).
+        write-back, everything parsed before anything is applied.
+        Applies to ingest on restart — `siteloom serve` and `siteloom run`
+        are separate processes. Per-camera overrides stay YAML-only
+        (CameraConfig.events).
         """
-        body = await request.json()
+        body = await params.json_object(request)
+        params.only_keys(body, EVENT_RULES, "event rule")
+        updates = {
+            field: EVENT_RULES[field](value, field)
+            for field, value in body.items()
+        }
         rules = config.events
-        for field, cast in (
-            ("min_detections", int),
-            ("min_duration_s", float),
-            ("min_confidence", float),
-            ("stitch_gap_s", float),
-            ("stitch_min_iou", float),
-            ("identify_min_confidence", float),
-            ("identify_min_crop_px", int),
-        ):
-            if field in body:
-                setattr(rules, field, cast(body[field]))
-        if "identify_only_significant" in body:
-            rules.identify_only_significant = bool(body["identify_only_significant"])
+        for field, value in updates.items():
+            setattr(rules, field, value)
         written = _persist_config(config)
         return JSONResponse({"ok": True, "written_to": written})
 
@@ -1180,6 +1359,11 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         slug = name.strip().lower().replace(" ", "-")
         if not slug:
             raise HTTPException(400, "name required")
+        # A custom class votes by cosine similarity like everything else
+        # (identity/classes.py), so its cutoff is on the same 0..1 scale
+        # — a class saved at 8.5 can never match, and says nothing about
+        # why.
+        threshold = params.as_similarity(threshold, "threshold")
         with Session() as session:
             existing = session.scalar(select(CustomClass).filter_by(name=slug))
             if existing is None:
@@ -1850,22 +2034,23 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
     # are only loaded once someone actually confirms a proposal.
     _enroll_state: dict = {}
 
-    def _enroll_resources():
+    def _enroll_resources(action: str = "confirmation"):
         if not _enroll_state:
-            from siteloom.identity import get_shared_store
             from siteloom.identity.embedders import FaceEmbedder
+            from siteloom.web.identity_ops import shared_store
 
             # Shared process-wide client — a second one on the same path
-            # would deadlock against it (identity/vectors.py).
-            _enroll_state["vectors"] = get_shared_store(
-                config.identity.vector_db_path
-            )
+            # would deadlock against it (identity/vectors.py) — and an
+            # actionable 503 when another *process* holds it, which is
+            # the ordinary state while ingest or an index run is going
+            # (CLD-62).
+            _enroll_state["vectors"] = shared_store(config, action)
             _enroll_state["embedder"] = FaceEmbedder(
                 projection_path=config.identity.face_projection_path or None
             )
         return _enroll_state["vectors"], _enroll_state["embedder"]
 
-    def _class_resources():
+    def _class_resources(action: str = "class assignment"):
         """Vector store + the *generic* embedder, for custom classes.
 
         Not the face embedder `_enroll_resources` hands out: custom
@@ -1877,12 +2062,10 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         nothing to show for it but worse answers.
         """
         if "class_embedder" not in _enroll_state:
-            from siteloom.identity import get_shared_store
             from siteloom.identity.embedders import GenericEmbedder
+            from siteloom.web.identity_ops import shared_store
 
-            _enroll_state["vectors"] = get_shared_store(
-                config.identity.vector_db_path
-            )
+            _enroll_state["vectors"] = shared_store(config, action)
             _enroll_state["class_embedder"] = GenericEmbedder(
                 device=config.detection.device
             )
@@ -1896,13 +2079,31 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         store, so a person verified here is recognized on live cameras,
         by the Frigate consumer, and via the recognition API immediately
         — a label without vectors is a name the system cannot see.
+
+        That coupling is why the two refusals here matter more than they
+        would on a plain form. The batch is read whole before a row is
+        touched (CLD-61): a decision the endpoint cannot parse takes the
+        400 with it rather than leaving the first half of a review
+        applied. And the vector store the enrolment needs is the embedded
+        one, which allows a single client per path per machine — a
+        backfill, an index run or live ingest holding it is the *ordinary*
+        state, not an exotic failure, so it answers with the same 503
+        merge and split give (CLD-62, web/identity_ops.py). Nothing is
+        committed until the end of the batch, so either refusal leaves
+        the database exactly as it was.
         """
         from siteloom.identity.enroll import enroll_annotation, identity_for_label
 
-        body = await request.json()
-        decisions = body.get("decisions", [])
+        body = await params.json_object(request)
+        params.only_keys(body, ("decisions",), "review field")
+        decisions = [
+            _parse_decision(decision, index)
+            for index, decision in enumerate(
+                params.as_list(body.get("decisions", []), "decisions")
+            )
+        ]
         confirmed = rejected = enrolled = 0
-        classified = examples = skipped = 0
+        classified = examples = skipped = missing = 0
         touched_classes: set[str] = set()
         max_vectors = 20
         face_cfg = config.identity.identifiers.get("face")
@@ -1943,13 +2144,23 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 c.name for c in session.scalars(select(CustomClass)).all()
             }
             for decision in decisions:
-                annotation = session.get(Annotation, int(decision["id"]))
+                annotation = session.get(Annotation, decision["id"])
                 if annotation is None:
+                    # A crop deleted or re-indexed since the grid was
+                    # rendered. Counted rather than dropped: a caller
+                    # told "confirmed: 4" of six must be able to see the
+                    # other two went nowhere.
+                    missing += 1
                     continue
-                action = decision.get("action")
+                action = decision["action"]
                 if action == "confirm":
-                    name = (decision.get("name") or annotation.proposed_name or "").strip()
+                    # An empty name means "use the crop's own proposal",
+                    # which is what the grid's confirm button sends when
+                    # nothing is typed. With neither there is nothing to
+                    # confirm the crop *as*.
+                    name = decision["name"] or annotation.proposed_name or ""
                     if not name:
+                        skipped += 1
                         continue
                     annotation.proposed_name = name
                     # Re-stamped unconditionally: a row the importer had
@@ -1961,7 +2172,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     annotation.enrolled = False  # (re)enroll under this name
                     annotation.identity_id = identity_for_label(session, name).id
                     confirmed += 1
-                    vectors, embedder = _enroll_resources()
+                    vectors, embedder = _enroll_resources("confirmation")
                     if enroll_annotation(
                         session, annotation, vectors, embedder, max_vectors
                     ):
@@ -1973,7 +2184,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                     # an identity's gallery, and identity_id is left exactly
                     # as it was — a crop can be both "Alice" and
                     # "delivery-van" without either claim moving the other.
-                    name = (decision.get("custom_class") or "").strip()
+                    name = decision["custom_class"] or ""
                     if not name or name not in known_classes:
                         skipped += 1
                         continue
@@ -2037,8 +2248,34 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 # caller is never told N examples landed when fewer did.
                 "examples": examples,
                 "skipped": skipped,
+                # Decisions whose annotation no longer exists — a deleted
+                # or re-indexed crop, not a malformed request.
+                "missing": missing,
             }
         )
+
+
+def _parse_decision(decision: object, index: int) -> dict:
+    """One review decision, read before any of the batch is applied.
+
+    An action nobody implements used to fall through every branch and be
+    reported as a success with all counters at zero — the same silence
+    `split_identity` refuses for an unknown annotation id.
+    """
+    where = f"decisions[{index}]"
+    fields = params.as_object(decision, where)
+    if "id" not in fields:
+        raise HTTPException(
+            400, f"{where} must name the annotation id it decides"
+        )
+    return {
+        "id": params.as_row_id(fields["id"], f"{where}.id"),
+        "action": params.one_of(
+            fields.get("action"), f"{where}.action", REVIEW_ACTIONS
+        ),
+        "name": _optional_text(fields, "name", where),
+        "custom_class": _optional_text(fields, "custom_class", where),
+    }
 
 
 def _persist_config(config) -> str | None:
