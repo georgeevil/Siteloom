@@ -37,6 +37,7 @@ from siteloom.store import (
     EventIdentity,
     Identity,
     NoiseEvent,
+    User,
     WebSession,
     get_session,
     init_db,
@@ -276,8 +277,42 @@ def _safe_next(next_url: str, event_id: int) -> str:
     return auth.safe_next(next_url, f"/events/{event_id}")
 
 
-def _rail_context(session, event_id: int) -> dict | None:
-    """Everything the triage detail rail shows for one event."""
+def _viewer(request: Request) -> User | None:
+    """The signed-in operator, or None for the open single-operator mode.
+
+    The middleware sets this on every request, so None here means there
+    are no User rows at all (auth is off) rather than "not signed in" —
+    when auth is on, an anonymous request never reaches a handler. The
+    getattr is for a handler exercised without the middleware; it answers
+    open mode, which is what a console with no accounts is.
+    """
+    return getattr(request.state, "user", None)
+
+
+def _may_list_identities(user: User | None) -> bool:
+    """Whether this viewer may be handed the list of everyone (CLD-103).
+
+    The candidate picker is `/identities` in a dropdown, so it is held to
+    that screen's own floor — asked of `required_role` rather than
+    written out as a second literal rung here, which is how the two would
+    drift the day the floor moves. Below it (the `restricted` rung, NFR5)
+    there is no list to hand over: reassigning is `edit` work such a
+    viewer cannot do anyway, so the names are not theirs to receive.
+    """
+    return user is None or auth.has_role(
+        user, auth.required_role("GET", "/identities")
+    )
+
+
+def _rail_context(session, event_id: int, user: User | None) -> dict | None:
+    """Everything the triage detail rail shows for one event.
+
+    `user` is the viewer, and decides only whether the identity picker
+    gets its options (`_identity_candidates`). The event's *own* matched
+    identities are shown to everyone who may read the event — withholding
+    those would leave nothing to judge; the leak this closes was the list
+    of everybody else.
+    """
     # Eager-load what the rail template touches: on the index page the
     # template renders AFTER this session closes, so a lazy load there is
     # a DetachedInstanceError. That bites on search deep-links
@@ -329,13 +364,13 @@ def _rail_context(session, event_id: int) -> dict | None:
         "identity_links": links,
         "misses": misses,
         "unlinked": unlinked,
-        "candidates": _identity_candidates(session),
+        "candidates": _identity_candidates(session, user),
         "zones": zones,
         "status": event.review_status,
     }
 
 
-def _identity_candidates(session) -> list[Identity]:
+def _identity_candidates(session, user: User | None) -> list[Identity]:
     """Who this event could be — the picker's options (CLD-36).
 
     Not filtered to one identifier: the operator, not the resolver, is
@@ -343,7 +378,15 @@ def _identity_candidates(session) -> list[Identity]:
     they need to attach the person identity by hand. Labeled identities
     sort first because naming a visit is the common case; the unknown
     buckets stay reachable for merging two sightings of one stranger.
+
+    Below the `/identities` floor the list is not built at all (CLD-103).
+    The gate is here rather than at each call site because this is the
+    one query that reads the directory: a screen added tomorrow that
+    wants a picker gets the floor with it, and a template `{% if %}`
+    would have shipped every name to the browser regardless.
     """
+    if not _may_list_identities(user):
+        return []
     return list(
         session.scalars(
             select(Identity)
@@ -363,6 +406,12 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     # The sidebar is data (web/nav.py) and reached as a Jinja global, so a
     # screen cannot render chrome-less by forgetting to pass it.
     templates.env.globals["nav_items"] = nav.items
+    # The sidebar names the rung the way the rest of the console does —
+    # "Writer", not the stored `edit` (CLD-103). A global rather than
+    # per-screen context for the same reason nav_items is one: base.html
+    # renders on every page and must not depend on each of them
+    # remembering to pass it.
+    templates.env.globals["role_label"] = auth.role_label
     # Vendored fonts and anything else the console needs to render without
     # reaching the internet (CLD-86). Mounted rather than routed: this
     # serves a fixed directory shipped with the package, not user paths,
@@ -610,7 +659,11 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             )
             # The rail is server-rendered so a deep link works without JS;
             # the fragment endpoint below swaps it in place when JS is on.
-            rail = _rail_context(session, selected) if selected else None
+            rail = (
+                _rail_context(session, selected, _viewer(request))
+                if selected
+                else None
+            )
 
         state = {
             "camera": camera,
@@ -782,7 +835,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def event_rail(request: Request, event_id: int, back: str = "/"):
         """The triage detail rail on its own, for in-place swapping."""
         with Session() as session:
-            rail = _rail_context(session, event_id)
+            rail = _rail_context(session, event_id, _viewer(request))
             if rail is None:
                 raise HTTPException(404)
             return templates.TemplateResponse(
@@ -826,7 +879,9 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             )
             identity_links = [r for r in rows if r.unlinked_at is None]
             unlinked = [r for r in rows if r.unlinked_at is not None]
-            candidates = _identity_candidates(session)
+            # The full event page renders the same picker as the rail, so
+            # it takes the same floor (CLD-103) — one leak with two URLs.
+            candidates = _identity_candidates(session, _viewer(request))
         return templates.TemplateResponse(
             request,
             "event.html",

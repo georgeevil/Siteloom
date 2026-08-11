@@ -3,7 +3,15 @@
 {% set e = rail.event %}
 {# The picker's options, shared by attach and reassign (CLD-36). Labeled
    identities come first from the query; the unknown buckets stay listed
-   because merging two sightings of one stranger is a real correction. #}
+   because merging two sightings of one stranger is a real correction.
+
+   The list arrives empty for a viewer below the `/identities` floor —
+   the decision is `_identity_candidates`', on the server, because a
+   `{% if %}` here would render nothing while still shipping every name
+   in the payload (CLD-103). The controls themselves stay: attaching or
+   reassigning to "+ new identity" needs no directory, and every other
+   edit control in this rail renders for a reader who will be refused at
+   the POST too. #}
 {% macro identity_options(candidates, exclude_id=None) %}
   {% for i in candidates if i.id != exclude_id %}
     <option value="{{ i.id }}">{{ i.display_name }}{% if i.plate %} · {{ i.plate }}{% endif %}</option>

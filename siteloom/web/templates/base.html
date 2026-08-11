@@ -221,6 +221,11 @@
 </head>
 <body>
   {% set path = request.url.path if request else "/" %}
+  {# The viewer, resolved once for the sidebar below: the nav is filtered
+     by their floor and the footer names them. `or none` normalizes both
+     "no request" and "middleware never ran" to open mode, which is a
+     real deployment (no User rows) rather than an error case. #}
+  {% set user = (request.state.user if request else none) or none %}
   <aside class="sl-side">
     <div class="sl-brand">
       <div class="sl-logo" aria-hidden="true">
@@ -236,8 +241,10 @@
       <span class="sl-site-name">{{ site_name }}</span>
     </button>
     <nav class="sl-nav">
-      {# Declared in web/nav.py, next to the routes each entry links to. #}
-      {% for item in nav_items() %}
+      {# Declared in web/nav.py, next to the routes each entry links to,
+         and filtered there to the screens this viewer may open — a link
+         that answers 403 describes a console they do not have. #}
+      {% for item in nav_items(user) %}
       <a class="sl-nav-item{% if item.active_for(path) %} active{% endif %}"
          href="{{ item.href }}">
         <span class="sl-code">{{ item.code }}</span>
@@ -246,12 +253,13 @@
       {% endfor %}
     </nav>
     <div class="sl-side-footer">
-      {% set user = request.state.user if request else none %}
       {% if user %}
       <div class="sl-avatar">{{ user.username[:2] | upper }}</div>
       <div style="min-width:0">
         <div class="sl-op-name">{{ user.username }}</div>
-        <div class="sl-op-role">{{ user.role }}</div>
+        {# The operator-facing name for the rung (auth.ROLE_LABELS), not
+           the stored `edit` — the console says Writer everywhere else. #}
+        <div class="sl-op-role">{{ role_label(user.role) }}</div>
       </div>
       <form method="post" action="/logout" style="margin-left:auto">
         <button type="submit" class="sl-logout" title="Sign out">&#8594;&#93;</button>

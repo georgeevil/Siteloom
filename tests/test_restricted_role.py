@@ -26,21 +26,32 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from siteloom.config import CameraConfig, SiteConfig, StorageConfig
 from siteloom.store import (
     Camera,
     Event,
+    EventIdentity,
+    Identity,
     User,
     get_session,
     init_db,
     make_engine,
 )
-from siteloom.web import auth
+from siteloom.web import auth, nav
 from siteloom.web.app import create_app
 from siteloom.web.auth import ROLES, has_role, is_gallery_media, required_role
 
 TS = datetime(2026, 8, 6, 9, 0, 0)
+
+#: The identity this event matched — the rail must keep showing it, or
+#: there is nothing on the screen to judge.
+ON_THE_EVENT = "Bo Truck"
+#: Someone else entirely, who has never been on this camera. The picker
+#: used to list them on every event detail (CLD-103).
+SOMEONE_ELSE = "Aleks Corolla"
+ELSEWHERE_PLATE = "XYZ-9021"
 
 
 @pytest.fixture
@@ -75,6 +86,39 @@ def env(tmp_path):
                 last_seen=TS,
                 detection_count=3,
                 best_crop_path=str(event_crop),
+            )
+        )
+        # Two labelled identities: one this event matched, one that has
+        # nothing to do with it. The picker is the only thing on an event
+        # screen that ever mentioned the second.
+        s.add(
+            Identity(
+                identifier_key="vehicle",
+                class_name="truck",
+                label=ON_THE_EVENT,
+                first_seen=TS,
+                last_seen=TS,
+            )
+        )
+        s.add(
+            Identity(
+                identifier_key="vehicle",
+                class_name="car",
+                label=SOMEONE_ELSE,
+                plate=ELSEWHERE_PLATE,
+                first_seen=TS,
+                last_seen=TS,
+            )
+        )
+        s.flush()
+        matched = s.scalar(select(Identity).filter_by(label=ON_THE_EVENT))
+        s.add(
+            EventIdentity(
+                event_id=1,
+                identity_id=matched.id,
+                identifier_key="vehicle",
+                similarity=0.91,
+                matched_by="visual",
             )
         )
         s.commit()
@@ -253,6 +297,122 @@ def test_the_gallery_segment_is_matched_case_insensitively():
     # "library" has to be a whole segment, not a substring of one: a
     # camera called "library-yard" is not the face gallery.
     assert not is_gallery_media("/media/library-yard/2026-08-06/a.jpg")
+
+
+# -- the identity picker: the directory by another name (CLD-103) ----------
+#
+# The screens holding people are closed to `restricted`; the triage rail
+# is deliberately open, and it carried the same list as a dropdown. These
+# assert on the response *body*, not on the control: hiding the <select>
+# in the template would leave every name in the payload, which is the
+# same leak with a stylesheet in front of it.
+
+#: Every URL that renders the picker. The full page and the fragment are
+#: two spellings of one screen, and the index renders the rail inline for
+#: a deep link, so a fix in one of the three is a fix in none.
+PICKER_URLS = ("/events/1", "/events/1/rail", "/?selected=1")
+
+
+def test_a_restricted_operator_is_not_handed_every_identity(env):
+    client = signed_in(env, "nina", "restricted")
+    for url in PICKER_URLS:
+        body = client.get(url).text
+        assert SOMEONE_ELSE not in body, url
+        assert ELSEWHERE_PLATE not in body, url
+
+
+def test_the_events_own_identity_is_still_shown(env):
+    """The rung withholds the list of everyone else, not the event.
+
+    A triage screen that will not say who the system thinks this was
+    cannot be triaged, so the claim in front of the operator stays — with
+    its verdict buttons, which is the judgement `restricted` exists for.
+    """
+    client = signed_in(env, "nina", "restricted")
+    for url in PICKER_URLS:
+        assert ON_THE_EVENT in client.get(url).text, url
+
+
+def test_the_picker_works_normally_at_view_and_above(env):
+    """The floor is a floor: closing it below `view` must cost the rungs
+    above it nothing, on all three URLs."""
+    for username, role in (("vera", "view"), ("ed", "edit"), ("ada", "admin")):
+        client = signed_in(env, username, role)
+        for url in PICKER_URLS:
+            body = client.get(url).text
+            assert SOMEONE_ELSE in body, (role, url)
+            assert ON_THE_EVENT in body, (role, url)
+
+
+def test_the_pickers_floor_is_the_identities_floor(env):
+    """Not a second literal rung sitting next to the first.
+
+    The candidate list *is* `/identities` in a dropdown, so it is held to
+    that screen's own floor — asked of `required_role`, so moving the
+    floor moves both or neither. Walked as a matrix for the same reason
+    the ladder above is: this is a claim about every rung.
+    """
+    floor = required_role("GET", "/identities")
+    for role in ROLES:
+        client = signed_in(env, f"op-{role}", role)
+        allowed = has_role(
+            User(username="x", password_hash="x", role=role, created_at=TS), floor
+        )
+        assert (SOMEONE_ELSE in client.get("/events/1/rail").text) is allowed, role
+
+
+def test_open_mode_still_offers_the_whole_picker(env):
+    """No User rows means no rungs; correcting a claim must not start
+    needing an account to be possible."""
+    body = TestClient(env["app"]).get("/events/1/rail").text
+    assert SOMEONE_ELSE in body and ON_THE_EVENT in body
+
+
+# -- the sidebar -----------------------------------------------------------
+
+
+def test_the_sidebar_lists_only_what_the_viewer_may_open(env):
+    """An entry that answers 403 describes a console the operator does
+    not have. The filter is `required_role` — the same function the
+    middleware refuses with — so the two cannot disagree."""
+    client = signed_in(env, "nina", "restricted")
+    body = client.get("/").text
+    for label in ("Identities", "Media library", "Models", "Operators"):
+        assert f">{label}</span>" not in body, label
+    # What it does keep: the queue it exists to work.
+    for label in ("Events", "Live view", "Noise"):
+        assert f">{label}</span>" in body, label
+
+
+def test_every_entry_a_role_is_shown_actually_opens(env):
+    """tests/test_nav.py holds this for the whole sidebar in open mode;
+    filtering it per role means holding it once per role, or the fix
+    trades a 403 on click for a 404 on click."""
+    for username, role in (
+        ("nina", "restricted"),
+        ("vera", "view"),
+        ("ed", "edit"),
+        ("ada", "admin"),
+    ):
+        client = signed_in(env, username, role)
+        user = User(username=username, password_hash="x", role=role, created_at=TS)
+        shown = nav.items(user)
+        assert shown, role
+        for item in shown:
+            assert client.get(item.href).status_code == 200, (role, item.href)
+
+
+def test_an_admin_still_sees_the_whole_sidebar(env):
+    admin = User(username="ada", password_hash="x", role="admin", created_at=TS)
+    assert nav.items(admin) == nav.items()
+
+
+def test_the_sidebar_names_the_rung_the_way_the_console_does(env):
+    """`edit` is a stored value; "Writer" is what the operator is called
+    everywhere else (auth.ROLE_LABELS)."""
+    body = signed_in(env, "ed", "edit").get("/").text
+    assert '<div class="sl-op-role">Writer</div>' in body
+    assert '<div class="sl-op-role">edit</div>' not in body
 
 
 # -- open mode -------------------------------------------------------------
