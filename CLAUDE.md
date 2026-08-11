@@ -95,9 +95,9 @@ Any operation that can run for minutes must go through `ProgressReporter` — it
 ### Auth & audit (`siteloom/web/auth.py`, `siteloom users`)
 
 - **Auth turns on when the first `User` row exists** — an empty table is the original open single-operator mode, and everything must keep working in it (tests run mostly in open mode). Never make a feature require login to function.
-- Roles are a strict ladder, view < edit < admin — "look / judge / reconfigure". Enforcement and auditing live in **one middleware** in `create_app`, not per-route decorators, so a new POST route is gated and audited by default. `/api/v1/` keeps its own x-api-key scheme (CompreFace clients) and `/healthz`,`/readyz`,`/login` stay public — a probe that needs a cookie gets the service killed.
+- Roles are a strict ladder, restricted < view < edit < admin — "look at the queue / look at everything / judge / reconfigure"; `restricted` reaches triage but not identities, the face gallery or the training corpus (NFR5), and anything that hands it a list of who the system knows — the rail's identity picker, the sidebar — is filtered by the same `required_role` floor rather than by a second hardcoded list. Enforcement and auditing live in **one middleware** in `create_app`, not per-route decorators, so a new POST route is gated and audited by default. `/api/v1/` keeps its own x-api-key scheme (CompreFace clients) and `/healthz`,`/readyz`,`/login` stay public — a probe that needs a cookie gets the service killed.
 - The audit row's `username` is denormalized on purpose: it must still say who acted after the account is renamed or deleted. Denied requests are not audited — nothing happened.
-- User management is CLI-only (`siteloom users add|list|passwd|disable`) by design: there is no web path to create the first account.
+- User *creation* is CLI-only (`siteloom users add`) by design: there is no web path to the first account. Managing accounts afterwards — role, disable, revoke sessions — is on `/users` too (passwords stay `siteloom users passwd`), and both reading and writing that screen are admin.
 
 ### Accuracy readout (`siteloom/stats.py`, `/stats`)
 

@@ -15,11 +15,20 @@ judge, then operate.
 `register()` is called once per app, but tests build many apps in one
 process, so `add()` is idempotent on `href` — re-registering replaces
 rather than duplicates.
+
+`items()` filters the list to what the viewer may actually open (CLD-103).
+The floor is asked of `auth.required_role`, the same function the
+middleware enforces with, so a sidebar entry and its 403 can never
+disagree — a hardcoded list of restricted entries here would be a second
+copy of the rule, wrong from the first time a prefix moves.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from siteloom.store import User
+from siteloom.web import auth
 
 
 @dataclass(frozen=True)
@@ -77,7 +86,23 @@ def add(href: str, label: str, code: str, after: str | None = None) -> None:
     NAV.append(item)
 
 
-def items() -> list[NavItem]:
-    """Exposed to Jinja as a global so base.html needs no per-route
-    context — a screen that forgot to pass it would render a bare page."""
-    return list(NAV)
+def items(user: User | None = None) -> list[NavItem]:
+    """The sidebar as this viewer may use it.
+
+    Exposed to Jinja as a global so base.html needs no per-route context
+    — a screen that forgot to pass it would render a bare page.
+
+    `user` is None in the open single-operator mode (no User rows), where
+    nothing is gated and the whole list stands. Otherwise each entry is
+    kept only if its href is readable at the viewer's rung, so a
+    `restricted` operator is not offered Identities, Media library and
+    Models and then refused at the door: an entry that 403s is a console
+    describing a system the operator cannot see.
+
+    Filtering, never rewriting: an entry whose floor this viewer clears
+    renders exactly as it does for everyone else, so `active_for` and the
+    route it points at stay the list's own business.
+    """
+    if user is None:
+        return list(NAV)
+    return [i for i in NAV if auth.has_role(user, auth.required_role("GET", i.href))]
