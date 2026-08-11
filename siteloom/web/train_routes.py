@@ -58,7 +58,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_, select
 
 from siteloom.store import Annotation, Identity, TrainingRun
-from siteloom.web import nav
+from siteloom.web import nav, params
 
 log = logging.getLogger(__name__)
 
@@ -767,13 +767,22 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
         return RedirectResponse("/train?started=fine-tune", status_code=303)
 
     @app.post("/train/adopt/{run_id}")
-    def adopt_run(run_id: int, apply_threshold: str = Form("1")):
+    def adopt_run(run_id: int, apply_threshold: str = Form("0")):
         """Make a run's projection the live face embedding.
 
         Adoption is explicit and never implied by a run finishing —
         `adoption_state` is the whole gate, and it refuses anything whose
         evaluation could not be scored.
+
+        `apply_threshold` defaults to off because it arrives from a
+        checkbox, and an unchecked checkbox is not submitted at all: with
+        a default of "1" the box could be ticked but never unticked, so
+        the one choice this form offers was decided for the operator
+        either way.
         """
+        apply_threshold = params.one_of(
+            apply_threshold, "apply_threshold", ("0", "1")
+        )
         with Session() as session:
             run = session.get(TrainingRun, run_id)
             if run is None:
@@ -784,7 +793,6 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
             artifact = run.artifact_path
             metrics = json.loads(run.metrics or "{}")
 
-        config.identity.face_projection_path = artifact
         tuned = None
         after = metrics.get("after") or {}
         ident = config.identity.identifiers.get("face")
@@ -792,7 +800,23 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
             # A projection reshapes the similarity distribution, so the
             # old cutoff is stale the moment it is adopted: judging the
             # new space at the old threshold throws most of the gain away.
-            tuned = round(float(after["best_threshold"]), 3)
+            #
+            # Parsed through the same gate the console uses (CLD-61)
+            # rather than trusted because it came from our own row: a run
+            # whose metrics JSON is damaged would otherwise write a
+            # threshold no face can ever clear into site.yaml, silently,
+            # and the /classes page that refuses 42 would then display it.
+            tuned = round(
+                params.as_similarity(
+                    after["best_threshold"], "this run's best_threshold"
+                ),
+                3,
+            )
+        # Written only once nothing above can refuse: adoption swaps the
+        # live embedding space, and doing that while leaving the cutoff
+        # behind is the one combination that is worse than neither.
+        config.identity.face_projection_path = artifact
+        if tuned is not None:
             ident.threshold = tuned
         _save_config(config)
         # The cached embedder was built in the old space.

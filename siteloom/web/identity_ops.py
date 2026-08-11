@@ -35,6 +35,21 @@ def shared_store(config, action: str):
     identity/vectors.py), so a running backfill/index/frigate job blocks
     every edit here. Saying which job and what to do about it is the
     difference between a bug report and a wait.
+
+    Every operator-facing path that needs the store goes through this
+    one function — identity surgery, confirming a face proposal,
+    assigning a custom class, the enrolment sweep, the import wizard's
+    indexer (CLD-62). They are all the same situation: an operator
+    working the console while ingest runs is the *normal* case, not an
+    exotic failure, and a second spelling of this refusal is a second
+    chance to phrase it as a 500. (`web/recognition_api.py` still opens
+    its own — it answers CompreFace clients, which need an error in
+    their shape rather than this one.)
+
+    Resolve it in the request that needs it, never inside a worker
+    thread: a 503 the operator can read beats a job that starts, dies out
+    of sight, and leaves them watching /jobs for a run that never
+    appears.
     """
     from siteloom.identity import get_shared_store
 
