@@ -131,6 +131,14 @@ RESTRICTED_DENIED_PREFIXES = (
     # `edit` work and out of reach anyway; reading is what needed closing.
     "/incidents",
     "/library",
+    # Every OCR'd plate on the site, with its crop (CLD-85). A plate is a
+    # vehicle's identifier and the screen is a list of them — the same
+    # directory `/identities` and `/search` are closed for, reached by a
+    # third URL. Note the plate crops live under
+    # `media_dir/<camera>/<date>/plates/`, not under `library/`, so the
+    # gallery-media gate does not cover them and this prefix is the only
+    # thing that does.
+    "/plates",
     "/search",
     "/train",
 )
