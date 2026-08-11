@@ -669,7 +669,9 @@ def jobs_cancel(
     the operator does not have to be at the terminal that started it.
 
     The mechanism is `progress.request_cancel`, which the /jobs console
-    also calls: one definition of what a cancelled run means.
+    also calls: one definition of what a cancelled run means — including
+    when it refuses, which it does for any pid it cannot prove still
+    belongs to the run (CLD-57).
     """
     from siteloom.progress import request_cancel
 
@@ -683,9 +685,12 @@ def jobs_cancel(
         if result.reason == "not_running":
             typer.echo(result.detail)
             return
+        # A row with nothing behind it and a row whose pid has been
+        # handed to something else are the same job for the operator:
+        # both are dead, both are reapable, neither may be signalled.
         remedy = (
             " — `siteloom jobs reap` clears it"
-            if result.reason == "no_process"
+            if result.reason in ("no_process", "pid_reused")
             else ""
         )
         typer.echo(result.detail + remedy, err=True)

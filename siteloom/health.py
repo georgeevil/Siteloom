@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,14 +69,55 @@ class Report:
         }
 
 
+def hostname() -> str:
+    return socket.gethostname()
+
+
+# -- process identity (CLD-57) ----------------------------------------------
+#
+# A pid alone does not name a process: the OS recycles pids, so the pid an
+# `OperationRun` recorded can be worn by something entirely unrelated by
+# the time anyone acts on the row. `jobs cancel` sends a signal to that
+# pid, which on a single-operator box quite plausibly means the
+# operator's own shell. What distinguishes this process from a future one
+# wearing its pid is when it started, which the OS knows and never
+# reuses within a pid's lifetime.
+#
+# Both `OperationRun.is_stale` and `progress.request_cancel` ask the same
+# question — "is that still the process that wrote this row?" — and both
+# get it from `process_verdict`, so they cannot come to disagree.
+
+#: `pid` is the process that recorded the token.
+MATCH = "match"
+#: The pid now belongs to something else: recycled. Provably not the run.
+MISMATCH = "mismatch"
+#: No such process (or never a valid pid).
+NO_PROCESS = "no_process"
+#: The process is there, but the row never recorded an identity — every
+#: row written before this column existed, and any row written where the
+#: platform could not answer. Nothing can be proven either way.
+UNRECORDED = "unrecorded"
+#: This host cannot report process start times, so no live pid can be
+#: matched against anything. Also unprovable, but for a reason the
+#: operator can act on differently.
+UNREADABLE = "unreadable"
+
+#: The verdicts that mean "provably nothing is working on this any more".
+#: The other two are *unprovable*, not dead: a run that cannot show its
+#: identity is judged by its heartbeat instead, never reaped on suspicion.
+PROVEN_GONE = (NO_PROCESS, MISMATCH)
+
+_PROC = Path("/proc")
+
+
 def process_alive(pid: int) -> bool:
     """Is this pid a live process on this host?
 
     Signal 0 checks for existence without delivering anything. A pid
     owned by another user raises PermissionError — it exists, which is
     the question being asked. Pid reuse can make a dead process look
-    alive; callers therefore treat True as "not proven dead" and keep
-    their timeout as the backstop.
+    alive, so this answers "is *something* there", never "is it the
+    process I mean" — `process_verdict` answers that one.
     """
     if pid <= 0:
         return False
@@ -90,8 +132,90 @@ def process_alive(pid: int) -> bool:
     return True
 
 
-def hostname() -> str:
-    return socket.gethostname()
+def process_identity(pid: int) -> str | None:
+    """A token for the process *instance* wearing `pid` right now.
+
+    Three answers, and the difference between the last two is the whole
+    point of this function:
+
+    * a token — stable for the life of the process, never reused by a
+      later process on the same pid;
+    * ``None`` — there is no such process;
+    * ``""`` — there is a process, but this platform (or these
+      permissions) will not say when it started. Not a token, and must
+      never be compared as one: "" == "" would make every unknown
+      process match every other.
+    """
+    if pid <= 0:
+        return None
+    if (_PROC / "self" / "stat").exists():
+        return _proc_identity(pid)
+    return _ps_identity(pid)
+
+
+def _proc_identity(pid: int) -> str | None:
+    """Linux: field 22 of /proc/<pid>/stat, the start time in clock ticks
+    since boot. Cheap, exact, and no subprocess."""
+    try:
+        raw = (_PROC / str(pid) / "stat").read_text()
+    except OSError:
+        # Gone is the common case. But /proc entries can also be hidden
+        # (hidepid) from a process that can still see the pid at all, and
+        # "hidden" must not be reported as "dead" — that would make a
+        # live run look reapable.
+        return "" if process_alive(pid) else None
+    # comm (field 2) is parenthesised and may itself contain spaces and
+    # ')', so the fields are counted from the *last* ')'.
+    _, _, rest = raw.rpartition(")")
+    fields = rest.split()
+    if len(fields) < 20:  # rest starts at field 3, so field 22 is index 19
+        return ""
+    return f"start:{fields[19]}"
+
+
+def _ps_identity(pid: int) -> str | None:
+    """macOS/BSD: `ps -o lstart=`, the one start-time source available
+    without adding a dependency (psutil) to read one integer.
+
+    Second granularity, which is ample: recycling a pid inside the same
+    second requires exhausting the whole pid space in that second. It
+    forks, which is affordable because only a row that still claims to be
+    `running` ever asks — `is_stale` returns before this on every other.
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "" if process_alive(pid) else None
+    started = " ".join(proc.stdout.split())
+    if proc.returncode != 0 or not started:
+        return "" if process_alive(pid) else None
+    return f"lstart:{started}"
+
+
+def process_verdict(pid: int, recorded: str) -> str:
+    """Is `pid` still the process that recorded `recorded`?
+
+    Returns one of MATCH / MISMATCH / NO_PROCESS / UNRECORDED /
+    UNREADABLE. Only MATCH means yes; the other four are all reasons not
+    to signal it. In particular an absent token is never treated as a
+    match — "probably fine" is exactly what signals the wrong process.
+    """
+    if pid <= 0:
+        return NO_PROCESS
+    current = process_identity(pid)
+    if current is None:
+        return NO_PROCESS
+    if not current:
+        return UNREADABLE
+    if not recorded:
+        return UNRECORDED
+    return MATCH if current == recorded else MISMATCH
 
 
 # -- individual checks ------------------------------------------------------

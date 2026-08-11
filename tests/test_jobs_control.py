@@ -34,7 +34,7 @@ from typer.testing import CliRunner
 
 from siteloom import cli, cli_library, progress
 from siteloom.config import CameraConfig, SiteConfig, StorageConfig
-from siteloom.health import hostname
+from siteloom.health import hostname, process_identity
 from siteloom.progress import (
     REAP_MESSAGE,
     CancelResult,
@@ -105,10 +105,16 @@ def dead_run(Session, **kwargs) -> int:
 
 
 def live_run(Session, **kwargs) -> int:
-    """A row this very process is behind, so `is_stale` says False."""
+    """A row this very process is behind, so `is_stale` says False.
+
+    It records the process identity a reporter would have written, which
+    is what makes the pid on it mean *this* process rather than whatever
+    wears that number next (CLD-57).
+    """
     kwargs.setdefault("pid", os.getpid())
     kwargs.setdefault("host", hostname())
     kwargs.setdefault("updated_at", _now())
+    kwargs.setdefault("process_start", process_identity(os.getpid()) or "")
     return add_run(Session, **kwargs)
 
 
