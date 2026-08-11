@@ -15,6 +15,12 @@ Design (CLD auth milestone):
 * Enforcement lives in one middleware, not per-route decorators, so a
   newly added route is secured (and audited) by default rather than by
   remembering.
+* A floor refuses a whole screen, which is the wrong instrument for a
+  screen `restricted` must keep: the triage queue has to stay workable
+  while it stops printing who everyone is. That second mechanism —
+  substitution rather than refusal — is `web/redaction.py`, and it takes
+  its floor from `required_role("GET", "/identities")` here rather than
+  spelling a rung of its own (CLD-111).
 * The recognition API (/api/v1/…) keeps its own x-api-key scheme —
   machine clients, per CompreFace convention — and is exempt here.
 * Sign-in is slowed by address, never locked by username (LoginThrottle),
@@ -122,6 +128,15 @@ ADMIN_READ_PREFIXES = (
 #: floor cosmetic (see the module docstring of web/users_routes.py for
 #: what that costs).
 RESTRICTED_DENIED_PREFIXES = (
+    # The library's own read API, and therefore the training corpus by
+    # another URL: `/api/items/{id}/annotations` hands back every box on
+    # an item with its `proposed_name` — the Takeout importer's guess at
+    # who a face is (CLD-111). `/library` was on this list from the
+    # start; the JSON behind it was not, because it does not begin with
+    # `/library`. Nothing here can be substituted usefully: an annotation
+    # editor without names is an editor of nothing, and `restricted` has
+    # no business in one.
+    "/api/items",
     "/classes",
     "/identities",
     # An incident is built from events a restricted operator may read, but

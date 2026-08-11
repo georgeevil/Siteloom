@@ -29,7 +29,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.web import auth, identity_ops, nav, paging
+from siteloom.web import auth, identity_ops, nav, paging, redaction
 from siteloom.store import (
     Camera,
     Detection,
@@ -289,21 +289,6 @@ def _viewer(request: Request) -> User | None:
     return getattr(request.state, "user", None)
 
 
-def _may_list_identities(user: User | None) -> bool:
-    """Whether this viewer may be handed the list of everyone (CLD-103).
-
-    The candidate picker is `/identities` in a dropdown, so it is held to
-    that screen's own floor — asked of `required_role` rather than
-    written out as a second literal rung here, which is how the two would
-    drift the day the floor moves. Below it (the `restricted` rung, NFR5)
-    there is no list to hand over: reassigning is `edit` work such a
-    viewer cannot do anyway, so the names are not theirs to receive.
-    """
-    return user is None or auth.has_role(
-        user, auth.required_role("GET", "/identities")
-    )
-
-
 def _rail_context(session, event_id: int, user: User | None) -> dict | None:
     """Everything the triage detail rail shows for one event.
 
@@ -384,8 +369,12 @@ def _identity_candidates(session, user: User | None) -> list[Identity]:
     one query that reads the directory: a screen added tomorrow that
     wants a picker gets the floor with it, and a template `{% if %}`
     would have shipped every name to the browser regardless.
+
+    `redaction.may_name` is that floor, and the same question the name of
+    a *matched* identity is put through (CLD-111) — "may this viewer be
+    told who someone is" is one decision, not one per surface.
     """
-    if not _may_list_identities(user):
+    if not redaction.may_name(user):
         return []
     return list(
         session.scalars(
@@ -412,6 +401,12 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     # renders on every page and must not depend on each of them
     # remembering to pass it.
     templates.env.globals["role_label"] = auth.role_label
+    # What this viewer may be told about who someone is (CLD-111). Bound
+    # as globals for the same reason nav_items is: these are called from
+    # templates owned by four modules, and they resolve the viewer from
+    # the request themselves so no screen can render a name by forgetting
+    # to ask.
+    redaction.install(templates)
     # Vendored fonts and anything else the console needs to render without
     # reaching the internet (CLD-86). Mounted rather than routed: this
     # serves a fixed directory shipped with the package, not user paths,

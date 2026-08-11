@@ -14,7 +14,7 @@
    the POST too. #}
 {% macro identity_options(candidates, exclude_id=None) %}
   {% for i in candidates if i.id != exclude_id %}
-    <option value="{{ i.id }}">{{ i.display_name }}{% if i.plate %} · {{ i.plate }}{% endif %}</option>
+    <option value="{{ i.id }}">{{ identity_name(i) }}{% if identity_plate(i) %} · {{ identity_plate(i) }}{% endif %}</option>
   {% endfor %}
 {% endmacro %}
 <div class="rail-inner">
@@ -63,12 +63,22 @@
           <div class="ph sq"></div>
         {% endif %}
         <div class="id-body">
-          <div class="id-name{% if not link.identity.label %} unmatched{% endif %}">
-            {{ link.identity.display_name }}
+          {# Both the name and the plate go through the viewer's floor
+             (CLD-111): "Known vehicle · ABC123" identifies a household
+             as surely as a name does. The claim itself, its identifier
+             and its similarity stay — that is what is being judged.
+
+             The "this one has no name yet" styling asks the same gate:
+             below the floor both rows read `Known vehicle`, and styling
+             one of them differently would say which of the two the
+             system can name — a smaller fact than a name, and still not
+             this rung's. #}
+          <div class="id-name{% if may_name() and not link.identity.label %} unmatched{% endif %}">
+            {{ identity_name(link.identity) }}
           </div>
           <div class="id-sub mono">
             {{ link.identity.identifier_key }} · sim {{ '%.2f' | format(link.similarity) }}
-            {%- if link.identity.plate %} · {{ link.identity.plate }}{% endif %}
+            {%- if identity_plate(link.identity) %} · {{ identity_plate(link.identity) }}{% endif %}
           </div>
           {# Was this claim right? A verdict judges; the row below edits. #}
           <form class="verdict" method="post"
@@ -115,7 +125,7 @@
 
     {% for link in rail.unlinked %}
       <p class="rail-unlinked">
-        Unlinked from <strong>{{ link.identity.display_name }}</strong>
+        Unlinked from <strong>{{ identity_name(link.identity) }}</strong>
         <span class="mono">{{ link.unlinked_at.strftime('%m-%d %H:%M') if link.unlinked_at }}</span>
       </p>
     {% endfor %}
@@ -184,7 +194,11 @@
     {% if incidents.current %}
       <p class="rail-note">
         Escalated into
-        <a href="/incidents/{{ incidents.current.id }}">{{ incidents.current.title }}</a>
+        {# An incident title is operator-authored free text — a Writer can
+           type anything into one — so below the naming floor it is
+           withheld wholesale rather than filtered (CLD-111). Free text
+           cannot be sanitised, only replaced. #}
+        <a href="/incidents/{{ incidents.current.id }}">{{ free_text(incidents.current.title, "Incident " ~ incidents.current.id) }}</a>
         ({{ incidents.current.status }}).
       </p>
       <form class="id-edit" method="post"
@@ -207,7 +221,7 @@
         <input type="hidden" name="next_url" value="{{ back_url | default('/', true) }}">
         <select name="incident_id" aria-label="Incident">
           {% for row in incidents.recent %}
-            <option value="{{ row.id }}">{{ row.title }} · {{ row.events }} event{{ '' if row.events == 1 else 's' }}</option>
+            <option value="{{ row.id }}">{{ free_text(row.title, "Incident " ~ row.id) }} · {{ row.events }} event{{ '' if row.events == 1 else 's' }}</option>
           {% endfor %}
           <option value="new">+ new incident</option>
         </select>

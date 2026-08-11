@@ -185,7 +185,14 @@
         <div class="bk-sub">arrival
           {{ row.arrival_start.strftime('%m-%d %H:%M') }}–{{ row.arrival_end.strftime('%m-%d %H:%M') }}</div>
       </div>
-      <div class="bk-summary">{{ row.booking.summary or '—' }}</div>
+      {# Airbnb and Booking.com iCal summaries routinely carry the guest's
+         name, which makes this column a dated guest register on a screen
+         `restricted` is deliberately given (CLD-111). Free text cannot be
+         sanitised, so below the naming floor the whole summary is
+         replaced by the row's number; the window, the source and both
+         event counts stay, because those are what tell an operator an
+         arrival was expected. #}
+      <div class="bk-summary">{{ free_text(row.booking.summary, "Booking " ~ row.booking.id) or '—' }}</div>
       <div>
         {# Provenance is the column that decides whether the row can be
            edited, so it is a badge rather than a word: green for what the
@@ -208,7 +215,10 @@
         <summary>edit / delete</summary>
         <form class="bk-form" method="post"
               action="/bookings/{{ row.booking.id }}/edit">
-          <input type="text" name="summary" value="{{ row.booking.summary }}"
+          {# The edit form is unreachable below `edit` — but an input's
+             value is shipped whether or not the POST would be refused,
+             which is the same leak the picker was (CLD-103). #}
+          <input type="text" name="summary" value="{{ free_text(row.booking.summary, 'Booking ' ~ row.booking.id) }}"
                  style="min-width:24ch" required>
           <input type="datetime-local" name="start"
                  value="{{ row.booking.start.strftime('%Y-%m-%dT%H:%M') }}" required>

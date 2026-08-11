@@ -368,8 +368,13 @@
           </div>
         </div>
         <div class="r-cam">{{ e.camera.name if e.camera else e.camera_id }}</div>
+        {# Fifty rows a page, and each one used to print a name — which
+           is the directory /identities was closed to withhold, assembled
+           by scrolling (CLD-111). Below the naming floor the cell says
+           `Known person`; the recognised/unmatched distinction, which is
+           the whole triage signal, is untouched. #}
         <div class="r-id{% if not link %} unmatched{% endif %}">
-          {{ link.identity.display_name if link else 'unmatched' }}
+          {{ identity_name(link.identity) if link else 'unmatched' }}
         </div>
         <div class="r-conf">
           <span class="bar{% if e.best_confidence < 0.75 %} low{% endif %}">

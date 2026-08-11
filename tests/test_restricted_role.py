@@ -45,8 +45,9 @@ from siteloom.web.auth import ROLES, has_role, is_gallery_media, required_role
 
 TS = datetime(2026, 8, 6, 9, 0, 0)
 
-#: The identity this event matched — the rail must keep showing it, or
-#: there is nothing on the screen to judge.
+#: The identity this event matched. The rail keeps showing the *claim* —
+#: without it there is nothing on the screen to judge — but not this
+#: string: below the `view` floor it reads `Known vehicle` (CLD-111).
 ON_THE_EVENT = "Bo Truck"
 #: Someone else entirely, who has never been on this camera. The picker
 #: used to list them on every event detail (CLD-103).
@@ -321,16 +322,25 @@ def test_a_restricted_operator_is_not_handed_every_identity(env):
         assert ELSEWHERE_PLATE not in body, url
 
 
-def test_the_events_own_identity_is_still_shown(env):
-    """The rung withholds the list of everyone else, not the event.
+def test_the_events_own_claim_is_still_shown_without_its_name(env):
+    """The rung withholds who, never whether — superseding CLD-103.
 
-    A triage screen that will not say who the system thinks this was
-    cannot be triaged, so the claim in front of the operator stays — with
-    its verdict buttons, which is the judgement `restricted` exists for.
+    This test used to assert the event's own identity kept its *name*,
+    on the reasoning that a screen which will not say who the system
+    thinks this was cannot be triaged. CLD-111 found the cheaper answer:
+    what triage actually needs is recognised-vs-not, which is a boolean
+    and survives losing the name — and fifty named rows a page was the
+    directory /identities is closed for, reassembled by scrolling.
+
+    So the claim in front of the operator stays, with its identifier, its
+    similarity and its verdict buttons, and says `Known vehicle`.
+    tests/test_restricted_disclosure.py holds the whole console to that.
     """
     client = signed_in(env, "nina", "restricted")
     for url in PICKER_URLS:
-        assert ON_THE_EVENT in client.get(url).text, url
+        body = client.get(url).text
+        assert ON_THE_EVENT not in body, url
+        assert "Known vehicle" in body, url
 
 
 def test_the_picker_works_normally_at_view_and_above(env):
