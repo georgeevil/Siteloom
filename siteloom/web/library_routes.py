@@ -6,22 +6,25 @@ create_app() onto the same FastAPI instance.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.store import (
     VERIFIED_BY_HUMAN,
     Annotation,
     CustomClass,
+    Event,
+    EventIdentity,
     Identity,
     ItemTag,
     LibraryItem,
@@ -553,6 +556,273 @@ def _source_progress(session) -> list[dict]:
             }
         )
     return out
+
+
+# -- Today's queue (CLD-8) -------------------------------------------------
+#
+# ~20 borderline judgments pinned atop /training, chosen because one label
+# there moves the model most (Frigate's guidance, cited in
+# docs/identity-management-analysis.md: label the clear borderline crops,
+# not the 90%-confident ones). Everything below is SQL over columns that
+# already exist — the queue must be buildable while ingest holds the
+# vector store, so a signal that needs vectors is the wrong signal here.
+#
+# Three signal tiers, in the order they are trusted:
+#
+# 1. Unreviewed EventIdentity links whose recorded `similarity` sits
+#    within QUEUE_SIMILARITY_BAND of their identifier's threshold — the
+#    matches the resolver only just made. Plate matches are excluded the
+#    way stats.py excludes them: a plate match carries a synthetic
+#    similarity, which is not a borderline anything.
+# 2. Unverified annotations carrying a `proposed_name` — the Takeout
+#    pass-2 guesses. `Annotation` persists no similarity column, so
+#    "closest to the face threshold first" cannot be honoured; the
+#    proposal itself is the borderline signal (pass 1 already
+#    auto-verified the certain ones) and the tier is not confidence-
+#    banded, because a proposal's uncertainty lives in the name, not in
+#    the detector's box score.
+# 3. Unnamed annotations whose detection `confidence` sits in
+#    QUEUE_CONFIDENCE_BAND — the clear-but-uncertain crops, never the top
+#    of the range.
+
+#: How many judgments a day's queue aims at — small enough to clear in
+#: about ten minutes, which is the entire product. The day's actual
+#: membership hovers around this (see `daily_queue`); it is a target, not
+#: an exact page size.
+DAILY_QUEUE_TARGET = 20
+
+#: How far from its identifier's threshold a link's similarity may sit
+#: and still count as borderline. Absolute, applied on each identifier's
+#: own scale (face ≈0.36, generic ≈0.80) — the band is about nearness to
+#: *that* cutoff, never a pooled score range.
+QUEUE_SIMILARITY_BAND = 0.08
+
+#: The middle of the detection-confidence range for tier 3. The top of
+#: the range is deliberately outside it: a 0.95 crop teaches the model
+#: nothing it does not already know.
+QUEUE_CONFIDENCE_BAND = (0.35, 0.70)
+
+#: Newest rows considered per tier. A bound, not a page: the queue reads
+#: light columns over recent history and the borderline crops worth a
+#: label today are not ten thousand rows back.
+QUEUE_RECENT_ROWS = 2000
+
+
+def _queue_today() -> date:
+    """The queue's day — UTC, the timezone every stored timestamp is in.
+
+    A module function so tests can pin the day; the route reads it
+    through the module attribute.
+    """
+    return datetime.now(timezone.utc).date()
+
+
+def _queue_hash(day: date, kind: str, row_id: int) -> float:
+    """A per-day, per-item priority in [0, 1) — stable across processes.
+
+    sha256 rather than `hash()` because Python's is salted per process,
+    and two workers (or a reload) must agree on today's queue.
+    """
+    digest = hashlib.sha256(f"{day.isoformat()}:{kind}:{row_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2.0**64
+
+
+def _queue_threshold(config, identifier_key: str | None) -> float:
+    """The cosine cutoff a link was judged against — site-wide value, or
+    the auto-add default for an identifier the registry minted at runtime
+    that the YAML never named."""
+    threshold = config.identity.threshold_for(identifier_key or "")
+    return threshold if threshold is not None else config.identity.auto_add_threshold
+
+
+def daily_queue(session, config, day: date) -> dict:
+    """Today's queue: deterministic for the day, judged items leave it,
+    and it does not refill until tomorrow.
+
+    Membership is per-item and independent, which is what delivers the
+    no-refill property without persisting queue state anywhere: an item
+    is in today's queue iff it is a pending candidate created before the
+    day started AND its per-day hash falls under a cutoff. Judging an
+    item removes *it*; nobody else's hash moves, so nothing slides in to
+    replace it — a bottomless queue is how ten minutes becomes an hour.
+
+    The cutoff is DAILY_QUEUE_TARGET over the day's candidate population,
+    where the population counts pending items plus items judged since the
+    day started (EventIdentity judgments carry `verdict_at`/`unlinked_at`
+    and confirmations carry `verified_at`, so the morning population is
+    reconstructable; a *rejected* annotation is the one judgment with no
+    timestamp, so each rejection shrinks the population by one and can in
+    principle flip an item whose hash sits within ~cutoff/population of
+    the boundary — a sliver accepted rather than adding a column). When
+    the population is at or under the target the cutoff is 1.0 and every
+    pending candidate is shown — fewer qualifying than ~20 means showing
+    what exists.
+
+    Rows created today are tomorrow's queue, never a mid-session refill.
+    SQL only, by contract: this renders while ingest holds the vector
+    store.
+    """
+    day_start = datetime(day.year, day.month, day.day)
+
+    # Tier 1 — links near their identifier's threshold. Light columns
+    # first: the band depends on per-identifier config, so it is applied
+    # in Python over a bounded recent window.
+    link_rows = session.execute(
+        select(
+            EventIdentity.id,
+            EventIdentity.identifier_key,
+            EventIdentity.similarity,
+            EventIdentity.verdict,
+            EventIdentity.unlinked_at,
+        )
+        .join(Event, EventIdentity.event_id == Event.id)
+        .where(
+            EventIdentity.identity_id.is_not(None),
+            EventIdentity.matched_by == "visual",
+            Event.first_seen < day_start,
+            Event.best_crop_path.is_not(None),
+            or_(
+                and_(
+                    EventIdentity.verdict.is_(None),
+                    EventIdentity.unlinked_at.is_(None),
+                ),
+                EventIdentity.verdict_at >= day_start,
+                EventIdentity.unlinked_at >= day_start,
+            ),
+        )
+        .order_by(EventIdentity.id.desc())
+        .limit(QUEUE_RECENT_ROWS)
+    ).all()
+    population = 0
+    pending_links: list[int] = []
+    for row in link_rows:
+        threshold = _queue_threshold(config, row.identifier_key)
+        if abs((row.similarity or 0.0) - threshold) > QUEUE_SIMILARITY_BAND:
+            continue
+        population += 1
+        if row.verdict is None and row.unlinked_at is None:
+            pending_links.append(row.id)
+
+    def annotation_tier(named: bool) -> list[int]:
+        nonlocal population
+        q = select(Annotation.id, Annotation.verified, Annotation.rejected).where(
+            Annotation.crop_path.is_not(None),
+            Annotation.created_at < day_start,
+            or_(
+                and_(
+                    Annotation.verified.is_(False),
+                    Annotation.rejected.is_(False),
+                ),
+                Annotation.verified_at >= day_start,
+            ),
+        )
+        if named:
+            q = q.where(Annotation.proposed_name.is_not(None))
+        else:
+            q = q.where(
+                Annotation.proposed_name.is_(None),
+                Annotation.confidence >= QUEUE_CONFIDENCE_BAND[0],
+                Annotation.confidence <= QUEUE_CONFIDENCE_BAND[1],
+            )
+        rows = session.execute(
+            q.order_by(Annotation.id.desc()).limit(QUEUE_RECENT_ROWS)
+        ).all()
+        population += len(rows)
+        return [r.id for r in rows if not r.verified and not r.rejected]
+
+    pending_named = annotation_tier(named=True)
+    pending_unnamed = annotation_tier(named=False)
+
+    cutoff = DAILY_QUEUE_TARGET / max(population, DAILY_QUEUE_TARGET)
+
+    def members(kind: str, ids: list[int]) -> list[int]:
+        scored = sorted(
+            (h, i) for i in ids if (h := _queue_hash(day, kind, i)) < cutoff
+        )
+        return [i for _, i in scored]
+
+    # Tier order is the trust order; within a tier the day's hash decides,
+    # which is the "seeded by the date" the behaviour asks for — the same
+    # order all day, a different rotation through the borderline region
+    # tomorrow.
+    link_ids = members("link", pending_links)
+    named_ids = members("proposal", pending_named)
+    crop_ids = members("crop", pending_unnamed)
+
+    links_by_id: dict[int, EventIdentity] = {}
+    if link_ids:
+        links_by_id = {
+            link.id: link
+            for link in session.scalars(
+                select(EventIdentity)
+                .options(
+                    selectinload(EventIdentity.identity),
+                    selectinload(EventIdentity.event),
+                )
+                .where(EventIdentity.id.in_(link_ids))
+            )
+            .unique()
+            .all()
+        }
+    annotations_by_id: dict[int, Annotation] = {}
+    if named_ids or crop_ids:
+        annotations_by_id = {
+            a.id: a
+            for a in session.scalars(
+                select(Annotation)
+                .options(selectinload(Annotation.item))
+                .where(Annotation.id.in_(named_ids + crop_ids))
+            )
+            .unique()
+            .all()
+        }
+
+    entries: list[dict] = []
+    for link_id in link_ids:
+        link = links_by_id.get(link_id)
+        if link is not None:
+            entries.append(
+                {
+                    "kind": "link",
+                    "link": link,
+                    "threshold": _queue_threshold(config, link.identifier_key),
+                }
+            )
+    for annotation_id in named_ids + crop_ids:
+        annotation = annotations_by_id.get(annotation_id)
+        if annotation is not None:
+            entries.append({"kind": "annotation", "annotation": annotation})
+
+    # The acknowledgement, from timestamps that exist: human confirmations
+    # (verified_at, CLD-95) and link verdicts (verdict_at). Rejections are
+    # deliberately un-timestamped in the schema, so a reject-heavy session
+    # under-counts here — the honest direction for a number that must not
+    # become a score to chase.
+    judged_today = (
+        session.scalar(
+            select(func.count())
+            .select_from(Annotation)
+            .where(
+                Annotation.verified_by == VERIFIED_BY_HUMAN,
+                Annotation.verified_at >= day_start,
+            )
+        )
+        or 0
+    ) + (
+        session.scalar(
+            select(func.count())
+            .select_from(EventIdentity)
+            .where(EventIdentity.verdict_at >= day_start)
+        )
+        or 0
+    )
+
+    return {
+        "day": day.isoformat(),
+        "entries": entries,
+        "judged_today": judged_today,
+        "pending_total": len(pending_links) + len(pending_named) + len(pending_unnamed),
+    }
 
 
 def register(app, templates, Session, config):  # noqa: C901 — route table
@@ -1978,10 +2248,15 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             custom_classes = session.scalars(
                 select(CustomClass).order_by(CustomClass.name)
             ).all()
+            # Today's queue (CLD-8), pinned above the grid whatever the
+            # filters say. Read through the module attribute so tests can
+            # pin the day. SQL only — never the vector store.
+            queue = daily_queue(session, config, _queue_today())
         return templates.TemplateResponse(
             request,
             "training.html",
             ctx(
+                queue=queue,
                 proposals=proposals,
                 by_basis=by_basis,
                 coverage=coverage,

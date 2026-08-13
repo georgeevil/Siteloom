@@ -168,6 +168,39 @@ resume command, so `jobs list` stops being ambiguous. Runs whose process is
 provably gone are detected immediately by pid; on another host, or after pid
 reuse, a two-minute cold heartbeat is the backstop.
 
+## The daily labeling queue (CLD-8)
+
+`/training` opens with **Today's queue**: roughly twenty borderline judgments,
+keyboard-workable (`J`/`K` move, `Y` confirm, `N` reject), sized to clear in
+about ten minutes. That ten minutes is the label-and-learn habit — the queue
+picks the crops where one label moves the model most, per Frigate's guidance
+(cited in `docs/identity-management-analysis.md`): label the clear borderline
+crops, not the 90%-confident ones.
+
+What "borderline" means, in trust order: unreviewed identity matches whose
+similarity sits close to their identifier's threshold (plate matches are
+excluded — their similarity is synthetic); unconfirmed name proposals from the
+Takeout importer; and unnamed crops whose detection confidence sits in the
+middle of the range. `Annotation` stores no match similarity, so proposals are
+queued as a tier rather than ranked by nearness to the face threshold.
+
+The mechanics protect the habit:
+
+* **Deterministic within a day.** The order is seeded by the date — reloading
+  never reshuffles mid-session.
+* **Judged items leave and nothing slides in.** The session converges to zero;
+  tomorrow brings a fresh rotation through the borderline region. Crops indexed
+  today wait for tomorrow's queue.
+* **"Nothing borderline today" is a good state.** It means no matches near a
+  threshold and no proposals waiting — not a broken screen.
+* **It works while ingest runs.** Selection is SQL only; the queue never opens
+  the vector store. Confirming a face still enrolls its embedding, so *that*
+  action answers 503 while another process holds the store — rejects and
+  verdicts go through regardless.
+
+Every action posts to the console's existing review endpoints, so verification
+provenance (who confirmed, when) is stamped in the one place it always was.
+
 ## Stopping things
 
 | Signal | Sent by | Effect |
