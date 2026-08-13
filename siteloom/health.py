@@ -222,28 +222,44 @@ def process_verdict(pid: int, recorded: str) -> str:
 
 
 def check_database(report: Report, config) -> None:
+    """Connectivity and schema, strictly read-only (CLD-54).
+
+    This used to call `init_db` — "additive migrations; safe and
+    idempotent" — which made every caller of the check a migrator. One of
+    those callers is the public `/readyz`, so an unauthenticated HTTP
+    request could trigger schema DDL: a probe is supposed to answer "am I
+    able to serve", not change the schema while answering. Schema changes
+    belong to `init-db`, `run` and `serve` at startup — the places that
+    call `init_db` deliberately. This check now inspects and reports.
+
+    Missing tables or columns are WARN, not FAIL, and that is about the
+    boot path: `doctor` is every generated unit's `ExecStartPre`, and the
+    `serve`/`run` it gates creates exactly this schema at startup — a
+    FAIL here would block the boot that was about to heal it. FAIL is
+    reserved for what startup cannot fix: a database that cannot be
+    reached or read at all.
+    """
     from sqlalchemy import inspect, select
 
-    from siteloom.store import Base, get_session, init_db, make_engine
+    from siteloom.store import Base, get_session, make_engine
 
     url = config.storage.db_url
     try:
         engine = make_engine(url)
-        init_db(engine)  # additive migrations; safe and idempotent
+        inspector = inspect(engine)
+        present = set(inspector.get_table_names())
         expected = {t.name for t in Base.metadata.sorted_tables}
-        present = set(inspect(engine).get_table_names())
-        missing = sorted(expected - present)
-        if missing:
-            report.add(
-                "database",
-                FAIL,
-                f"{url} is missing tables: {', '.join(missing)}",
-                "siteloom init-db --config <cfg>",
+        missing_tables = sorted(expected - present)
+        missing_columns = []
+        for table in Base.metadata.sorted_tables:
+            if table.name not in present:
+                continue
+            have = {c["name"] for c in inspector.get_columns(table.name)}
+            missing_columns.extend(
+                f"{table.name}.{c.name}" for c in table.columns if c.name not in have
             )
-            return
         with get_session(engine)() as session:
             session.execute(select(1))
-        report.add("database", OK, f"{url} ({len(expected)} tables)")
     except Exception as exc:
         report.add(
             "database",
@@ -251,6 +267,23 @@ def check_database(report: Report, config) -> None:
             f"{url}: {type(exc).__name__}: {exc}",
             "check storage.db_url and that the directory exists",
         )
+        return
+    if missing_tables:
+        report.add(
+            "database",
+            WARN,
+            f"{url} is missing tables: {', '.join(missing_tables)}",
+            "created when run/serve starts, or now: siteloom init-db --config <cfg>",
+        )
+    elif missing_columns:
+        report.add(
+            "database",
+            WARN,
+            f"{url} is missing columns: {', '.join(missing_columns)}",
+            "migrated when run/serve starts, or now: siteloom init-db --config <cfg>",
+        )
+    else:
+        report.add("database", OK, f"{url} ({len(expected)} tables)")
 
 
 def check_media_dir(report: Report, config) -> None:
@@ -523,7 +556,11 @@ CHECKS = [
 ]
 
 # What a readiness probe can answer in milliseconds, without opening the
-# vector store the serving process already holds.
+# vector store the serving process already holds. /readyz is public
+# (CLD-54), so nothing here may mutate the database — check_media_dir's
+# write-probe is that check's entire question, and it touches only
+# media_dir. The probe's HTTP body carries names and statuses only; the
+# detail/remedy strings below are for `doctor` at a terminal.
 LIVE_CHECKS = [check_database, check_media_dir, check_jobs]
 
 

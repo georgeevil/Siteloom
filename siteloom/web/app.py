@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -69,6 +71,12 @@ LIKE_ESCAPE = "\\"
 # phone number pasted into the search box) raises OverflowError out of
 # the driver rather than simply matching nothing.
 _MAX_ROW_ID = 2**63 - 1
+
+# How long a /readyz answer is reused before the checks run again
+# (CLD-54). The endpoint is public, so its cost must not scale with how
+# hard someone hammers it; well under any sane probe interval, so a
+# supervisor still sees a state change within one poll.
+READYZ_CACHE_S = 5.0
 
 
 def like_pattern(term: str) -> str:
@@ -435,6 +443,33 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         handler leaves a row, so a new POST route cannot forget to audit.
         """
         path = request.url.path
+        # CSRF (CLD-58): a browser's cross-site mutation is refused first,
+        # before the session is even resolved, so a new POST route is
+        # covered by default — same reasoning as the auth gate itself.
+        # Deliberately independent of auth: it holds in the open
+        # single-operator mode too, where there is no cookie to ride but
+        # every mutation is otherwise anyone's. /api/v1/ is exempt — its
+        # clients authenticate per-request with x-api-key, not an ambient
+        # cookie, so they are not CSRF-reachable and a browser-provenance
+        # demand would break Double Take. Refusals are not audited:
+        # nothing happened, the same rule as a role denial.
+        if request.method not in auth.SAFE_METHODS and not path.startswith(
+            auth.EXEMPT_PREFIXES
+        ):
+            reason = auth.cross_site_reason(
+                request.method,
+                request.headers.get("origin"),
+                request.headers.get("sec-fetch-site"),
+                request.headers.get("host"),
+                request.url.scheme,
+                request.headers.get("x-forwarded-proto"),
+                request.headers.get("x-forwarded-host"),
+            )
+            if reason is not None:
+                log.warning("refused %s %s: %s", request.method, path, reason)
+                return JSONResponse(
+                    {"detail": "cross-site request refused"}, status_code=403
+                )
         with Session() as session:
             enabled = auth_gate.enabled(session)
             user = auth.resolve_user(
@@ -457,7 +492,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
 
         response = await call_next(request)
 
-        if request.method not in ("GET", "HEAD", "OPTIONS") and not exempt:
+        if request.method not in auth.SAFE_METHODS and not exempt:
             if response.status_code < 400:
                 with Session() as session:
                     auth.record_audit(
@@ -531,11 +566,20 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             auth.record_audit(session, user, "POST", "/login", 303)
             session.commit()
         response = RedirectResponse(auth.safe_next(next), status_code=303)
+        # HttpOnly: script must never read the token. SameSite=Lax: the
+        # cookie rides top-level navigations only — the belt to the
+        # middleware's cross-site check. Secure exactly when the browser
+        # arrived over HTTPS (directly or attested by a proxy's
+        # X-Forwarded-Proto): hardcoding it would break the plain-HTTP
+        # LAN login that is the current deployment (CLD-58).
         response.set_cookie(
             auth.SESSION_COOKIE,
             token,
             httponly=True,
             samesite="lax",
+            secure=auth.cookie_secure(
+                request.url.scheme, request.headers.get("x-forwarded-proto")
+            ),
             max_age=int(auth.SESSION_TTL.total_seconds()),
         )
         return response
@@ -551,7 +595,16 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 auth.purge_expired_sessions(session)
                 session.commit()
         response = RedirectResponse("/login", status_code=303)
-        response.delete_cookie(auth.SESSION_COOKIE)
+        # Same attributes as set_cookie above: a deletion only reaches
+        # the cookie it names, attributes included.
+        response.delete_cookie(
+            auth.SESSION_COOKIE,
+            httponly=True,
+            samesite="lax",
+            secure=auth.cookie_secure(
+                request.url.scheme, request.headers.get("x-forwarded-proto")
+            ),
+        )
         return response
 
     @app.get("/", response_class=HTMLResponse)
@@ -1703,29 +1756,61 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         raise HTTPException(404)
 
     # -- supervision -------------------------------------------------------
+    #
+    # Both probes are public — a probe that needs a cookie gets the
+    # service killed — and the console is treated as internet-exposed
+    # (CLD-54), which sets two rules for them: bodies carry nothing that
+    # maps the install (no paths, no hostnames, no pids, no versions, no
+    # dependency errors — that detail is `siteloom doctor`, at a
+    # terminal), and a hit performs bounded, read-only work. /readyz
+    # answers from a short-lived cache so hammering it costs one check
+    # run per TTL, not one per request.
+    ready_lock = threading.Lock()
+    ready_state: dict = {"until": 0.0, "cached": None}
 
     @app.get("/healthz")
     def healthz():
         """Liveness: the process is up and serving. Deliberately touches
         nothing else, so a slow database cannot get the server killed and
-        restarted into the same slow database."""
-        return {"status": "ok", "site": config.site_id, "pid": os.getpid()}
+        restarted into the same slow database. The answer is a yes, not a
+        fact sheet: liveness needs one bit."""
+        return {"status": "ok"}
 
     @app.get("/readyz")
     def readyz():
         """Readiness: can this process actually do its job? Runs the
-        cheap half of `siteloom doctor` — never the vector store, which
-        this process is already holding."""
+        cheap, read-only half of `siteloom doctor` — never the vector
+        store, which this process is already holding, and never a
+        migration: `init_db` belongs to startup (CLD-54)."""
         from siteloom.health import LIVE_CHECKS, run_checks
 
-        report = run_checks(config, LIVE_CHECKS)
-        return JSONResponse(report.as_dict(), status_code=200 if report.ok else 503)
+        now = time.monotonic()
+        with ready_lock:
+            cached = ready_state["cached"] if now < ready_state["until"] else None
+        if cached is None:
+            report = run_checks(config, LIVE_CHECKS)
+            # Name and status only — Check.detail and .remedy name the
+            # db url, the media path and worse, which an operator wants
+            # from `doctor` and an unauthenticated caller must not get
+            # from a public endpoint.
+            cached = (
+                200 if report.ok else 503,
+                {
+                    "ok": report.ok,
+                    "checks": [
+                        {"name": c.name, "status": c.status} for c in report.checks
+                    ],
+                },
+            )
+            with ready_lock:
+                ready_state["until"] = time.monotonic() + READYZ_CACHE_S
+                ready_state["cached"] = cached
+        status_code, body = cached
+        return JSONResponse(body, status_code=status_code)
 
     return app
 
 
 def create_app_from_env() -> FastAPI:
     """Uvicorn factory entrypoint: SITELOOM_CONFIG=site.yaml."""
-    import os
-
     return create_app(load_config(os.environ.get("SITELOOM_CONFIG", "site.yaml")))

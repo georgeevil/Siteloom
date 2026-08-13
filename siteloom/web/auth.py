@@ -26,6 +26,12 @@ Design (CLD auth milestone):
 * Sign-in is slowed by address, never locked by username (LoginThrottle),
   costs the same whether or not the account exists (`authenticate`), and
   leaves an audit row either way.
+* Cross-site request forgery is refused in the same middleware, by
+  browser-attested request provenance (`cross_site_reason`) rather than
+  per-form tokens — a token each new template must remember is a check
+  that will be forgotten, which is the same reasoning as the one
+  middleware itself (CLD-58). The check binds to nothing about auth, so
+  it protects the open single-operator mode too.
 
 Passwords are scrypt (stdlib) with a per-user salt; the cookie stores
 only an opaque token whose server side row can be revoked.
@@ -39,6 +45,7 @@ import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select
 
@@ -78,7 +85,21 @@ def role_label(role: str) -> str:
 
 
 SESSION_COOKIE = "sl_session"
+#: Absolute session lifetime, enforced server-side (`resolve_user`
+#: rejects an expired row no matter what the cookie claims) and pruned at
+#: sign-in/sign-out (`purge_expired_sessions`, CLD-65). There is
+#: deliberately no *idle* timeout (CLD-58): the console is a wall screen
+#: an operator glances at across a shift, and a session that logs itself
+#: out between glances trains people toward weaker passwords and shared
+#: terminals left signed in. Ending a session sooner is sign-out,
+#: disabling the account, or revoking its sessions on /users.
 SESSION_TTL = timedelta(days=14)
+
+#: Methods that read. Everything else is treated as a mutation — by the
+#: role floors (`required_role`), by the audit writer, and by the
+#: cross-site check (`cross_site_reason`) — so the three can never
+#: disagree about what "a write" is.
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
 #: Paths that must work logged-out: the login flow itself and the probes
 #: a service manager hits. Everything else needs at least `view` once
@@ -235,6 +256,110 @@ def safe_next(next_url: str, fallback: str = "/") -> str:
     ):
         return next_url
     return fallback
+
+
+#: Ports a browser omits from Origin, keyed by scheme — the reason
+#: `http://cam.lan` and `Host: cam.lan:80` must compare equal.
+_DEFAULT_PORTS = {"http": ":80", "https": ":443"}
+
+
+def effective_scheme(scheme: str, forwarded_proto: str | None) -> str:
+    """The scheme the *browser* used, seen from behind a proxy or not.
+
+    A reverse proxy or tunnel terminates TLS and forwards plain HTTP, so
+    the socket says http while the operator's browser said https;
+    `X-Forwarded-Proto` is how the proxy relays that, and the first value
+    wins when proxies chain. Trusting the header unconditionally is safe
+    for the two things it decides here: it can only *add* the cookie's
+    Secure flag (an attacker forging it on a plain-HTTP login breaks
+    their own cookie, nobody else's), and in the origin comparison it
+    only settles default-port elision. A forged header never widens
+    anything.
+    """
+    proto = (forwarded_proto or "").split(",")[0].strip().lower()
+    return "https" if proto == "https" else scheme
+
+
+def cookie_secure(scheme: str, forwarded_proto: str | None) -> bool:
+    """Whether the session cookie should carry `Secure` (CLD-58).
+
+    Decided per-request rather than hardcoded on: the current deployment
+    is plain HTTP on a LAN, where a Secure cookie is one the browser
+    refuses to send back — a login that silently never sticks. Any HTTPS
+    arrival (direct, or via a proxy that sets X-Forwarded-Proto) gets the
+    flag with zero configuration.
+    """
+    return effective_scheme(scheme, forwarded_proto) == "https"
+
+
+def _bare_netloc(netloc: str, scheme: str) -> str:
+    """host[:port], case-folded, with the scheme's default port dropped."""
+    netloc = netloc.strip().lower()
+    default = _DEFAULT_PORTS.get(scheme)
+    if default and netloc.endswith(default):
+        netloc = netloc[: -len(default)]
+    return netloc
+
+
+def cross_site_reason(
+    method: str,
+    origin: str | None,
+    sec_fetch_site: str | None,
+    host: str | None,
+    scheme: str,
+    forwarded_proto: str | None = None,
+    forwarded_host: str | None = None,
+) -> str | None:
+    """Why this request must be refused as cross-site, or None to allow.
+
+    The CSRF control (CLD-58): every console mutation is a form POST
+    authenticated by an ambient cookie, the exact shape CSRF exploits.
+    The defence is the request provenance browsers already attest —
+    every browser that can carry the session cookie cross-site also
+    stamps `Origin` (and `Sec-Fetch-Site`) on cross-site POSTs, and an
+    attacker's page cannot forge either on a victim's behalf — so
+    rejecting a foreign origin here protects every form without a token
+    in any template. The rules, in order:
+
+    * Safe methods are never checked — they mutate nothing.
+    * An `Origin` that parses is compared to this request's own host
+      (`Host`, or `X-Forwarded-Host` for a proxy that rewrites Host),
+      case-folded, default ports elided per scheme. Match allows,
+      mismatch refuses.
+    * `Origin: null` (sandboxed iframe, data: URL) or unparsable
+      refuses: a browser that will not name the sender is not one to
+      honour a mutation from.
+    * No Origin but `Sec-Fetch-Site` present: `same-origin` and `none`
+      (user-initiated: address bar, bookmark) allow; `cross-site` and
+      `same-site` refuse — a sibling subdomain is not this console.
+    * **Neither header allows.** That is a non-browser client — curl, a
+      script, the test suite — which carries no ambient browser state to
+      be confused into using; fetch-metadata guidance, and also what
+      keeps every existing CLI and TestClient caller working unchanged.
+
+    Returned reasons are fixed strings for the log line, never echoes of
+    attacker-controlled header values.
+    """
+    if method in SAFE_METHODS:
+        return None
+    if origin is not None:
+        parts = urlsplit(origin)
+        if not parts.scheme or not parts.netloc:
+            return "origin is null or unparsable"
+        req_scheme = effective_scheme(scheme, forwarded_proto)
+        ours = {_bare_netloc(host or "", req_scheme)}
+        if forwarded_host:
+            first = forwarded_host.split(",")[0]
+            ours.add(_bare_netloc(first, req_scheme))
+        if _bare_netloc(parts.netloc, parts.scheme.lower()) not in ours:
+            return "origin does not match this host"
+        return None
+    if sec_fetch_site is not None and sec_fetch_site.strip().lower() not in (
+        "same-origin",
+        "none",
+    ):
+        return "cross-site by fetch metadata"
+    return None
 
 
 def auth_enabled(session) -> bool:
@@ -473,7 +598,7 @@ def required_role(method: str, path: str) -> str:
     people and training material need `view`, and the account list and
     audit trail need `admin` — a read a viewer may not make at all.
     """
-    if method in ("GET", "HEAD", "OPTIONS"):
+    if method in SAFE_METHODS:
         if any(path.startswith(p) for p in ADMIN_READ_PREFIXES):
             return "admin"
         return "view" if withheld_from_restricted(path) else "restricted"

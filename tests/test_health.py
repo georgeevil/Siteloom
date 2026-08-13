@@ -54,10 +54,44 @@ def status_of(report: Report, name: str) -> str:
 
 
 def test_healthy_deployment_passes(config):
+    _session(config)  # init-db has run, as it has on any deployment that served
     report = run_checks(config)
     assert report.ok, [c for c in report.checks if c.status == FAIL]
     assert status_of(report, "database") == OK
     assert status_of(report, "media dir") == OK
+
+
+def test_a_fresh_database_warns_and_does_not_block_boot(config):
+    """`doctor` is every generated unit's ExecStartPre, and the
+    serve/run it gates creates the schema at startup — so an
+    uninitialized database is a warning with a remedy, never a FAIL
+    that blocks the boot that was about to heal it (CLD-54)."""
+    report = run_checks(config, [health.check_database])
+    check = report.checks[0]
+    assert check.status == WARN
+    assert "missing tables" in check.detail
+    assert "init-db" in check.remedy
+    assert report.ok  # exit 0: the unit may start
+
+
+def test_check_database_inspects_and_never_migrates(config):
+    """Schema drift is *reported*, not healed: the check runs from the
+    public /readyz, and an unauthenticated caller must not be able to
+    trigger DDL. The old check called init_db, which would have added
+    the dropped column straight back (CLD-54)."""
+    from sqlalchemy import inspect, text
+
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE operation_runs DROP COLUMN process_start"))
+    report = run_checks(config, [health.check_database])
+    check = report.checks[0]
+    assert check.status == WARN
+    assert "operation_runs.process_start" in check.detail
+    assert "init-db" in check.remedy
+    columns = {c["name"] for c in inspect(engine).get_columns("operation_runs")}
+    assert "process_start" not in columns  # reported, not repaired
 
 
 def test_unwritable_media_dir_fails(config, tmp_path):
@@ -119,14 +153,14 @@ def test_process_alive_on_self_and_on_the_departed():
 # -- endpoints --------------------------------------------------------------
 
 
-def test_healthz_does_not_touch_the_database(config):
+def test_healthz_says_ok_and_nothing_else(config):
+    """Liveness is one bit. The body used to name the site and the
+    server pid; both probes are public and the console is treated as
+    internet-exposed, so the answer maps nothing (CLD-54)."""
     from siteloom.web.app import create_app
 
     client = TestClient(create_app(config))
-    body = client.get("/healthz").json()
-    assert body["status"] == "ok"
-    assert body["site"] == "test"
-    assert body["pid"] == os.getpid()
+    assert client.get("/healthz").json() == {"status": "ok"}
 
 
 def test_readyz_reports_unready_with_503(config, tmp_path):
@@ -148,6 +182,86 @@ def test_readyz_ok(config):
     response = client.get("/readyz")
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+# -- /readyz is public, so it must not mutate or map (CLD-54) ---------------
+
+
+def test_readyz_runs_no_migration(config):
+    """Drop a table out from under a running app: the old endpoint's
+    database check called init_db, so the next probe would have quietly
+    re-created it. A probe answers; it does not repair."""
+    from sqlalchemy import inspect, text
+
+    from siteloom.web.app import create_app
+
+    client = TestClient(create_app(config))
+    engine = make_engine(config.storage.db_url)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE noise_events"))
+    response = client.get("/readyz")
+    assert response.status_code in (200, 503)
+    assert response.json()  # answered
+    assert "noise_events" not in inspect(engine).get_table_names()
+
+
+def test_readyz_writes_nothing_to_the_database_file(config, tmp_path):
+    """The same property from the filesystem's side: with the database
+    file read-only, the probe still answers and the file is untouched
+    byte for byte."""
+    from siteloom.web.app import create_app
+
+    client = TestClient(create_app(config))  # init_db ran while writable
+    db_file = tmp_path / "health.db"
+    before = db_file.read_bytes()
+    db_file.chmod(0o444)
+    try:
+        response = client.get("/readyz")
+        assert response.status_code in (200, 503)
+        assert response.json()  # a real answer, not a stack trace
+        assert db_file.read_bytes() == before
+    finally:
+        db_file.chmod(0o644)
+
+
+def test_readyz_body_maps_nothing_for_an_unauthenticated_caller(config, tmp_path):
+    """Check names and statuses are actionable to a service manager; the
+    detail and remedy strings name the db url, the media path and the
+    fix, which belong to `siteloom doctor` at a terminal — never to a
+    public endpoint. Redacted here, not by weakening doctor."""
+    from siteloom.web.app import create_app
+
+    client = TestClient(create_app(config))
+    response = client.get("/readyz")
+    text = response.text
+    assert str(tmp_path) not in text  # covers both the db path and media path
+    assert config.storage.media_dir not in text
+    assert config.storage.db_url not in text
+    host = health.hostname()
+    if len(host) > 3:  # a tiny hostname would substring-match JSON keys
+        assert host not in text
+    payload = response.json()
+    assert set(payload) == {"ok", "checks"}
+    assert all(set(c) == {"name", "status"} for c in payload["checks"])
+
+
+def test_readyz_work_is_bounded_under_hammering(config, monkeypatch):
+    """The endpoint is public: hammering it must cost one check run per
+    cache window, not one per request."""
+    from siteloom.web.app import create_app
+
+    client = TestClient(create_app(config))
+    calls = {"n": 0}
+    real = health.run_checks
+
+    def counting(cfg, checks=None):
+        calls["n"] += 1
+        return real(cfg, checks)
+
+    monkeypatch.setattr(health, "run_checks", counting)
+    for _ in range(5):
+        assert client.get("/readyz").status_code == 200
+    assert calls["n"] == 1
 
 
 # -- jobs supervision -------------------------------------------------------
