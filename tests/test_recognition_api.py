@@ -22,6 +22,7 @@ from siteloom.store import AuditLog, Identity, get_session, init_db, make_engine
 from siteloom.web.app import create_app
 from siteloom.web.recognition_api import (
     MAX_UPLOAD_BYTES,
+    RETRY_AFTER_S,
     RateLimiter,
     RecognitionService,
 )
@@ -348,6 +349,147 @@ def test_rate_limit_trips_but_probes_survive(tmp_path):
     assert client.get("/healthz").status_code == 200
     assert client.get("/readyz").status_code in (200, 503)
     assert client.get("/readyz").json()  # answered, not throttled
+
+
+# -- CLD-110: the vector store is held by another process ------------------
+#
+# The normal condition on a live site: `siteloom run` holds the embedded
+# store for hours. Reads degrade to a marked no-match so Double Take
+# keeps working; vector writes refuse with a CompreFace-shaped 503 so no
+# enrolment is ever silently dropped. Simulated the CLD-62 way — the
+# RuntimeError embedded Qdrant raises on a flock collision — never by
+# opening a second real client on one path.
+
+LOCK_MESSAGE = "Storage folder vectors is already accessed by another instance"
+
+
+def make_env(tmp_path, tag: str):
+    """App + Session with a service that acquires the store lazily
+    (vectors=None), so a monkeypatched get_shared_store decides."""
+    config = make_config(tmp_path, tag)
+    config.integrations.recognition_api.enabled = True
+    config.integrations.recognition_api.allow_open = True
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    service = RecognitionService(config, Session, vectors=None, embedder=StubFace())
+    return TestClient(create_app(config, recognition_service=service)), Session, config
+
+
+@pytest.fixture
+def held_env(tmp_path, monkeypatch):
+    client, Session, _config = make_env(tmp_path, "held")
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError(LOCK_MESSAGE)
+
+    monkeypatch.setattr("siteloom.identity.get_shared_store", refuse)
+    return client, Session
+
+
+def test_recognize_during_held_store_degrades_to_no_match(held_env):
+    """Reads degrade: 200 in CompreFace's own no-match shape — the face
+    still boxed, zero subjects — with a machine-readable busy marker and
+    a Retry-After, so a polling consumer logs "unknown" and keeps
+    working instead of alarming through every soak."""
+    client, _Session = held_env
+    r = recognize(client, photo("ann"))
+    assert r.status_code == 200
+    assert r.headers["retry-after"] == str(RETRY_AFTER_S)
+    body = r.json()
+    # Pin the wire marker as a literal: it is a contract with clients,
+    # not an implementation detail a rename may drag along.
+    assert body["degraded"] == "vector-store-busy"
+    # Marker aside, identical in shape to a genuine no-match: same
+    # top-level key, same per-face keys, same box keys.
+    assert set(body) == {"result", "degraded"}
+    (face,) = body["result"]
+    assert set(face) == {"box", "subjects"}
+    assert set(face["box"]) == {"x_min", "y_min", "x_max", "y_max", "probability"}
+    assert face["subjects"] == []
+
+
+def test_recognize_with_the_store_available_is_unchanged(client):
+    """No behaviour change when the store is free: no marker, no
+    Retry-After — the exact pre-CLD-110 body, nothing additive."""
+    enroll(client, "Ann", photo("ann"))
+    r = recognize(client, photo("ann"))
+    assert r.status_code == 200
+    assert "retry-after" not in r.headers
+    body = r.json()
+    assert set(body) == {"result"}
+    assert body["result"][0]["subjects"][0]["subject"] == "Ann"
+
+
+def test_face_add_during_held_store_refuses_and_enrolls_nothing(held_env):
+    """Writes refuse: a degraded write would silently drop an enrolment
+    the caller believes succeeded, which is worse than any error. The
+    refusal is CompreFace's ExceptionResponseDto shape ({"message",
+    "code"}), code 41 = FACES_SERVICE_EXCEPTION — readable by a client
+    written against CompreFace, which surfaces `message` whenever
+    `result` is absent."""
+    client, Session = held_env
+    r = enroll(client, "Ann Person", photo("ann"))
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == str(RETRY_AFTER_S)
+    body = r.json()
+    assert set(body) == {"message", "code"}
+    assert body["code"] == 41
+    assert "NOT enrolled" in body["message"]
+    # Nothing happened, provably: no Identity row, no subject, and no
+    # audit row (denied requests are not audited — web/auth.py's rule).
+    with Session() as session:
+        assert session.scalars(select(Identity)).all() == []
+        assert session.scalars(select(AuditLog)).all() == []
+    assert client.get("/api/v1/recognition/subjects").json() == {"subjects": []}
+
+
+def test_subject_endpoints_survive_a_held_store(held_env):
+    """Subjects live in SQL, not vectors — verified rather than assumed:
+    listing and creating them must keep answering while the store is
+    held (creation writes no vectors, so it does not refuse)."""
+    client, _Session = held_env
+    r = client.post("/api/v1/recognition/subjects", json={"subject": "Cara"})
+    assert r.status_code == 201
+    assert client.get("/api/v1/recognition/subjects").json() == {"subjects": ["Cara"]}
+    assert client.get("/api/v1/recognition/faces").json() == {
+        "faces": [{"subject": "Cara", "examples": 0}]
+    }
+
+
+def test_recognition_recovers_the_moment_the_store_frees(tmp_path, monkeypatch):
+    """A failed acquisition must not be cached: the next request after
+    the holding process exits serves matches again, no restart. Run
+    against a real store, which also proves the refused write landed
+    nowhere — not the database, not the vector store."""
+    client, _Session, config = make_env(tmp_path, "recover")
+    store = VectorStore(config.identity.vector_db_path)
+    held = True
+
+    def gate(path):
+        if held:
+            raise RuntimeError(LOCK_MESSAGE)
+        return store
+
+    monkeypatch.setattr("siteloom.identity.get_shared_store", gate)
+    try:
+        # Held: the write refuses, the read degrades.
+        assert enroll(client, "Ann", photo("ann")).status_code == 503
+        assert recognize(client, photo("ann")).json()["degraded"] == "vector-store-busy"
+
+        held = False
+        # Freed: the very next read is ordinary — and empty-handed,
+        # because the refused enrolment wrote nothing to the store.
+        r = recognize(client, photo("ann"))
+        assert "retry-after" not in r.headers
+        assert set(r.json()) == {"result"}
+        assert r.json()["result"][0]["subjects"] == []
+        # And writes work again, end to end.
+        assert enroll(client, "Ann", photo("ann")).status_code == 201
+        r = recognize(client, photo("ann"))
+        assert r.json()["result"][0]["subjects"][0]["subject"] == "Ann"
+    finally:
+        store.close()
 
 
 def test_api_mutations_are_audited(client_and_session):

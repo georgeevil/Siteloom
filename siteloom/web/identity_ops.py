@@ -42,9 +42,10 @@ def shared_store(config, action: str):
     indexer (CLD-62). They are all the same situation: an operator
     working the console while ingest runs is the *normal* case, not an
     exotic failure, and a second spelling of this refusal is a second
-    chance to phrase it as a 500. (`web/recognition_api.py` still opens
-    its own — it answers CompreFace clients, which need an error in
-    their shape rather than this one.)
+    chance to phrase it as a 500. (`web/recognition_api.py` deliberately
+    does not use this helper: its callers are CompreFace clients, not
+    operators, so its reads degrade to a marked no-match and its writes
+    refuse in CompreFace's own error shape — CLD-110.)
 
     Resolve it in the request that needs it, never inside a worker
     thread: a 503 the operator can read beats a job that starts, dies out

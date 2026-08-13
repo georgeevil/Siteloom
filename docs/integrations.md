@@ -146,6 +146,29 @@ Compare `similarity` against your configured face threshold
 (`identity.identifiers.face.threshold`) — after a fine-tune,
 `siteloom train face` reports and can apply the right value.
 
+### While the vector store is held (ingest running)
+
+The embedded vector store allows one client per data directory, and
+`siteloom run` holds it for hours — the *normal* condition on a live
+site. The API stays up through that, by decision (CLD-110): **reads
+degrade, writes refuse.**
+
+- `POST /recognize` answers `200` in its ordinary shape with zero
+  subjects — Double Take treats it as "nobody recognised" and keeps
+  working — plus an additive `"degraded": "vector-store-busy"` body
+  field and a `Retry-After` header, so a client that cares can tell
+  "nobody matched" from "nobody was looked for". Face boxes are still
+  reported; only the subject search is skipped.
+- `POST /faces` (enrolment) answers `503` with a CompreFace-shaped
+  error body (`{"message": ..., "code": 41}`) and enrolls **nothing** —
+  a write that pretended success would silently drop the face. Retry it
+  after the holding job finishes (see `/jobs`).
+- `GET/POST /subjects` and `GET /faces` read and write only the SQL
+  database and are unaffected.
+
+Recovery is automatic: the moment the holding process exits, the next
+request serves matches again.
+
 ## 3. Backfill enrolls the same collection
 
 Two equivalent paths, per source of photos:
@@ -164,7 +187,10 @@ Two equivalent paths, per source of photos:
   client per data directory. `siteloom serve`, `siteloom frigate`, and
   enrollment sweeps each open it — run them against the same directory
   one at a time, or move to a Qdrant server (config change) when you
-  need true concurrency. A stale `.lock` after a crash can be deleted
+  need true concurrency. While another process holds it, the recognition
+  API degrades to no-match on reads and refuses enrolments with a 503
+  (CLD-110, section 2 above); the console answers 503 with the same
+  guidance. A stale `.lock` after a crash can be deleted
   once you've confirmed no Siteloom process is running.
 - **Broker down ≠ pipeline down.** MQTT publishing and webhooks degrade
   to a warning; recognition and storage continue (NFR1).

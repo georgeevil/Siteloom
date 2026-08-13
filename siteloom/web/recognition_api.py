@@ -22,6 +22,17 @@ hands out biometric matching and gallery writes, so enabled-but-keyless
 fails fast at startup instead of coming up wide open (CLD-47). The 413
 upload cap and per-IP 429 are additions on top of the CompreFace v1
 shape, not redefinitions of it.
+
+While another process holds the embedded vector store — `siteloom run`
+does, for hours, which is the NORMAL condition on a live site — reads
+degrade and writes refuse (CLD-110). /recognize answers 200 in its
+ordinary shape with zero subjects, plus an additive "degraded" marker
+and a Retry-After header, so a polling Double Take reports "unknown"
+and keeps working instead of alarming all night. A face enrolment must
+never pretend: it refuses with a CompreFace-shaped 503, because a
+silently dropped write is worse than any error. Detection is the
+store-acquisition failure the code was already hitting — no polling, no
+lock, no second client.
 """
 
 from __future__ import annotations
@@ -49,6 +60,76 @@ log = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 WINDOW_S = 60.0
+
+#: Retry hint (seconds) on every store-busy answer. The store is
+#: typically held for the length of a job, not a blip; this keeps a
+#: polling client's next look cheap without inviting a hammering loop.
+RETRY_AFTER_S = 30
+
+#: Additive marker on a degraded /recognize body: subjects are empty
+#: because nothing was SEARCHED, not because nobody matched. A client
+#: that only reads "result" (Double Take does) never sees it.
+STORE_BUSY_MARKER = "vector-store-busy"
+
+#: CompreFace's CommonExceptionCode.FACES_SERVICE_EXCEPTION — its own
+#: "the face service failed" code, the nearest analogue its public
+#: source offers for a backend that cannot serve right now.
+FACES_SERVICE_EXCEPTION = 41
+
+
+class VectorStoreHeld(Exception):
+    """Another process holds the embedded vector store's flock.
+
+    Raised by RecognitionService._acquire_vectors so each route answers
+    per the CLD-110 decision: reads degrade to a marked no-match, vector
+    writes refuse with a CompreFace-shaped 503.
+    """
+
+
+def _recognize_response(result: list[dict], store_busy: bool) -> JSONResponse:
+    """The /recognize answer, degraded or not (CLD-110).
+
+    Degraded is CompreFace's own no-match shape — a client that only
+    reads "result" (Double Take does) treats it as "nobody recognised"
+    and keeps working — plus an additive marker and Retry-After so one
+    that cares can tell "nobody matched" from "nobody was looked for".
+    The available-store answer is byte-identical to what it always was:
+    nothing additive rides along when nothing is degraded.
+    """
+    if store_busy:
+        return JSONResponse(
+            {"result": result, "degraded": STORE_BUSY_MARKER},
+            headers={"Retry-After": str(RETRY_AFTER_S)},
+        )
+    return JSONResponse({"result": result})
+
+
+def _store_busy_refusal() -> JSONResponse:
+    """A 503 in CompreFace's error vocabulary, for a write the held
+    store makes impossible.
+
+    The body matches CompreFace's ExceptionResponseDto ({"message",
+    "code"}, java/common .../dto/ExceptionResponseDto.java) with
+    FACES_SERVICE_EXCEPTION as the code. CompreFace pairs that code
+    with a 500; answering 503 + Retry-After is the one deliberate
+    divergence, because a held store is temporary and retryable, not
+    broken. A Double Take-style client surfaces `message` whenever
+    `result` is absent (special-casing only code 28, no-faces-found),
+    so this reads as an actionable error — never as a silent success
+    that dropped an enrolment.
+    """
+    return JSONResponse(
+        {
+            "message": (
+                "the vector store is held by another process (ingest, "
+                "backfill or an enrolment sweep); the face was NOT "
+                "enrolled — retry after it finishes"
+            ),
+            "code": FACES_SERVICE_EXCEPTION,
+        },
+        status_code=503,
+        headers={"Retry-After": str(RETRY_AFTER_S)},
+    )
 
 
 class RateLimiter:
@@ -152,6 +233,7 @@ class RecognitionService:
         self.Session = session_factory
         self._vectors = vectors
         self._embedder = embedder
+        self._store_was_busy = False
 
     @property
     def vectors(self):
@@ -162,6 +244,38 @@ class RecognitionService:
             # second one on the same path (identity/vectors.py).
             self._vectors = get_shared_store(self.config.identity.vector_db_path)
         return self._vectors
+
+    def _acquire_vectors(self):
+        """The shared store, or VectorStoreHeld while another process
+        (siteloom run, a backfill, an enrolment sweep) has the embedded
+        database's flock.
+
+        The busy state is detected from the acquisition failure itself —
+        the RuntimeError embedded Qdrant raises on a flock collision —
+        never by polling or a second client. Only successes are cached
+        (the property leaves _vectors unset on failure), so acquisition
+        is retried per request and the API recovers the moment the
+        holding process exits, without a restart. Logging is on the
+        state TRANSITION: Double Take polls for hours while ingest runs,
+        and a warning per frame is alarm spam, which is what this change
+        exists to stop.
+        """
+        try:
+            store = self.vectors
+        except RuntimeError as exc:
+            if not self._store_was_busy:
+                self._store_was_busy = True
+                log.warning(
+                    "vector store is held by another process; recognition "
+                    "reads degrade to no-match and enrolments refuse with "
+                    "503 until it frees (CLD-110): %s",
+                    exc,
+                )
+            raise VectorStoreHeld(str(exc)) from exc
+        if self._store_was_busy:
+            self._store_was_busy = False
+            log.info("vector store freed; recognition fully restored")
+        return store
 
     @property
     def embedder(self):
@@ -181,7 +295,18 @@ class RecognitionService:
         limit: int = 0,
         det_prob_threshold: float | None = None,
         prediction_count: int = 1,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
+        """Detect, embed and match faces; returns (results, store_busy).
+
+        When the vector store is held, the read DEGRADES (CLD-110):
+        detection and embedding are local and still run, so callers get
+        the same boxes a genuine no-match carries — only the subject
+        search is skipped, every face reports zero subjects, and
+        store_busy tells the route to mark the answer. The store is
+        acquired lazily, on the first face that produced an embedding,
+        exactly where the code touched it before — a no-face image must
+        not start holding the flock it never needed.
+        """
         import cv2
 
         image = cv2.imdecode(
@@ -200,6 +325,8 @@ class RecognitionService:
             faces = faces[:limit]
 
         results = []
+        store = None
+        store_busy = False
         with self.Session() as session:
             for face in faces:
                 embedding = self.embedder.embed_face(image, face)
@@ -212,8 +339,14 @@ class RecognitionService:
                     "probability": round(float(face[-1]), 5),
                 }
                 subjects: list[dict] = []
-                if embedding is not None:
-                    hits = self.vectors.search("face", embedding, limit=25)
+                if embedding is not None and not store_busy:
+                    if store is None:
+                        try:
+                            store = self._acquire_vectors()
+                        except VectorStoreHeld:
+                            store_busy = True
+                if embedding is not None and store is not None:
+                    hits = store.search("face", embedding, limit=25)
                     best_by_identity: dict[int, float] = {}
                     for hit in hits:
                         prev = best_by_identity.get(hit.identity_id)
@@ -233,14 +366,23 @@ class RecognitionService:
                         )[: max(1, prediction_count)]
                     ]
                 results.append({"box": box, "subjects": subjects})
-        return results
+        return results, store_busy
 
     # -- enrollment --------------------------------------------------------
 
     def enroll(self, subject: str, image_bytes: bytes) -> dict:
         """Add one face example to a subject (creating it if needed) —
         exactly what the photo-backfill loop or an Immich exporter calls
-        per face. Same collection live recognition reads."""
+        per face. Same collection live recognition reads.
+
+        A write does not degrade (CLD-110): pretending success while the
+        store is held would silently drop the enrolment, which is worse
+        than any error the caller can see. The store is acquired first,
+        before any decode or row flush, so a refusal (VectorStoreHeld,
+        the route's 503) provably leaves the database, the store and the
+        audit log exactly as they were.
+        """
+        vectors = self._acquire_vectors()
         import cv2
 
         image = cv2.imdecode(
@@ -263,7 +405,7 @@ class RecognitionService:
             # No annotation and no stored crop — an API enrollment posts
             # its image and keeps nothing, so `source` is all the
             # provenance there is to record (CLD-84).
-            self.vectors.add("face", embedding, identity.id, source=SOURCE_API)
+            vectors.add("face", embedding, identity.id, source=SOURCE_API)
             identity.vector_count += 1
             identity.appearance_count += 1
             identity.last_seen = _now()
@@ -397,7 +539,7 @@ def register(app, config: SiteConfig, service: RecognitionService) -> None:
         _=Depends(guard),
     ):
         try:
-            result = service.recognize(
+            result, store_busy = service.recognize(
                 await _read_upload(file),
                 limit=limit,
                 det_prob_threshold=det_prob_threshold,
@@ -405,7 +547,7 @@ def register(app, config: SiteConfig, service: RecognitionService) -> None:
             )
         except (ValueError, LookupError) as exc:
             raise HTTPException(400, str(exc))
-        return JSONResponse({"result": result})
+        return _recognize_response(result, store_busy)
 
     @app.get("/api/v1/recognition/subjects")
     def list_subjects(_=Depends(guard)):
@@ -427,6 +569,10 @@ def register(app, config: SiteConfig, service: RecognitionService) -> None:
     ):
         try:
             result = service.enroll(subject, await _read_upload(file))
+        except VectorStoreHeld:
+            # Writes refuse (CLD-110). Not audited — nothing happened,
+            # same rule denied requests follow (web/auth.py).
+            return _store_busy_refusal()
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except LookupError as exc:
