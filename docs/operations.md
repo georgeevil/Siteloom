@@ -96,17 +96,41 @@ transfer — so it is **not** covered by any of the above. Point
 ## Watching a running server
 
 ```
-GET /healthz   -> 200 {"status": "ok", "site": ..., "pid": ...}
-GET /readyz    -> 200 or 503 {"ok": bool, "checks": [...]}
+GET /healthz   -> 200 {"status": "ok"}
+GET /readyz    -> 200 or 503 {"ok": bool, "checks": [{"name": ..., "status": "ok|warn|fail"}]}
 ```
 
 `/healthz` is liveness: it touches nothing but the process, so a slow database
 cannot get the server killed and restarted into the same slow database.
-`/readyz` is readiness: it runs the cheap half of `doctor` (database, media dir,
-jobs) and returns 503 when the process is up but cannot do its job. It never
-opens the vector store — this process is already holding it.
+`/readyz` is readiness: it runs the cheap, read-only half of `doctor` (database,
+media dir, jobs) and returns 503 when the process is up but cannot do its job.
+It never opens the vector store — this process is already holding it — and it
+never migrates: schema work belongs to `init-db` and to `run`/`serve` startup.
+
+Both endpoints are public (a probe that needs a cookie gets the service killed),
+so their bodies are deliberately terse: check names and statuses, never paths,
+hostnames, pids or error text — that detail, with remedies, is `siteloom
+doctor` at the terminal. `/readyz` caches its answer for ~5 s, so hammering it
+costs one check run per window, not one per request.
 
 `/jobs` in the web UI and `GET /api/jobs` show the same job rows as the CLI.
+
+## Exposing the console
+
+Accounts (`siteloom users add`) and sign-in throttling are built in, and the
+session cookie hardens itself: `HttpOnly` and `SameSite=Lax` always, `Secure`
+automatically whenever the request arrived over HTTPS — directly or via a
+reverse proxy or tunnel that sets `X-Forwarded-Proto: https`, which Caddy,
+nginx's standard proxy snippets, and Cloudflare/Tailscale tunnels all do.
+Cross-site form posts are refused by an `Origin`/`Sec-Fetch-Site` check in the
+same middleware that authenticates, so there is nothing to configure — just
+keep the proxy passing the browser's `Host` header through (or setting
+`X-Forwarded-Host`), because the check compares the browser's origin against
+it. Sessions last 14 days from sign-in with no idle timeout (a wall console
+should not log itself out mid-shift); sign-out, disabling the account, or
+revoking sessions on `/users` ends one sooner, and expired rows are pruned at
+each sign-in. Serving the console over TLS is the proxy's job — Siteloom
+itself speaks plain HTTP.
 
 ## Watching and steering jobs
 

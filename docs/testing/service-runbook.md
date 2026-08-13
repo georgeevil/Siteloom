@@ -59,7 +59,7 @@ that `siteloom service install` itself reports the problem.
 
 ```bash
 siteloom service start
-kill -9 $(curl -fsS localhost:8000/healthz | python3 -c 'import json,sys;print(json.load(sys.stdin)["pid"])')
+pkill -9 -f 'siteloom serve'    # /healthz no longer reports the pid (CLD-54)
 sleep 15 && siteloom service status; echo "exit=$?"    # expect 0 — it came back
 siteloom jobs reap --config site.yaml                  # the killed row is stale
 ```
