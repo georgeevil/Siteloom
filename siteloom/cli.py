@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -357,9 +357,16 @@ def backfill_unifi(
         typer.echo(f"no camera {camera!r} in {config}; known: {list(cams)}", err=True)
         raise typer.Exit(2)
 
-    # Operators type local wall time; the NVR speaks UTC.
-    start = start.astimezone()
-    end = end.astimezone() if end else datetime.now().astimezone()
+    # Operators type wall time — the *site's* wall time (CLD-100), the
+    # same frame the console's backfill form reads. An explicit offset in
+    # the argument is honoured as given, and the resume commands the
+    # console prints carry one. Never `.astimezone()` bare: that is the
+    # server process's zone, wrong the day it differs from the site's.
+    from siteloom.localtime import as_aware, site_zone
+
+    zone = site_zone(cfg)
+    start = as_aware(start, zone)
+    end = as_aware(end, zone) if end else datetime.now(timezone.utc)
 
     service = IngestService(cfg)
     backfill = UnifiBackfill(service, cams[camera])

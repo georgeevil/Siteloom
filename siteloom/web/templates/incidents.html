@@ -106,21 +106,21 @@
   {% if section.rows %}
   <div class="tablecard">
     <div class="irow head">
-      <div>Window (UTC)</div><div>Incident</div><div>Cameras</div>
+      <div>Window ({{ site_tz() }})</div><div>Incident</div><div>Cameras</div>
       <div>Events</div><div>Opened by</div>
     </div>
     {% for row in section.rows %}
     <div class="irow{% if section.key == 'open' %} open{% endif %}">
       <div>
         {% if row.start %}
-        <div class="mono">{{ row.start.strftime('%Y-%m-%d %H:%M') }}
-          → {{ row.end.strftime('%Y-%m-%d %H:%M') }}</div>
+        <div class="mono">{{ local_time(row.start, '%Y-%m-%d %H:%M') }}
+          → {{ local_time(row.end, '%Y-%m-%d %H:%M') }}</div>
         {% else %}
         <div class="mono in-zero">no events attached</div>
         {% endif %}
-        <div class="in-sub">opened {{ row.incident.opened_at.strftime('%m-%d %H:%M') }}
+        <div class="in-sub">opened {{ local_time(row.incident.opened_at, '%m-%d %H:%M') }}
           {%- if row.incident.closed_at %} · closed
-          {{ row.incident.closed_at.strftime('%m-%d %H:%M') }}{% endif %}</div>
+          {{ local_time(row.incident.closed_at, '%m-%d %H:%M') }}{% endif %}</div>
       </div>
       <div class="in-title">
         <a href="/incidents/{{ row.incident.id }}">{{ row.incident.title }}</a>

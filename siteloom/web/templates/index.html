@@ -351,7 +351,7 @@
       {% set link = e.active_identities | first %}
       <a class="row rs-{{ st }}{% if selected == e.id %} sel{% endif %}"
          href="{{ row_urls[e.id] }}" data-event="{{ e.id }}">
-        <div class="r-time">{{ e.first_seen.strftime('%H:%M:%S') }}</div>
+        <div class="r-time">{{ local_time(e.first_seen, '%H:%M:%S') }}</div>
         <div class="r-det">
           {% if e.best_crop_path %}
             <img class="r-thumb" src="/media/{{ e.best_crop_path }}" alt="" loading="lazy">

@@ -167,7 +167,7 @@
           </div>
           <div class="foot">
             {{ i.vector_count }} vectors · seen {{ i.appearance_count }}× ·
-            {{ i.last_seen.strftime('%Y-%m-%d %H:%M') }}
+            {{ local_time(i.last_seen, '%Y-%m-%d %H:%M') }}
           </div>
         </div>
       </a>
@@ -239,7 +239,7 @@
     <h3 class="sec">Recent events</h3>
     {% for link in rail.links %}
       <a class="evrow" href="/?selected={{ link.event_id }}">
-        <span class="t">{{ link.event.first_seen.strftime('%m-%d %H:%M') }}</span>
+        <span class="t">{{ local_time(link.event.first_seen, '%m-%d %H:%M') }}</span>
         <span>{{ link.event.class_name }}</span>
         <span class="cam">{{ link.event.camera.name if link.event.camera else link.event.camera_id }}</span>
       </a>

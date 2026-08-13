@@ -356,7 +356,7 @@
       </div>
       <div class="src-row">
         <span class="{% if s.failed %}bad{% endif %}">{{ s.failed }} failed</span>
-        <span>{{ s.source.last_indexed_at.strftime('%Y-%m-%d') if s.source.last_indexed_at else 'never' }}</span>
+        <span>{{ local_time(s.source.last_indexed_at, '%Y-%m-%d') if s.source.last_indexed_at else 'never' }}</span>
       </div>
     </a>
     {% else %}

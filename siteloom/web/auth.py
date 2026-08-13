@@ -121,6 +121,10 @@ ADMIN_PREFIXES = (
     "/backfill",
     "/classes/detection",
     "/classes/events",
+    # The site timezone (CLD-100) moves every rendered timestamp and the
+    # frame form input is read in — reconfiguration, like the two above.
+    # Covers set, NVR detect and the one-time browser seed alike.
+    "/classes/timezone",
     "/jobs/",
     # Enrolling, fine-tuning and adopting a model reconfigure what the
     # system recognizes (CLD-94).

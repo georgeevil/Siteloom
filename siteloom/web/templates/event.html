@@ -136,7 +136,7 @@
   <div class="muted" style="font-size:0.8rem; line-height:1.7; margin-top:4px;">
     {% for l in unlinked %}
       {{ identity_name(l.identity) }}{% if l.unlinked_at %}
-      <span class="mono">({{ l.unlinked_at.strftime('%m-%d %H:%M') }})</span>{% endif %}{{ "," if not loop.last }}
+      <span class="mono">({{ local_time(l.unlinked_at, '%m-%d %H:%M') }})</span>{% endif %}{{ "," if not loop.last }}
     {% endfor %}
   </div>
 </details>
@@ -195,7 +195,7 @@
   {% endif %}
 </form>
 <p class="muted">
-  {{ event.first_seen.strftime('%Y-%m-%d %H:%M:%S') }} &rarr; {{ event.last_seen.strftime('%H:%M:%S') }}
+  {{ local_time(event.first_seen, '%Y-%m-%d %H:%M:%S') }} &rarr; {{ local_time(event.last_seen, '%H:%M:%S') }}
   · {{ event.detection_count }} detections
   · best confidence {{ '%.2f'|format(event.best_confidence) }}
   {%- if event.mean_confidence is not none %}
@@ -213,7 +213,7 @@
   <tr><th>Time</th><th>Confidence</th><th>BBox</th><th>Zones</th></tr>
   {% for row in detections %}
   <tr>
-    <td>{{ row.d.timestamp.strftime('%H:%M:%S.%f')[:-3] }}</td>
+    <td>{{ local_time(row.d.timestamp, '%H:%M:%S.%f')[:-3] }}</td>
     <td>{{ '%.2f'|format(row.d.confidence) }}</td>
     <td class="muted">{{ row.bbox | map('round') | list }}</td>
     <td>{{ row.zones | join(', ') or '—' }}</td>

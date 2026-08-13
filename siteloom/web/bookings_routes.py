@@ -65,27 +65,33 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def parse_window(start: str, end: str) -> tuple[datetime, datetime]:
-    """The two timestamps a manual booking needs, or raise.
+def parse_window(start: str, end: str, zone=None) -> tuple[datetime, datetime]:
+    """The two timestamps a manual booking needs, in naive UTC, or raise.
 
     `datetime-local` inputs post `2026-08-10T15:00`, which is naive — and
-    naive UTC is exactly what `Booking.start`/`end` hold, so there is no
-    conversion here and deliberately no timezone in the form: a value
-    silently reinterpreted in another zone would move the arrival window
-    that suppresses alarms.
+    under the site-time contract (CLD-100) naive form input is the
+    **site's** wall clock, converted to the naive UTC that
+    `Booking.start`/`end` hold right here at the boundary. `zone` is the
+    site zone; None is the unset rung, where site time *is* UTC and the
+    conversion is the identity — the pre-CLD-100 behaviour, under which
+    operators were implicitly typing UTC.
+
+    An explicit offset is still refused: the form advertises one frame
+    (the site's), and honouring a different one per row would move the
+    arrival window that suppresses alarms.
     """
+    from siteloom.localtime import as_utc
+
     try:
         first = datetime.fromisoformat(start.strip())
         last = datetime.fromisoformat(end.strip())
     except (ValueError, AttributeError) as exc:
         raise BookingError("Enter both a check-in and a check-out time.") from exc
     if first.tzinfo is not None or last.tzinfo is not None:
-        # Accepting an offset would mean storing one timestamp in a
-        # different frame from every other row in the table.
-        raise BookingError("Times are UTC; drop the timezone offset.")
+        raise BookingError("Times are site-local; drop the timezone offset.")
     if last < first:
         raise BookingError("Check-out cannot be before check-in.")
-    return first, last
+    return as_utc(first, zone), as_utc(last, zone)
 
 
 def feed_label(ical: str) -> str:
@@ -135,6 +141,7 @@ def register(app, templates, Session, config) -> None:
     # builder rather than re-spelling `since`/`until` here means a rename
     # there cannot leave this page linking at nothing. Imported inside
     # register() because create_app imports this module, not the reverse.
+    from siteloom.localtime import site_zone
     from siteloom.web.app import _triage_url
 
     nav.add("/bookings", "Bookings", "GB", after="/noise")
@@ -268,7 +275,7 @@ def register(app, templates, Session, config) -> None:
         try:
             if not label:
                 raise BookingError("Give the booking a summary.")
-            first, last = parse_window(start, end)
+            first, last = parse_window(start, end, site_zone(config))
         except BookingError as exc:
             return _page(request, error=str(exc), status=400)
         with Session() as session:
@@ -311,7 +318,7 @@ def register(app, templates, Session, config) -> None:
         try:
             if not label:
                 raise BookingError("Give the booking a summary.")
-            first, last = parse_window(start, end)
+            first, last = parse_window(start, end, site_zone(config))
         except BookingError as exc:
             return _page(request, error=str(exc), status=400)
         with Session() as session:

@@ -155,7 +155,7 @@
       {% endif %}
     </div>
     <div class="mono">{{ r.class_name or '—' }}<br>{{ r.camera_id or '' }}</div>
-    <div class="mono">{{ r.at.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+    <div class="mono">{{ local_time(r.at, '%Y-%m-%d %H:%M:%S') }}</div>
     <div class="mono">
       {{ '%.2f'|format(r.detector_confidence) if r.detector_confidence is not none else '—' }}
     </div>

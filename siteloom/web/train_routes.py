@@ -362,17 +362,22 @@ def run_row(run: TrainingRun, config) -> dict:
     The template is handed either an evaluation with figures or an
     evaluation with a reason — never a figure it is trusted to hide.
     """
+    from siteloom.localtime import display, site_zone
+
     metrics = json.loads(run.metrics or "{}")
     before = metrics.get("before") or {}
     after = metrics.get("after") or {}
     adoptable, reason = adoption_state(run, config)
+    zone = site_zone(config)
     row = {
         "id": run.id,
         "kind": run.kind,
         "status": run.status,
-        "started_at": run.started_at.strftime("%Y-%m-%d %H:%M"),
+        "started_at": display(run.started_at, zone, "%Y-%m-%d %H:%M"),
         "finished_at": (
-            run.finished_at.strftime("%Y-%m-%d %H:%M") if run.finished_at else None
+            display(run.finished_at, zone, "%Y-%m-%d %H:%M")
+            if run.finished_at
+            else None
         ),
         "samples": run.sample_count,
         "people": run.identity_count,

@@ -59,38 +59,35 @@ _state: dict = {"thread": None, "last": None}
 CHUNK_CHOICES = (5.0, 15.0, 30.0, 60.0)
 
 
-def _local(dt: datetime) -> datetime:
-    """An aware datetime from what an operator typed.
-
-    A `datetime-local` input has no offset, and operators think in wall
-    time — the same assumption the CLI makes (`start.astimezone()`)
-    before handing the range to an NVR that speaks UTC.
-    """
-    return dt.astimezone() if dt.tzinfo is None else dt
-
-
-def parse_range(start: str, end: str) -> tuple[datetime, datetime]:
+def parse_range(start: str, end: str, zone=None) -> tuple[datetime, datetime]:
     """The window to scan, or a ValueError naming what is wrong.
 
-    Returned aware and left in the operator's zone; `UnifiBackfill.scan`
-    converts. An open-ended range means "up to now", which is the common
-    case after a crash: you know when ingest stopped, not when it should
-    stop catching up.
+    A `datetime-local` input has no offset, and operators think in wall
+    time — the **site's** wall time (CLD-100), which is what `zone`
+    carries; None is the unset-zone rung and reads as UTC. Interpreting
+    in the server process's zone (`.astimezone()`, the old behaviour) is
+    wrong the day the box serving the site sits in a different zone than
+    the cameras. Returned aware; `UnifiBackfill.scan` converts. An
+    open-ended range means "up to now", which is the common case after a
+    crash: you know when ingest stopped, not when it should stop catching
+    up.
     """
+    from siteloom.localtime import as_aware
+
     text = (start or "").strip()
     if not text:
         raise ValueError("Enter a start time.")
     try:
-        begins = _local(datetime.fromisoformat(text))
+        begins = as_aware(datetime.fromisoformat(text), zone)
     except ValueError:
         raise ValueError(f"{text!r} is not a date and time.") from None
     if (end or "").strip():
         try:
-            finishes = _local(datetime.fromisoformat(end.strip()))
+            finishes = as_aware(datetime.fromisoformat(end.strip()), zone)
         except ValueError:
             raise ValueError(f"{end.strip()!r} is not a date and time.") from None
     else:
-        finishes = datetime.now(timezone.utc).astimezone()
+        finishes = datetime.now(timezone.utc)
     if finishes <= begins:
         raise ValueError("The end of the range must be after its start.")
     return begins, finishes
@@ -276,7 +273,9 @@ def register(app, templates, Session, config) -> None:
                 form=form,
             )
         try:
-            begins, finishes = parse_range(start, end)
+            from siteloom.localtime import site_zone
+
+            begins, finishes = parse_range(start, end, site_zone(config))
         except ValueError as exc:
             return page(request, 400, error=str(exc), form=form)
 

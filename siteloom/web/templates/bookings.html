@@ -116,7 +116,7 @@
   <span>arrival window <b>−{{ pre_hours | round(1) }} h</b> to
     <b>+{{ post_hours | round(1) }} h</b> around check-in</span>
   {% if feed %}<span>feed <b>{{ feed }}</b></span>{% endif %}
-  <span>now <b>{{ now.strftime('%Y-%m-%d %H:%M') }} UTC</b></span>
+  <span>now <b>{{ local_time(now, '%Y-%m-%d %H:%M') }} {{ site_tz() }}</b></span>
 </div>
 
 {% if error %}
@@ -128,7 +128,8 @@
   <p>
     For a stay the feed does not carry, or to correct one it got wrong. A
     manual booking survives <code>siteloom sync-bookings</code> — the sync
-    keys on the feed's own UID and leaves these rows alone. Times are UTC.
+    keys on the feed's own UID and leaves these rows alone. Times are
+    site-local ({{ site_tz() }}).
   </p>
   <form class="bk-form" method="post" action="/bookings">
     <input type="text" name="summary" placeholder="Summary — e.g. Unit A, Okonjo"
@@ -174,16 +175,16 @@
   {% if section.rows %}
   <div class="tablecard">
     <div class="brow head">
-      <div>Window (UTC)</div><div>Summary</div><div>Source</div>
+      <div>Window ({{ site_tz() }})</div><div>Summary</div><div>Source</div>
       <div>Events</div><div>Guest-stamped</div>
     </div>
     {% for row in section.rows %}
     <div class="brow{% if section.key == 'current' %} now{% endif %}">
       <div>
-        <div class="mono">{{ row.booking.start.strftime('%Y-%m-%d %H:%M') }}
-          → {{ row.booking.end.strftime('%Y-%m-%d %H:%M') }}</div>
+        <div class="mono">{{ local_time(row.booking.start, '%Y-%m-%d %H:%M') }}
+          → {{ local_time(row.booking.end, '%Y-%m-%d %H:%M') }}</div>
         <div class="bk-sub">arrival
-          {{ row.arrival_start.strftime('%m-%d %H:%M') }}–{{ row.arrival_end.strftime('%m-%d %H:%M') }}</div>
+          {{ local_time(row.arrival_start, '%m-%d %H:%M') }}–{{ local_time(row.arrival_end, '%m-%d %H:%M') }}</div>
       </div>
       {# Airbnb and Booking.com iCal summaries routinely carry the guest's
          name, which makes this column a dated guest register on a screen
@@ -221,9 +222,9 @@
           <input type="text" name="summary" value="{{ free_text(row.booking.summary, 'Booking ' ~ row.booking.id) }}"
                  style="min-width:24ch" required>
           <input type="datetime-local" name="start"
-                 value="{{ row.booking.start.strftime('%Y-%m-%dT%H:%M') }}" required>
+                 value="{{ local_time(row.booking.start, '%Y-%m-%dT%H:%M') }}" required>
           <input type="datetime-local" name="end"
-                 value="{{ row.booking.end.strftime('%Y-%m-%dT%H:%M') }}" required>
+                 value="{{ local_time(row.booking.end, '%Y-%m-%dT%H:%M') }}" required>
           <button type="submit">Save</button>
         </form>
         <form class="bk-form" method="post"

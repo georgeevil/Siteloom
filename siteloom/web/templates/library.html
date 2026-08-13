@@ -169,7 +169,7 @@
         <div class="mname">{{ i.name }}</div>
         <div class="msrc">
           {{ source_names.get(i.source_id, 'unknown source') }}
-          {%- if i.taken_at %} · {{ i.taken_at.strftime('%Y-%m-%d') }}{% endif %}
+          {%- if i.taken_at %} · {{ local_time(i.taken_at, '%Y-%m-%d') }}{% endif %}
         </div>
         <div class="counts">
           <span class="cchip">{{ box_counts.get(i.id, 0) }} box{{ '' if box_counts.get(i.id, 0) == 1 else 'es' }}</span>

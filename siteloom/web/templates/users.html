@@ -119,7 +119,7 @@
     <div>
       <div class="us-name">{{ row.user.username }}</div>
       <div class="us-sub">
-        #{{ row.user.id }} · added {{ row.user.created_at.strftime('%Y-%m-%d') }}
+        #{{ row.user.id }} · added {{ local_time(row.user.created_at, '%Y-%m-%d') }}
         {%- if row.user.id == actor_id %} · you{% endif %}
       </div>
     </div>
@@ -140,7 +140,7 @@
         {{ 'disabled' if row.user.disabled else 'active' }}</span>
     </div>
     <div class="mono">
-      {% if row.last_seen %}{{ row.last_seen.strftime('%Y-%m-%d %H:%M') }}
+      {% if row.last_seen %}{{ local_time(row.last_seen, '%Y-%m-%d %H:%M') }}
       {% else %}<span class="us-never">never / expired</span>{% endif %}
     </div>
     <div class="us-actions">

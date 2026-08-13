@@ -10,7 +10,7 @@
 <p class="muted">
   class {{ identity.class_name }}
   · seen {{ identity.appearance_count }}×
-  · {{ identity.first_seen.strftime('%Y-%m-%d %H:%M') }} &rarr; {{ identity.last_seen.strftime('%Y-%m-%d %H:%M') }}
+  · {{ local_time(identity.first_seen, '%Y-%m-%d %H:%M') }} &rarr; {{ local_time(identity.last_seen, '%Y-%m-%d %H:%M') }}
   · {{ identity.vector_count }} embeddings stored
 </p>
 
@@ -73,7 +73,7 @@
     <td><a href="/events/{{ l.event_id }}">#{{ l.event_id }}</a>
         {% if l.event.guest_window %}<span class="badge guest">guest window</span>{% endif %}</td>
     <td>{{ l.event.camera.name if l.event.camera else l.event.camera_id }}</td>
-    <td class="muted">{{ l.event.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+    <td class="muted">{{ local_time(l.event.first_seen, '%Y-%m-%d %H:%M:%S') }}</td>
     <td>{{ '%.2f'|format(l.similarity) }}</td>
     <td>{{ l.hit_count }}</td>
   </tr>

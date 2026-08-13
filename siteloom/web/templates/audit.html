@@ -111,7 +111,7 @@
 {% if rows %}
 <div class="tablecard">
   <div class="arow head">
-    <div>When (UTC)</div><div>Actor</div><div>Method</div><div>Path</div>
+    <div>When ({{ site_tz() }})</div><div>Actor</div><div>Method</div><div>Path</div>
     <div class="au-status">Code</div>
   </div>
   {# The appended slices land in here, not in .tablecard, so that the
@@ -119,7 +119,7 @@
   <div id="audit-rows">
     {% for row in rows %}
     <div class="arow">
-      <div>{{ row.at.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+      <div>{{ local_time(row.at, '%Y-%m-%d %H:%M:%S') }}</div>
       {# A row whose user_id is null had no account behind it: open mode, or
          a sign-in that failed. Shown as it was written, greyed. #}
       <div class="au-actor{{ '' if row.user_id else ' au-ghost' }}">{{ row.username }}</div>
