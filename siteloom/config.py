@@ -473,7 +473,7 @@ class FrigateConfig(BaseModel):
 class WebhookConfig(BaseModel):
     url: str
     # Which occurrences fire this hook: identity.match, identity.unknown,
-    # identity.new_plate, noise.episode.
+    # identity.new_plate, noise.episode, plate.watchlist.
     events: list[str] = ["identity.match", "identity.unknown"]
     # Optional bearer token sent as Authorization: Bearer <token>.
     token: str = ""

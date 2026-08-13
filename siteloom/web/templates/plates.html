@@ -22,6 +22,52 @@
   .pl-head { margin-bottom: 12px; }
   .pl-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   .pl-head p { font-size: 12px; color: var(--muted); margin: 0; }
+  .watchcard {
+    border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel);
+    padding: 10px 14px 12px; margin-bottom: 12px;
+  }
+  .watchcard h3 { margin: 0 0 2px; font-size: 12.5px; font-weight: 600; }
+  .watchcard .sub { font-size: 11px; color: var(--faint); margin: 0 0 8px; }
+  .wrow {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
+    padding: 5px 0; border-bottom: 1px solid var(--row-rule); font-size: 11.5px;
+  }
+  .wrow:last-of-type { border-bottom: 0; }
+  .wrow form { margin: 0; margin-left: auto; }
+  .wlabel { color: var(--text); }
+  .wnote { color: var(--faint); }
+  .wadd { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .wadd input {
+    font: inherit; font-size: 11.5px; padding: 4px 8px; border-radius: 5px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .wadd input[name="plate"] { width: 110px; font-family: var(--font-mono); text-transform: uppercase; }
+  .wbadge {
+    display: inline-block; font-size: 9.5px; font-family: var(--font-mono);
+    text-transform: uppercase; letter-spacing: .06em; padding: 1px 6px;
+    border-radius: 999px; border: 1px solid var(--amber); color: var(--amber);
+    vertical-align: 2px; margin-left: 6px;
+  }
+  .fixline { font-size: 11px; color: var(--green); }
+  .fixline a { color: inherit; }
+  .fix { display: flex; gap: 4px; margin-top: 3px; }
+  .fix input {
+    font-family: var(--font-mono); font-size: 10.5px; padding: 2px 6px; width: 110px;
+    border-radius: 4px; border: 1px solid var(--control-border);
+    background: var(--raised); color: var(--text); text-transform: uppercase;
+  }
+  .pl-search { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
+  .pl-search input[type="search"] {
+    flex: 0 1 340px; font: inherit; font-size: 12px; padding: 5px 10px;
+    border-radius: 6px; border: 1px solid var(--control-border);
+    background: var(--raised); color: var(--text);
+  }
+  .pl-search button {
+    font: inherit; font-size: 11.5px; padding: 5px 12px; border-radius: 6px;
+    cursor: pointer; border: 1px solid var(--control-border);
+    background: var(--raised); color: var(--muted);
+  }
+  .pl-search button:hover { border-color: var(--accent); color: var(--accent); }
   .pl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .pl-chips .grp {
     display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
@@ -68,6 +114,9 @@
     color: var(--text);
   }
   .plate.rejected { color: var(--faint); text-decoration: line-through; }
+  a.plate { text-decoration: none; }
+  a.plate:hover { color: var(--accent); }
+  a.plate.rejected { text-decoration: line-through; }
   .raw { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
   .why { font-size: 11px; color: var(--amber); }
   .verdicts { display: flex; gap: 5px; }
@@ -108,7 +157,49 @@
   </p>
 </div>
 
+{% if total or watches %}
+<div class="watchcard">
+  <h3>Watchlist</h3>
+  <p class="sub">A sighting of a watched plate fires the
+    <code>plate.watchlist</code> webhook and an MQTT message on
+    <code>siteloom/watchlist</code> — once per event, not per frame.</p>
+  {% for w in watches %}
+  <div class="wrow">
+    <a class="plate" style="font-size: 12.5px;" href="/plates/p/{{ w.plate }}">{{ w.plate }}</a>
+    <span class="wlabel">{{ w.label or '—' }}</span>
+    <span class="mono">{{ w.sightings }} sighting{{ '' if w.sightings == 1 else 's' }}{% if w.last_seen %}, last {{ w.last_seen.strftime('%Y-%m-%d %H:%M') }}{% endif %}</span>
+    {% if w.note %}<span class="wnote">{{ w.note }}</span>{% endif %}
+    <form method="post" action="/plates/watchlist/{{ w.id }}/delete">
+      <input type="hidden" name="back" value="{{ back }}">
+      <button class="vbtn" type="submit">Remove</button>
+    </form>
+  </div>
+  {% endfor %}
+  <form class="wadd" method="post" action="/plates/watchlist">
+    <input type="hidden" name="back" value="{{ back }}">
+    <input name="plate" placeholder="Plate" required aria-label="Plate to watch">
+    <input name="label" placeholder="Why it's watched" aria-label="Watch label">
+    <input name="note" placeholder="Note (optional)" aria-label="Watch note">
+    <button class="vbtn" type="submit">Watch</button>
+  </form>
+</div>
+{% endif %}
+
 {% if total %}
+<form class="pl-search" method="get" action="/plates">
+  {# Search is one filter among three: the hidden inputs keep the chips'
+     state, exactly as the chips keep the search. #}
+  {% if filters['class'] %}<input type="hidden" name="class" value="{{ filters['class'] }}">{% endif %}
+  {% if filters.status %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+  <input type="search" name="q" value="{{ filters.q or '' }}"
+         placeholder="Search a plate — spacing and dashes don't matter"
+         aria-label="Search plate reads">
+  <button type="submit">Search</button>
+  {% if filters.q %}
+  <a class="chip" href="{{ clear_search }}">Clear</a>
+  {% endif %}
+</form>
+
 <div class="pl-chips">
   <span class="grp">
     {% for chip in class_chips %}
@@ -142,7 +233,31 @@
       {% endif %}
     </div>
     <div>
-      <div class="plate{{ '' if r.accepted else ' rejected' }}">{{ r.display_text or '—' }}</div>
+      {# A row with normalized text links to that plate's history page —
+         rejected reads too: a near-miss of a known plate belongs on the
+         same screen as its clean reads. #}
+      {% if r.text %}
+      <a class="plate{{ '' if r.accepted else ' rejected' }}" href="/plates/p/{{ r.text }}">{{ r.display_text or '—' }}</a>
+      {% else %}
+      <div class="plate rejected">{{ r.display_text or '—' }}</div>
+      {% endif %}
+      {% if r.text in watched_plates or r.corrected_text in watched_plates %}
+      <span class="wbadge" title="on the watchlist">watched</span>
+      {% endif %}
+      {% if r.corrected_text %}
+      <div class="fixline">actually <a href="/plates/p/{{ r.corrected_text }}">{{ r.corrected_text }}</a></div>
+      {% endif %}
+      {% if r.verdict == 'wrong' or r.corrected_text %}
+      {# Correcting is judging: the input appears once a read is marked
+         wrong (or was already corrected), and submitting it re-derives
+         the verdict from whether the correction agrees with the read. #}
+      <form class="fix" method="post" action="/plates/{{ r.id }}/correct">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input name="text" value="{{ r.corrected_text or '' }}"
+               placeholder="actually reads…" aria-label="Correct plate text">
+        <button class="vbtn" type="submit">Fix</button>
+      </form>
+      {% endif %}
       {% if r.raw_text and r.text and r.raw_text != r.text %}
         {# Normalization is lossy and irreversible; showing both is what
            keeps a near-miss distinguishable from a clean read. #}

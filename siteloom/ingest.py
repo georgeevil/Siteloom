@@ -34,6 +34,7 @@ from siteloom.store import (
     EventIdentity,
     NoiseEvent,
     PlateRead,
+    PlateWatch,
     get_session,
     init_db,
     make_engine,
@@ -442,6 +443,11 @@ class IngestService:
             # Merging before linking means the surviving event usually
             # already carries the link, so the pairing publishes once.
             event = self._merge_with_prior(session, event, resolution.identity.id, rules)
+            # A watched plate is an alarm, not just a row. Checked after
+            # the merge so the once-per-event dedupe counts reads on the
+            # event that survived, not on a fragment about to be folded.
+            if emb["plate"]:
+                self._notify_watch_hit(session, event, emb["plate"])
             # An unlinked claim is one an operator repudiated (CLD-36);
             # a later frame matching the same identity must not revive it
             # by incrementing its hit count. It makes a fresh claim
@@ -498,6 +504,38 @@ class IngestService:
                     ),
                     payload,
                 )
+
+    def _notify_watch_hit(self, session, event: Event, plate: str) -> None:
+        """Fire the watchlist alarm on the first accepted read of a
+        watched plate on this event.
+
+        Once per event+plate pairing — the same rule the identity publish
+        follows — but keyed on the PlateRead rows already written (the
+        accepted count reaching exactly 1), so the dedupe is restart-safe
+        and survives event merges the way an in-memory flag would not.
+        The query autoflushes this frame's pending row, so a first read
+        counts itself. Both publishers degrade to a log line when their
+        endpoint is down (NFR1); a missed alarm never blocks ingestion.
+        """
+        watch = session.query(PlateWatch).filter_by(plate=plate).first()
+        if watch is None:
+            return
+        prior = (
+            session.query(PlateRead)
+            .filter(
+                PlateRead.event_id == event.id,
+                PlateRead.text == plate,
+                PlateRead.accepted.is_(True),
+            )
+            .count()
+        )
+        if prior != 1:
+            return
+        from siteloom.integrations.mqtt import watchlist_payload
+
+        payload = watchlist_payload(event, watch, plate)
+        self.publisher.publish("watchlist", payload)
+        self.notifier.fire("plate.watchlist", payload)
 
     def _record_plate_read(
         self,

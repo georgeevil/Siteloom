@@ -544,6 +544,13 @@ class PlateRead(Base):
     # from "eyeball ten crops once" into "judge 20 rows", persistently.
     verdict: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     verdict_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # What the plate actually says, typed by the operator (normalized with
+    # the same `normalize_plate` the OCR's output went through, so the two
+    # columns are comparable character by character — ground truth for
+    # "which characters does the OCR confuse"). Like `verdict`, it changes
+    # nothing in the identity store: `Identity.plate` is write-once, and
+    # unwinding a plate match is a larger decision than judging a read.
+    corrected_text: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     event: Mapped[Event] = relationship()
 
@@ -556,6 +563,33 @@ class PlateRead(Base):
         different fact from an empty cell.
         """
         return self.raw_text or self.text or ""
+
+
+class PlateWatch(Base):
+    """A plate the operator wants flagged on sight.
+
+    The row is intent, not evidence: sightings stay in `PlateRead` and
+    are joined at read time, so the watchlist can never disagree with the
+    reads table about when a plate was last seen. `plate` is stored
+    normalized — the one form matching uses — and unique, so watching a
+    plate twice is an update, not a second row.
+
+    Matching happens where reads are persisted (`ingest.py`): the first
+    accepted read of a watched plate on an event fires the
+    `plate.watchlist` webhook and an MQTT message, once per event —
+    a 30-second visit is one alarm, not sixty.
+    """
+
+    __tablename__ = "plate_watchlist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plate: Mapped[str] = mapped_column(String, unique=True, index=True)
+    # Why this plate is watched ("banned contractor van"). Free text for
+    # a human; the alarm payload carries both so an automation can route
+    # on the label without a second lookup.
+    label: Mapped[str] = mapped_column(String, default="")
+    note: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 class NoiseEvent(Base):

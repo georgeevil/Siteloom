@@ -8,6 +8,7 @@ Topics, under `integrations.mqtt.base_topic` (default "siteloom"):
     siteloom/events    — one message per stored event update
     siteloom/identity  — one message per identity resolution
     siteloom/noise     — one message per noise episode
+    siteloom/watchlist — one message per watched-plate sighting (per event)
 
 Payloads are flat JSON with a stable shape; new keys may be added but
 existing ones are not repurposed.
@@ -93,6 +94,23 @@ def event_payload(event, camera_name: str = "") -> dict[str, Any]:
         "detections": event.detection_count,
         "top_confidence": event.best_confidence,
         "guest_window": event.guest_window,
+    }
+
+
+def watchlist_payload(event, watch, plate: str) -> dict[str, Any]:
+    """One watched-plate sighting. Carries the watch's label and note so
+    an automation can route on *why* the plate is watched without a
+    second lookup against our API."""
+    return {
+        "source": "siteloom",
+        "type": "watchlist",
+        "event_id": event.id,
+        "camera": event.camera_id,
+        "label": event.class_name,
+        "plate": plate,
+        "watch_label": watch.label,
+        "watch_note": watch.note,
+        "timestamp": event.last_seen.isoformat(),
     }
 
 
