@@ -1870,6 +1870,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
     # -- jobs dashboard ----------------------------------------------------
 
     def _run_payload(run: OperationRun) -> dict:
+        from siteloom.localtime import display, site_zone
         from siteloom.progress import humanize
 
         return {
@@ -1886,7 +1887,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             "eta": humanize(run.eta_s),
             "counters": json.loads(run.counters or "{}"),
             "phase_timings": json.loads(run.phase_timings or "{}"),
-            "started_at": run.started_at.strftime("%Y-%m-%d %H:%M"),
+            "started_at": display(run.started_at, site_zone(config), "%Y-%m-%d %H:%M"),
             "resume_command": run.resume_command,
             "message": run.message,
         }

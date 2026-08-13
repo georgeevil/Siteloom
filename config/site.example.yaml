@@ -4,6 +4,13 @@
 site_id: kai-apartments
 site_name: Kai Apartments
 
+# The site's IANA timezone (CLD-100). Storage stays naive UTC; the console
+# and incident exports convert to this zone at display, and times typed
+# into console forms are read in it. Usually set from the /classes admin
+# panel (typed, detected from the UniFi NVR, or seeded from a browser)
+# rather than edited here. Empty = show UTC, labelled as UTC.
+# timezone: Europe/Bucharest
+
 unifi:
   host: 192.168.1.1
   port: 443

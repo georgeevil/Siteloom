@@ -26,7 +26,7 @@
         <div class="ph"></div>
       {% endif %}
       <span class="ov-chip">{{ e.camera.name if e.camera else e.camera_id }}</span>
-      <span class="ov-chip right">{{ e.first_seen.strftime('%H:%M:%S') }}</span>
+      <span class="ov-chip right">{{ local_time(e.first_seen, '%H:%M:%S') }}</span>
     </div>
     <a class="rail-close" href="/" title="Close">&#10005;</a>
   </div>
@@ -46,8 +46,8 @@
     <div><dt>Track</dt><dd class="mono">{{ e.track_id if e.track_id is not none else '—' }}</dd></div>
     <div><dt>Camera</dt><dd>{{ e.camera.name if e.camera else e.camera_id }}</dd></div>
     <div><dt>Confidence</dt><dd class="mono">{{ '%.2f' | format(e.best_confidence) }}{% if e.mean_confidence is not none %} · mean {{ '%.2f' | format(e.mean_confidence) }}{% endif %}</dd></div>
-    <div><dt>First seen</dt><dd class="mono">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</dd></div>
-    <div><dt>Last seen</dt><dd class="mono">{{ e.last_seen.strftime('%Y-%m-%d %H:%M:%S') }}</dd></div>
+    <div><dt>First seen</dt><dd class="mono">{{ local_time(e.first_seen, '%Y-%m-%d %H:%M:%S') }}</dd></div>
+    <div><dt>Last seen</dt><dd class="mono">{{ local_time(e.last_seen, '%Y-%m-%d %H:%M:%S') }}</dd></div>
     <div><dt>Zones</dt><dd>{{ rail.zones | join(', ') if rail.zones else '—' }}</dd></div>
     <div><dt>Guest window</dt><dd>{{ 'yes' if e.guest_window else 'no' }}</dd></div>
   </div>
@@ -126,7 +126,7 @@
     {% for link in rail.unlinked %}
       <p class="rail-unlinked">
         Unlinked from <strong>{{ identity_name(link.identity) }}</strong>
-        <span class="mono">{{ link.unlinked_at.strftime('%m-%d %H:%M') if link.unlinked_at }}</span>
+        <span class="mono">{{ local_time(link.unlinked_at, '%m-%d %H:%M') if link.unlinked_at }}</span>
       </p>
     {% endfor %}
 
@@ -157,7 +157,7 @@
       {% for m in rail.misses %}
       <p class="rail-miss">
         Missed by <strong>{{ m.identifier_key or 'unknown identifier' }}</strong>
-        <span class="mono">{{ m.verdict_at.strftime('%m-%d %H:%M') if m.verdict_at }}</span>
+        <span class="mono">{{ local_time(m.verdict_at, '%m-%d %H:%M') if m.verdict_at }}</span>
       </p>
       {% endfor %}
       <form method="post" action="/events/{{ e.id }}/missed" class="inline-form">

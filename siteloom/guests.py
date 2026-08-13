@@ -35,7 +35,14 @@ def _read_ical(source: str) -> bytes:
 
 
 def _as_naive_utc(value) -> datetime:
-    """iCal dates come as date or datetime, naive or aware — normalize."""
+    """iCal dates come as date or datetime, naive or aware — normalize.
+
+    This is the iCal input boundary of the naive-UTC contract (CLD-100):
+    an aware value is converted to UTC and stripped; a naive ("floating")
+    value and an all-day date are stored as they stand, which the store
+    reads as UTC. Booking feeds ship aware stamps in practice, so the
+    floating case is the degenerate one, kept as-is on purpose.
+    """
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             return value.astimezone(timezone.utc).replace(tzinfo=None)

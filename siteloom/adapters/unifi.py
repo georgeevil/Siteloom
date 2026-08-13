@@ -115,6 +115,22 @@ class UniFiProtectAdapter(CameraAdapter):
         self._loop.close()
         self._loop = self._thread = None
 
+    def nvr_timezone(self) -> str:
+        """The NVR's own IANA timezone name (CLD-100).
+
+        `uiprotect` exposes it as a `ZoneInfo` on the bootstrap's NVR
+        model; the `.key` is the IANA name the site setting stores. The
+        NVR already knows what wall clock its cameras live on, which is
+        what makes this the second rung of the timezone resolution chain.
+        """
+        if self._client is None:
+            raise RuntimeError("adapter not connected")
+        zone = self._client.bootstrap.nvr.timezone
+        key = getattr(zone, "key", None)
+        if not key:
+            raise RuntimeError(f"NVR reports no usable timezone ({zone!r})")
+        return str(key)
+
     # -- live -------------------------------------------------------------
 
     def list_streams(self) -> list[StreamInfo]:

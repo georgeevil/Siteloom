@@ -415,6 +415,23 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     # the request themselves so no screen can render a name by forgetting
     # to ask.
     redaction.install(templates)
+    # Every timestamp the console shows goes through `local_time` — the
+    # display side of the naive-UTC contract (CLD-100, siteloom/localtime).
+    # Same written-once shape as redaction: a screen added later inherits
+    # site-local rendering instead of re-deciding it with a bare strftime.
+    # The zone is resolved from the live config per render, so an admin
+    # edit on /classes applies without a restart; per-screen formats stay
+    # the screen's own (the helper owns the zone, not a format string).
+    from siteloom import localtime
+
+    def local_time(value, fmt: str = localtime.DEFAULT_FORMAT) -> str:
+        return localtime.display(value, localtime.site_zone(config), fmt)
+
+    templates.env.globals["local_time"] = local_time
+    templates.env.globals["site_tz"] = lambda: localtime.zone_name(config)
+    templates.env.globals["site_tz_source"] = lambda: localtime.source_label(config)
+    templates.env.globals["site_tz_set"] = lambda: bool(config.timezone)
+    templates.env.globals["site_tz_options"] = localtime.zone_options
     # Vendored fonts and anything else the console needs to render without
     # reaching the internet (CLD-86). Mounted rather than routed: this
     # serves a fixed directory shipped with the package, not user paths,
@@ -1656,6 +1673,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         incidents_routes,
         library_routes,
         plates_routes,
+        timezone_routes,
         train_routes,
         users_routes,
     )
@@ -1667,6 +1685,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         plates_routes,
         train_routes,
         incidents_routes,
+        timezone_routes,
         users_routes,
     ):
         module.register(app, templates, Session, config)

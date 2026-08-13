@@ -112,17 +112,17 @@
 
 <div class="in-facts">
   <span>incident <b>#{{ incident.id }}</b></span>
-  <span>opened <b>{{ incident.opened_at.strftime('%Y-%m-%d %H:%M') }}</b>
+  <span>opened <b>{{ local_time(incident.opened_at, '%Y-%m-%d %H:%M') }}</b>
     by <b>{{ incident.opened_by or '—' }}</b></span>
   {% if incident.closed_at %}
-  <span>closed <b>{{ incident.closed_at.strftime('%Y-%m-%d %H:%M') }}</b>
+  <span>closed <b>{{ local_time(incident.closed_at, '%Y-%m-%d %H:%M') }}</b>
     by <b>{{ incident.closed_by or '—' }}</b></span>
   {% endif %}
   <span><b>{{ events | length }}</b> event{{ '' if events | length == 1 else 's' }}</span>
   <span>cameras <b>{{ cameras | join(', ') if cameras else '—' }}</b></span>
   {% if start %}
-  <span>window <b>{{ start.strftime('%Y-%m-%d %H:%M:%S') }}</b>
-    → <b>{{ end.strftime('%Y-%m-%d %H:%M:%S') }}</b></span>
+  <span>window <b>{{ local_time(start, '%Y-%m-%d %H:%M:%S') }}</b>
+    → <b>{{ local_time(end, '%Y-%m-%d %H:%M:%S') }}</b></span>
   {% endif %}
 </div>
 
@@ -131,7 +131,7 @@
   {% if events %}
   <div class="tablecard">
     <div class="erow head">
-      <div>Crop</div><div>First seen (UTC)</div><div>What</div>
+      <div>Crop</div><div>First seen ({{ site_tz() }})</div><div>What</div>
       <div>Identified as</div><div></div>
     </div>
     {% for e in events %}
@@ -144,7 +144,7 @@
         {% endif %}
       </div>
       <div>
-        <div class="mono">{{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+        <div class="mono">{{ local_time(e.first_seen, '%Y-%m-%d %H:%M:%S') }}</div>
         <div class="in-sub">{{ ((e.last_seen - e.first_seen).total_seconds()) | round | int }}s
           · {{ e.detection_count }} detection{{ '' if e.detection_count == 1 else 's' }}</div>
       </div>
@@ -185,7 +185,7 @@
   {% if notes %}
     {% for note in notes %}
     <div class="in-note {{ note.kind }}">
-      <span class="who">{{ note.at.strftime('%Y-%m-%d %H:%M:%S') }} ·
+      <span class="who">{{ local_time(note.at, '%Y-%m-%d %H:%M:%S') }} ·
         {{ note.author or '—' }}{% if note.kind != 'note' %} · {{ note.kind }}{% endif %}</span>
       {{ note.body }}
     </div>

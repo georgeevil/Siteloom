@@ -132,6 +132,21 @@ revoking sessions on `/users` ends one sooner, and expired rows are pruned at
 each sign-in. Serving the console over TLS is the proxy's job — Siteloom
 itself speaks plain HTTP.
 
+## What clock the console shows (CLD-100)
+
+Storage is naive UTC by contract; the console converts at display, using one
+per-site timezone, so every viewer sees the cameras' wall clock — two
+operators discussing "the 21:40 event" mean the same moment, and an incident
+export names the zone its times are in. The setting is `timezone:` in
+site.yaml (an IANA name, e.g. `Europe/Bucharest`), managed from the **Site
+time** panel on `/classes` (admin): type or pick a zone, click **Detect from
+NVR** to adopt what the UniFi NVR is configured to (one connect-read-
+disconnect), or — while nothing is set — accept the zone the browser proposes
+via the Intl API (no geolocation, no permission prompt). The panel names
+which of those supplied the current value. Unset means UTC, labelled as UTC.
+Times typed into console forms (the backfill range, manual bookings) are read
+in the same zone; the server's own OS timezone never matters.
+
 ## Watching and steering jobs
 
 Every long operation heartbeats a row, so any terminal can see it:

@@ -35,7 +35,15 @@ class Base(DeclarativeBase):
 
 
 def _utcnow() -> datetime:
-    """Naive UTC, the shape every timestamp column in here stores."""
+    """Naive UTC, the shape every timestamp column in here stores.
+
+    The contract (CLD-100): **naive UTC everywhere in the store; convert
+    at the display boundary via the site zone (`siteloom/localtime.py`,
+    the `local_time` Jinja global); convert at input boundaries (NVR,
+    iCal, operator forms) on the way in.** No column carries an offset,
+    no comparison mixes frames, and no code below the web layer touches
+    the site timezone.
+    """
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 

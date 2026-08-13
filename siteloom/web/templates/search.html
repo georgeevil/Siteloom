@@ -73,7 +73,7 @@
       <span class="nm{% if not i.label %} unknown{% endif %}">{{ i.display_name }}</span><br>
       <span class="sub">
         {{ i.identifier_key }}{% if i.plate %} · {{ i.plate }}{% endif %}
-        · last {{ i.last_seen.strftime('%Y-%m-%d %H:%M') }}
+        · last {{ local_time(i.last_seen, '%Y-%m-%d %H:%M') }}
       </span>
     </span>
     <span class="tag">identity</span>
@@ -94,7 +94,7 @@
         {%- if link %} — {{ link.identity.display_name }}{% endif %}</span><br>
       <span class="sub">
         #{{ e.id }} · {{ e.camera.name if e.camera else e.camera_id }}
-        · {{ e.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}
+        · {{ local_time(e.first_seen, '%Y-%m-%d %H:%M:%S') }}
       </span>
     </span>
     <span class="tag">event</span>

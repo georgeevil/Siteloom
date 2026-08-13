@@ -75,15 +75,20 @@ def actor(request: Request) -> str:
     return user.username if user is not None else "(open)"
 
 
-def default_title(event: Event, camera: Camera | None) -> str:
+def default_title(event: Event, camera: Camera | None, zone=None) -> str:
     """A title for an incident opened straight off one event.
 
     Never blank: the list screen and every export are read by someone who
     was not there, and "Incident 7" tells them nothing. The operator can
-    type a better one, and usually should.
+    type a better one, and usually should. The baked-in timestamp is
+    site-local (CLD-100): a title is prose about a moment, and the moment
+    it names must be the one the operators discussing it mean.
     """
+    from siteloom.localtime import display
+
     where = camera.name if camera is not None and camera.name else event.camera_id
-    return f"{event.class_name} at {where}, {event.first_seen.strftime('%Y-%m-%d %H:%M')}"
+    when = display(event.first_seen, zone, "%Y-%m-%d %H:%M")
+    return f"{event.class_name} at {where}, {when}"
 
 
 def crop_bytes(raw: str | None, media_root: Path) -> bytes | None:
@@ -130,6 +135,10 @@ def export_html(bundle: dict) -> str:
     """
     esc = html.escape
     inc = bundle["incident"]
+    # The frame travels with the file (CLD-100): every timestamp below is
+    # already site-local, and `tz` names the zone they are in. "UTC" is
+    # the unset-zone rung, not a silence.
+    tz = bundle.get("tz", "UTC")
     parts: list[str] = []
     parts.append(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
@@ -177,7 +186,7 @@ def export_html(bundle: dict) -> str:
     parts.append("<h2>Timeline</h2>\n")
     if bundle["events"]:
         parts.append(
-            "<table>\n<tr><th>Time (UTC)</th><th>Camera</th><th>What</th>"
+            f"<table>\n<tr><th>Time ({esc(tz)})</th><th>Camera</th><th>What</th>"
             "<th>Identified as</th><th>Crop</th></tr>\n"
         )
         for row in bundle["events"]:
@@ -213,7 +222,8 @@ def export_html(bundle: dict) -> str:
 
     parts.append(
         "<footer>Exported from Siteloom on "
-        f"{esc(bundle['exported_at'])} UTC. Crops are embedded in this file; "
+        f"{esc(bundle['exported_at'])} {esc(tz)}. All times in this document "
+        f"are {esc(tz)}. Crops are embedded in this file; "
         "it needs no network and no other file to read.</footer>\n"
         "</main>\n</body>\n</html>\n"
     )
@@ -224,6 +234,7 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
     # app.py owns the events list's query-param vocabulary and the media
     # path reading; borrowing them rather than re-spelling them here is
     # what keeps a rename there from leaving this page linking at nothing.
+    from siteloom.localtime import display, site_zone, zone_name
     from siteloom.web.app import _safe_next
 
     nav.add("/incidents", "Incidents", "IN", after="/")
@@ -446,25 +457,23 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
         the record out is reading, and the operator who may look at an
         incident on screen may hand it to the insurer who asked for it.
         """
+        zone, tz = site_zone(config), zone_name(config)
         with Session() as session:
             incident, detail = _detail(session, incident_id)
             window = "—"
             if detail["start"] is not None:
                 window = (
-                    f"{detail['start'].strftime('%Y-%m-%d %H:%M:%S')} → "
-                    f"{detail['end'].strftime('%Y-%m-%d %H:%M:%S')}"
+                    f"{display(detail['start'], zone)} → "
+                    f"{display(detail['end'], zone)}"
                 )
             facts = [
                 ("Status", incident.status),
-                ("Opened", f"{incident.opened_at.strftime('%Y-%m-%d %H:%M:%S')} UTC"),
+                ("Opened", f"{display(incident.opened_at, zone)} {tz}"),
                 ("Opened by", incident.opened_by or "—"),
             ]
             if incident.closed_at is not None:
                 facts.append(
-                    (
-                        "Closed",
-                        f"{incident.closed_at.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-                    )
+                    ("Closed", f"{display(incident.closed_at, zone)} {tz}")
                 )
                 facts.append(("Closed by", incident.closed_by or "—"))
             facts.append(("Window", window))
@@ -472,7 +481,8 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
             facts.append(("Events", str(detail["event_count"])))
             bundle = {
                 "site_name": site_name,
-                "exported_at": _now().strftime("%Y-%m-%d %H:%M:%S"),
+                "tz": tz,
+                "exported_at": display(_now(), zone),
                 "incident": {
                     "id": incident.id,
                     "title": incident.title,
@@ -481,7 +491,7 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
                 "facts": facts,
                 "events": [
                     {
-                        "when": e.first_seen.strftime("%Y-%m-%d %H:%M:%S"),
+                        "when": display(e.first_seen, zone),
                         "camera": (e.camera.name if e.camera else None) or e.camera_id,
                         "what": f"{e.class_name} · event {e.id} · "
                         f"{e.detection_count} detection"
@@ -498,7 +508,7 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
                 ],
                 "notes": [
                     {
-                        "at": n.at.strftime("%Y-%m-%d %H:%M:%S"),
+                        "at": display(n.at, zone),
                         "author": n.author or "—",
                         "kind": n.kind,
                         "body": n.body,
@@ -545,7 +555,7 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
             if incident_id == "new":
                 camera = session.get(Camera, event.camera_id)
                 incident = Incident(
-                    title=title.strip() or default_title(event, camera),
+                    title=title.strip() or default_title(event, camera, site_zone(config)),
                     status="open",
                     opened_at=_now(),
                     opened_by=actor(request),

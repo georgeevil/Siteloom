@@ -550,6 +550,15 @@ class ServiceConfig(BaseModel):
 class SiteConfig(BaseModel):
     site_id: str
     site_name: str = ""
+    # The site's IANA timezone (CLD-100). Storage stays naive UTC by
+    # contract; this is the zone every console screen and export converts
+    # to at display, and the frame operator-typed `datetime-local` input
+    # is read in. Empty = unset = UTC, labelled as UTC. Set from the
+    # /classes admin panel: typed by an admin, detected from the UniFi
+    # NVR, or seeded once from an admin's browser — `timezone_source`
+    # records which rung supplied it ("admin" / "nvr" / "browser").
+    timezone: str = ""
+    timezone_source: Literal["", "admin", "nvr", "browser"] = ""
     # Empty is valid: a library-only deployment (archive indexing and
     # labeling) needs no cameras.
     cameras: list[CameraConfig] = []
@@ -565,6 +574,15 @@ class SiteConfig(BaseModel):
     integrations: IntegrationsConfig = IntegrationsConfig()
     storage: StorageConfig = StorageConfig()
     service: ServiceConfig = ServiceConfig()
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        # A typo must be refused at the boundary, not stored: a bad name
+        # in YAML otherwise passes load and dies at first render.
+        from siteloom.localtime import validate_timezone
+
+        return validate_timezone(value)
 
 
 # Filesystem paths a site config can name. A relative one is anchored to

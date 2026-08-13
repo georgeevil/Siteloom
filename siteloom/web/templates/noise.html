@@ -90,7 +90,7 @@
   {% for n in noise_events %}
   <div class="nrow">
     <div>{{ n.camera_id }}</div>
-    <div class="mono">{{ n.start.strftime('%Y-%m-%d %H:%M:%S') }}</div>
+    <div class="mono">{{ local_time(n.start, '%Y-%m-%d %H:%M:%S') }}</div>
     <div class="mono">{{ ((n.end - n.start).total_seconds() / 60) | round(1) }} min</div>
     <div class="mono">{{ '%.1f'|format(n.peak_db) }} dB</div>
     <div class="mono">{{ '%.1f'|format(n.mean_db) }} dB</div>

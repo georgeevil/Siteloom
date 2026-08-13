@@ -405,6 +405,75 @@
   <a class="btn-outline sm" href="/training?show=needs_review">Open training data</a>
 </div>
 
+{# -- Site time (CLD-100) ------------------------------------------------
+   The timezone every console screen and export renders in, and the frame
+   operator-typed datetime-local input is read in. Storage stays naive
+   UTC by contract; this only moves the display/input boundary. Sits on
+   this screen because it is the console's configuration surface — the
+   writes are admin like /classes/detection, via the one middleware. #}
+{% set tz_notice = request.query_params.get('tz') %}
+<div class="tablecard" id="site-time" style="padding: 14px 16px">
+  <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap">
+    <b>Site time</b>
+    <span class="d" style="color:var(--muted)">
+      Timestamps everywhere in the console, and in incident exports, are shown in
+      <b>{{ site_tz() }}</b> <span class="mono">({{ site_tz_source() }})</span>.
+      Times typed into forms are read in the same zone. Stored data stays UTC.
+    </span>
+  </div>
+  {% if tz_notice %}
+  <div class="banner" style="margin:10px 0 0">
+    {% if tz_notice == 'set' %}Timezone saved.
+    {% elif tz_notice == 'cleared' %}Timezone cleared — the console shows UTC, labelled as UTC.
+    {% elif tz_notice == 'detected' %}Timezone read from the NVR and saved.
+    {% elif tz_notice == 'seeded' %}Timezone seeded from your browser and saved.
+    {% elif tz_notice == 'already-set' %}A timezone is already set — the browser seed only applies while it is unset.
+    {% elif tz_notice == 'no-unifi' %}No UniFi NVR is configured, so there is nothing to detect from.
+    {% elif tz_notice == 'nvr-failed' %}Could not read the timezone from the NVR — is it reachable? Details are in the server log.
+    {% endif %}
+  </div>
+  {% endif %}
+  <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px">
+    <form method="post" action="/classes/timezone" style="display:flex; gap:8px; align-items:center; margin:0">
+      <input type="text" name="timezone" list="tz-names" placeholder="Europe/Bucharest"
+             value="{{ site_tz() if site_tz_set() else '' }}" style="min-width:22ch">
+      <datalist id="tz-names">
+        {% for name in site_tz_options() %}<option value="{{ name }}">{% endfor %}
+      </datalist>
+      <button class="btn-outline sm" type="submit">Save zone</button>
+    </form>
+    <form method="post" action="/classes/timezone/detect" style="margin:0">
+      <button class="btn-outline sm" type="submit"
+              title="Connects to the UniFi NVR once, reads the zone its own settings carry, and stores it.">
+        Detect from NVR</button>
+    </form>
+    {% if not site_tz_set() %}
+    <form method="post" action="/classes/timezone/seed" id="tz-seed-form"
+          style="margin:0; display:none; gap:8px; align-items:center">
+      <input type="hidden" name="timezone" id="tz-seed-value" value="">
+      <button class="btn-outline sm" type="submit">
+        Use this browser's zone (<span id="tz-seed-name"></span>)</button>
+    </form>
+    <script>
+    // Rung 3 of the resolution chain: the browser *proposes* its zone via
+    // the Intl API — no permission prompt, and deliberately the only
+    // mechanism (no geolocation). The admin still has to click; nothing
+    // is stored until they do, and the server refuses the seed once any
+    // zone is set.
+    (function () {
+      try {
+        var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (!zone) return;
+        document.getElementById("tz-seed-value").value = zone;
+        document.getElementById("tz-seed-name").textContent = zone;
+        document.getElementById("tz-seed-form").style.display = "flex";
+      } catch (e) { /* no proposal, the form stays hidden */ }
+    })();
+    </script>
+    {% endif %}
+  </div>
+</div>
+
 <div class="scrim" id="scrim" hidden></div>
 <aside class="drawer" id="drawer" hidden>
   <h3>New sub-class</h3>

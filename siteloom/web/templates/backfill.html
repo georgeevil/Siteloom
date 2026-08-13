@@ -227,7 +227,7 @@
       {% elif r.total == 0 %}
       <span class="sub">nothing scanned yet</span>
       {% elif r.last_processed %}
-      <span class="sub">last clip processed {{ r.last_processed.strftime('%Y-%m-%d %H:%M') }}</span>
+      <span class="sub">last clip processed {{ local_time(r.last_processed, '%Y-%m-%d %H:%M') }}</span>
       {% endif %}
       {% if r.failed %}
       {# `failed` is terminal: nothing picks these up again on its own. #}
@@ -239,7 +239,7 @@
     <div class="num {% if r.failed %}bad{% else %}zero{% endif %}">{{ r.failed }}</div>
     <div class="mono">
       {% if r.covered_from %}
-      {{ r.covered_from.strftime('%Y-%m-%d %H:%M') }} → {{ r.covered_to.strftime('%Y-%m-%d %H:%M') }}
+      {{ local_time(r.covered_from, '%Y-%m-%d %H:%M') }} → {{ local_time(r.covered_to, '%Y-%m-%d %H:%M') }}
       {% else %}—{% endif %}
     </div>
     <div class="num {% if not r.frames %}zero{% endif %}">{{ '{:,}'.format(r.frames) }}</div>
