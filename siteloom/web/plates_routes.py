@@ -26,9 +26,19 @@ Three decisions shape it:
   the spike becomes "judge 20 rows" and the judgement survives it — the
   same reason `EventIdentity.verdict` exists, with the same vocabulary.
 
-The floor itself is `IdentifierConfig.plate_min_chars`, not a literal, so
+The floors themselves are `IdentifierConfig` fields, not literals, so
 answering "is 4 too high?" is: move it, re-read this table. Reads that
-failed it kept their raw text, so nothing has to be re-run.
+failed one kept their raw text, so nothing has to be re-run.
+
+That extends to the image-quality floors, and it is what makes them
+usable at all. OCR confidence turns out to be the weakest rejection
+signal there is — a motion-smeared 60-pixel plate comes back at 0.86
+because the model is genuinely confident about the characters it
+interpolated — so what a read is judged on is measured off the image:
+the plate region's width in pixels, its sharpness, and the *weakest*
+character's probability rather than the mean that hides it. Every read
+carries all three whether or not a floor is set, because a floor cannot
+be chosen without first seeing the distribution it has to cut.
 """
 
 from __future__ import annotations
@@ -75,8 +85,42 @@ REASON_LABELS = {
     "no-box": "no plate region found",
     "empty-crop": "plate box fell outside the crop",
     "no-text": "OCR read nothing",
+    "too-small": "plate region too small to read",
+    "too-blurry": "plate region too blurred to read",
     "too-short": "under the character floor",
+    "low-confidence": "a character was a guess",
 }
+
+#: The configured floors, in the order they are applied, with the setting
+#: that moves each. Rendered on the page because a floor an operator
+#: cannot see is a floor they will debug as a bug — every rejected row
+#: names the bar it failed, so the bar has to be named somewhere too.
+FLOOR_FIELDS = (
+    ("plate_min_width_px", "plate width", "px"),
+    ("plate_min_sharpness", "sharpness", ""),
+    ("plate_min_chars", "characters", ""),
+    ("plate_min_char_confidence", "weakest character", ""),
+)
+
+
+def _floor_rows(config) -> list[dict]:
+    """One line per plate identifier: which floors are in force.
+
+    Only the ones actually set, plus the character floor, which is
+    always in force. A list of four `0`s would read as configuration
+    when it is the absence of it.
+    """
+    rows = []
+    for key, ident in config.identity.identifiers.items():
+        if not ident.plate_ocr:
+            continue
+        floors = [
+            {"label": label, "value": f"{getattr(ident, field)}{unit}", "field": field}
+            for field, label, unit in FLOOR_FIELDS
+            if getattr(ident, field) or field == "plate_min_chars"
+        ]
+        rows.append({"key": key, "floors": floors})
+    return rows
 
 
 def _now() -> datetime:
@@ -359,10 +403,7 @@ def register(app, templates, Session, config) -> None:
                 "wrong": wrong,
                 "empty_reason": _empty_reason(config, total),
                 "plate_identifiers": plate_identifiers,
-                "min_chars": {
-                    key: config.identity.identifiers[key].plate_min_chars
-                    for key in plate_identifiers
-                },
+                "floor_rows": _floor_rows(config),
                 "more": _more(
                     "#plate-rows",
                     None

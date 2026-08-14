@@ -534,6 +534,25 @@ class PlateRead(Base):
     # that was never reported must read as absent, not as zero.
     detector_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Image-quality measurements, taken on every read whether or not any
+    # floor is configured — because the floors cannot be chosen without
+    # them. OCR confidence describes how sure the model was; these three
+    # describe whether the picture could have carried the answer, which
+    # is the distinction behind "confident and still wrong": a smeared
+    # 60-pixel plate reports a high mean confidence about characters it
+    # interpolated.
+    #
+    # `ocr_min_confidence` is the weakest character's probability from
+    # the same array `ocr_confidence` averages — the number the mean
+    # hides, and the one worth gating on.
+    ocr_min_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Size of the plate region in source pixels, and variance of its
+    # Laplacian (blur). Nullable for the same reason as the confidences,
+    # and additionally because rows written before these columns existed
+    # have no measurement — not a measurement of zero.
+    plate_width: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    plate_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sharpness: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     # The floor in force when this read was judged.
     min_chars: Mapped[int] = mapped_column(Integer, default=4)
     # The plate sub-crop (see the class docstring) and the detection crop

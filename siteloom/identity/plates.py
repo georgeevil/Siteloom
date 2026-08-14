@@ -53,8 +53,19 @@ DEFAULT_MIN_CHARS = 4
 REASON_NO_BOX = "no-box"  # the plate detector found no region at all
 REASON_EMPTY_CROP = "empty-crop"  # box fell outside the vehicle crop
 REASON_NO_TEXT = "no-text"  # OCR returned nothing readable
+REASON_TOO_SMALL = "too-small"  # plate region under the pixel-width floor
+REASON_TOO_BLURRY = "too-blurry"  # plate region under the sharpness floor
 REASON_TOO_SHORT = "too-short"  # normalized read is under the floor
-REASONS = (REASON_NO_BOX, REASON_EMPTY_CROP, REASON_NO_TEXT, REASON_TOO_SHORT)
+REASON_LOW_CONFIDENCE = "low-confidence"  # weakest character under the floor
+REASONS = (
+    REASON_NO_BOX,
+    REASON_EMPTY_CROP,
+    REASON_NO_TEXT,
+    REASON_TOO_SMALL,
+    REASON_TOO_BLURRY,
+    REASON_TOO_SHORT,
+    REASON_LOW_CONFIDENCE,
+)
 
 
 def normalize_plate(text: str) -> str:
@@ -90,6 +101,25 @@ class PlateRead:
     #: fast-plate-ocr exposes one. None means "not reported" — never a
     #: stand-in number.
     ocr_confidence: float | None = None
+    #: The *weakest* character's probability from the same array the mean
+    #: is taken over. The mean is a poor rejection signal precisely
+    #: because it hides a single substituted character: five characters
+    #: at 0.98 and one at 0.35 average to 0.87, which is the "OCR was
+    #: confident and still wrong" row. The minimum is the number that
+    #: sees it, so it is what `min_char_confidence` gates on.
+    ocr_min_confidence: float | None = None
+    #: Size of the plate region **in the source pixels**, not of the
+    #: vehicle crop. Plate width is the closest thing LPR has to a
+    #: hardware spec — under roughly 100 px the characters carry too few
+    #: pixels to be distinguished and the OCR is interpolating.
+    plate_width: int | None = None
+    plate_height: int | None = None
+    #: Variance of the Laplacian over the plate region: the standard
+    #: blur measure, and the one that separates "small but crisp" from
+    #: "large and smeared by motion". Scale- and exposure-dependent, so
+    #: it is a number to calibrate against your own cameras from the
+    #: /plates table, never a universal constant.
+    sharpness: float | None = None
     #: The plate sub-region as JPEG bytes — a *third* image, distinct
     #: from the detection crop, so a human can see what the OCR saw.
     #: Never an ndarray (dispatch invariant).
@@ -112,18 +142,24 @@ class PlateRead:
             "normalized": self.normalized,
             "detector_confidence": self.detector_confidence,
             "ocr_confidence": self.ocr_confidence,
+            "ocr_min_confidence": self.ocr_min_confidence,
+            "plate_width": self.plate_width,
+            "plate_height": self.plate_height,
+            "sharpness": self.sharpness,
             "plate_jpeg": self.plate_jpeg,
             "reason": self.reason,
             "min_chars": self.min_chars,
         }
 
 
-def mean_confidence(probs: Any) -> float | None:
-    """Per-character probabilities reduced to one number, or None.
+def _prob_array(probs: Any) -> np.ndarray | None:
+    """Per-character probabilities as a flat array, or None.
 
     None when the library reported nothing: an absent confidence must
     read as absent, not as zero — the "a rate never travels without its
-    denominator" rule from stats.py, one layer down.
+    denominator" rule from stats.py, one layer down. Every reduction
+    below inherits that, which is why none of them can turn "not
+    reported" into a number that would trip a floor.
     """
     if probs is None:
         return None
@@ -131,13 +167,88 @@ def mean_confidence(probs: Any) -> float | None:
         arr = np.asarray(probs, dtype=np.float64).ravel()
     except (TypeError, ValueError):
         return None
-    if arr.size == 0:
+    return arr if arr.size else None
+
+
+def mean_confidence(probs: Any) -> float | None:
+    """Per-character probabilities reduced to their mean, or None."""
+    arr = _prob_array(probs)
+    return None if arr is None else float(arr.mean())
+
+
+def min_confidence(probs: Any) -> float | None:
+    """The weakest character's probability, or None.
+
+    Kept beside the mean rather than replacing it: the mean is the right
+    summary of a read's overall quality and the minimum is the right
+    rejection signal, and conflating them loses one of the two.
+    """
+    arr = _prob_array(probs)
+    return None if arr is None else float(arr.min())
+
+
+def laplacian_variance(image: np.ndarray) -> float | None:
+    """How sharp an image is, by the variance of its Laplacian.
+
+    High-frequency energy: a crisp plate has strong character edges, a
+    motion-smeared one does not. Returns None for an image with no
+    pixels rather than 0.0, which would read as "perfectly blurred".
+    """
+    if image.size == 0:
         return None
-    return float(arr.mean())
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def parse_ocr_result(result: Any) -> tuple[str | None, float | None]:
-    """(raw text, confidence) out of whatever fast-plate-ocr returned.
+def gate_reason(
+    *,
+    normalized: str,
+    plate_width: int | None,
+    sharpness: float | None,
+    char_confidence: float | None,
+    min_chars: int,
+    min_width: int,
+    min_sharpness: float,
+    min_char_confidence: float,
+) -> str | None:
+    """Which quality floor this read fails, or None if it clears them all.
+
+    Pure, so the policy is testable without a model. Two rules are worth
+    stating out loud:
+
+    * **A metric that was never measured cannot fail a floor.** An OCR
+      build that reports no per-character probabilities would otherwise
+      have every read rejected the moment an operator set a confidence
+      floor — an absent number read as zero, which is exactly the
+      mistake `_prob_array` exists to prevent.
+    * **Order is diagnosis, not arithmetic.** A 30-pixel plate that also
+      read three characters is reported as `too-small`, because that is
+      the fact an operator can act on (move the camera, zoom, or lower
+      the floor knowingly); "too-short" would send them to the character
+      floor instead, which is not what went wrong.
+    """
+    if min_width and plate_width is not None and plate_width < min_width:
+        return REASON_TOO_SMALL
+    if min_sharpness and sharpness is not None and sharpness < min_sharpness:
+        return REASON_TOO_BLURRY
+    if len(normalized) < min_chars:
+        return REASON_TOO_SHORT
+    if (
+        min_char_confidence
+        and char_confidence is not None
+        and char_confidence < min_char_confidence
+    ):
+        return REASON_LOW_CONFIDENCE
+    return None
+
+
+def parse_ocr_result(result: Any) -> tuple[str | None, Any]:
+    """(raw text, per-character probabilities) out of fast-plate-ocr.
+
+    The probabilities come back unreduced: the caller wants both their
+    mean (how the read looked overall) and their minimum (whether any
+    one character was a guess), and a function that reduced here could
+    only return one of them.
 
     The pinned version's shape is not the only one the dependency range
     allows, and the two disagree: 1.0's `run()` returns `list[str]` (or
@@ -165,7 +276,7 @@ def parse_ocr_result(result: Any) -> tuple[str | None, float | None]:
     if first is None:
         return None, None
     if isinstance(first, str):
-        return (first or None), mean_confidence(probs)
+        return (first or None), probs
     # 1.1's PlatePrediction, or anything else shaped like it.
     text = getattr(first, "plate", None)
     if not isinstance(text, str):
@@ -174,7 +285,7 @@ def parse_ocr_result(result: Any) -> tuple[str | None, float | None]:
         # would enter the identity store as a plate.
         log.warning("unrecognized OCR result %r; treating as no text", type(first))
         return None, None
-    return (text or None), mean_confidence(getattr(first, "char_probs", probs))
+    return (text or None), getattr(first, "char_probs", probs)
 
 
 def encode_plate_crop(plate_bgr: np.ndarray) -> bytes | None:
@@ -203,22 +314,41 @@ class PlateReader:
         )
         self._ocr = LicensePlateRecognizer("cct-xs-v1-global-model")
 
-    def _run_ocr(self, plate_bgr: np.ndarray) -> tuple[str | None, float | None]:
-        """OCR one plate crop, asking for confidence where it is offered."""
+    def _run_ocr(
+        self, plate_bgr: np.ndarray
+    ) -> tuple[str | None, float | None, float | None]:
+        """OCR one plate crop: (text, mean confidence, weakest character)."""
         try:
             result = self._ocr.run(plate_bgr, return_confidence=True)
         except TypeError:  # a build whose run() takes no such keyword
             result = self._ocr.run(plate_bgr)
-        return parse_ocr_result(result)
+        raw, probs = parse_ocr_result(result)
+        return raw, mean_confidence(probs), min_confidence(probs)
 
     def read(
-        self, vehicle_bgr: np.ndarray, *, min_chars: int = DEFAULT_MIN_CHARS
+        self,
+        vehicle_bgr: np.ndarray,
+        *,
+        min_chars: int = DEFAULT_MIN_CHARS,
+        min_width: int = 0,
+        min_sharpness: float = 0.0,
+        min_char_confidence: float = 0.0,
     ) -> PlateRead:
         """One attempt, always described — success or failure.
 
         No extra inference is bought here: the detector pass and the OCR
         pass are the ones that already ran on this crop. Everything added
-        is capture.
+        is capture — the quality metrics are two array reductions and one
+        Laplacian over a crop measured in tens of pixels.
+
+        The quality floors are applied **after** the OCR rather than
+        before it, which costs one cheap inference on a plate already
+        known to be too small. That is deliberate and it is the same
+        trade `min_chars` makes: the row keeps the raw text, the
+        normalized text, the measurements and the floors they were
+        judged against, so "is 100 px the right bar?" is answered by
+        moving it and re-reading the table, never by re-running a night
+        of video that no longer exists.
         """
         detections = self._detector.predict(vehicle_bgr)
         if not detections:
@@ -236,13 +366,22 @@ class PlateReader:
                 reason=REASON_EMPTY_CROP,
                 min_chars=min_chars,
             )
+        # Measured off the crop that was actually read, not off the box
+        # coordinates: a box clipped at the crop's edge is smaller than
+        # it claims, and the OCR saw the clipped version.
+        height, width = plate.shape[:2]
+        sharpness = laplacian_variance(plate)
         jpeg = encode_plate_crop(plate)
-        raw, ocr_confidence = self._run_ocr(plate)
+        raw, ocr_confidence, ocr_min = self._run_ocr(plate)
         if not raw:
             return PlateRead(
                 text=None,
                 detector_confidence=confidence,
                 ocr_confidence=ocr_confidence,
+                ocr_min_confidence=ocr_min,
+                plate_width=width,
+                plate_height=height,
+                sharpness=sharpness,
                 plate_jpeg=jpeg,
                 reason=REASON_NO_TEXT,
                 min_chars=min_chars,
@@ -252,15 +391,28 @@ class PlateReader:
         # the normalized text and the floor it was judged against, so
         # moving the floor and re-reading the table answers CLD-9 without
         # re-running any inference.
-        too_short = len(normalized) < min_chars
+        reason = gate_reason(
+            normalized=normalized,
+            plate_width=width,
+            sharpness=sharpness,
+            char_confidence=ocr_min,
+            min_chars=min_chars,
+            min_width=min_width,
+            min_sharpness=min_sharpness,
+            min_char_confidence=min_char_confidence,
+        )
         return PlateRead(
-            text=None if too_short else normalized,
+            text=None if reason else normalized,
             raw_text=raw,
             normalized=normalized,
             detector_confidence=confidence,
             ocr_confidence=ocr_confidence,
+            ocr_min_confidence=ocr_min,
+            plate_width=width,
+            plate_height=height,
+            sharpness=sharpness,
             plate_jpeg=jpeg,
-            reason=REASON_TOO_SHORT if too_short else None,
+            reason=reason,
             min_chars=min_chars,
         )
 
