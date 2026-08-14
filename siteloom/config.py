@@ -272,6 +272,41 @@ class IdentifierConfig(BaseModel):
     # "too-short" keeps the raw text — so lowering it is a question about
     # existing data, not a reason to re-run anything.
     plate_min_chars: int = 4
+    # Image-quality floors on a plate read, all 0 = off. OCR confidence
+    # is a poor rejection signal on its own — a smeared 60-pixel plate
+    # comes back at 0.9 because the network is confident about the
+    # characters it hallucinated — so what gets rejected is measured off
+    # the image instead of asked of the model:
+    #
+    #   plate_min_width_px      the plate region's width in source
+    #                           pixels. The closest thing LPR has to a
+    #                           hardware spec: under ~100 px the
+    #                           characters carry too few pixels to be
+    #                           distinguished. Start around 90-110.
+    #   plate_min_sharpness     variance of the Laplacian over the plate
+    #                           region — the standard blur measure, and
+    #                           the one that separates "small but crisp"
+    #                           from "large and motion-smeared". Scale-
+    #                           and exposure-dependent, so calibrate it
+    #                           off your own reads on /plates (the value
+    #                           is on every row) rather than copying a
+    #                           number from another install.
+    #   plate_min_char_confidence
+    #                           floor on the *weakest* character's
+    #                           probability, not the mean. The mean is
+    #                           what hides a single substituted
+    #                           character: five characters at 0.98 and
+    #                           one at 0.35 average to 0.87. Somewhere
+    #                           around 0.5-0.6 is a starting point.
+    #
+    # Every read is measured and recorded whether or not a floor is set,
+    # and a read that fails one is a row with a reason — so the floors
+    # are chosen by reading the table, and moving one never requires
+    # re-running anything. A metric the OCR never reported cannot fail a
+    # floor: absent is absent, not zero.
+    plate_min_width_px: int = 0
+    plate_min_sharpness: float = 0.0
+    plate_min_char_confidence: float = 0.0
     # Keep the plate sub-crop for each read, under `<media_dir>/plates/`.
     # A third image with its own purpose: `crop_jpeg` is simultaneously
     # the display thumbnail and the embedder input, so the evidence image

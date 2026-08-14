@@ -73,6 +73,17 @@ identity:
   #             min_margin: 0.02, min_sightings: 2}
   #   vehicle: {algo: generic, applies_to: [car, truck, bus, motorcycle],
   #             threshold: 0.82, min_margin: 0.02, plate_ocr: true}
+  # Plate-read quality floors (vehicle identifier, all 0 = off). OCR
+  # confidence is the weakest of them: a motion-smeared 60-pixel plate
+  # scores 0.9 because the model is sure about characters it
+  # interpolated. Reject on what the picture could carry instead —
+  #   plate_min_width_px: 100        # plate region's width in source px
+  #   plate_min_sharpness: 40.0      # variance of the Laplacian (blur)
+  #   plate_min_char_confidence: 0.5 # weakest character, not the mean
+  # Every read is measured whether or not a floor is set, and a read
+  # that fails one is a row on /plates with the reason — so pick the
+  # numbers off your own reads, and moving one re-reads the table
+  # rather than re-running anything.
   # min_margin: required gap over the runner-up identity before a visual
   #   match is accepted (near-ties stay unresolved). min_sightings: how
   #   many mutually-similar sightings before an unknown identity is

@@ -172,6 +172,18 @@ they are not attempted and quietly marked done:
   `identity.identifiers.vehicle.plate_min_chars` and re-read the same
   table — the rejected reads kept their text, so nothing is re-run.
 
+  If the rows come back *confident and wrong* — a high OCR confidence on
+  a plate read six different ways — the character floor is not the knob.
+  Every read also records the plate region's size in pixels, its
+  sharpness (variance of the Laplacian) and the weakest character's
+  probability, all shown on `/plates`. Read the distribution off the
+  judged rows, then set
+  `identity.identifiers.vehicle.plate_min_width_px` (start near 100),
+  `plate_min_sharpness` (calibrate per camera — the value is scale- and
+  exposure-dependent) and `plate_min_char_confidence` (start near 0.5).
+  A rejected read still keeps everything, so lowering a floor is another
+  re-read of the table.
+
 ## 6. Scenario F — the archive, in parallel
 
 Independent of the cameras, and the other half of "does this work on real

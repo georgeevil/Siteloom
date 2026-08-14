@@ -582,6 +582,10 @@ class IngestService:
                 reason=read.get("reason"),
                 detector_confidence=read.get("detector_confidence"),
                 ocr_confidence=read.get("ocr_confidence"),
+                ocr_min_confidence=read.get("ocr_min_confidence"),
+                plate_width=read.get("plate_width"),
+                plate_height=read.get("plate_height"),
+                sharpness=read.get("sharpness"),
                 min_chars=int(read.get("min_chars") or 4),
                 crop_path=self._save_plate_crop(
                     cam.id,

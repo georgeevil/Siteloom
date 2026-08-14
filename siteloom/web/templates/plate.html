@@ -41,7 +41,7 @@
   }
   .prow {
     display: grid;
-    grid-template-columns: 88px 1fr 110px 140px 96px 96px 150px;
+    grid-template-columns: 88px 1fr 100px 138px 104px 116px 150px;
     align-items: center; gap: 12px; padding: 8px 14px; min-height: 56px;
     border-bottom: 1px solid var(--row-rule);
   }
@@ -161,7 +161,7 @@
 <div class="tablecard">
   <div class="prow head">
     <div>Plate crop</div><div>Read</div><div>Class</div><div>When</div>
-    <div>Box conf</div><div>OCR conf</div><div>Verdict</div>
+    <div>Plate size</div><div>Confidence</div><div>Verdict</div>
   </div>
   <div id="plate-rows">
   {% for r in reads %}
@@ -201,10 +201,16 @@
       <a href="/events/{{ r.event_id }}">event #{{ r.event_id }}</a>
     </div>
     <div class="mono">
-      {{ '%.2f'|format(r.detector_confidence) if r.detector_confidence is not none else '—' }}
+      {% if r.plate_width %}
+        {{ r.plate_width }}&times;{{ r.plate_height }} px<br>
+        <span class="raw">{{ 'sharpness %.0f'|format(r.sharpness) if r.sharpness is not none else '' }}</span>
+      {% else %}—{% endif %}
     </div>
     <div class="mono">
-      {{ '%.2f'|format(r.ocr_confidence) if r.ocr_confidence is not none else 'n/a' }}
+      box {{ '%.2f'|format(r.detector_confidence) if r.detector_confidence is not none else '—' }}<br>
+      <span class="raw">ocr
+        {{- ' %.2f'|format(r.ocr_confidence) if r.ocr_confidence is not none else ' n/a' }}
+        {%- if r.ocr_min_confidence is not none %} · min {{ '%.2f'|format(r.ocr_min_confidence) }}{% endif %}</span>
     </div>
     <div class="verdicts">
       <form method="post" action="/plates/{{ r.id }}/verdict">

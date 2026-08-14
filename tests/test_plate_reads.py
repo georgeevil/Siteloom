@@ -39,11 +39,18 @@ from siteloom.config import (
 from siteloom.dispatch import LocalBackend
 from siteloom.identity.plates import (
     DEFAULT_MIN_CHARS,
+    REASON_LOW_CONFIDENCE,
     REASON_NO_BOX,
     REASON_NO_TEXT,
+    REASON_TOO_BLURRY,
     REASON_TOO_SHORT,
+    REASON_TOO_SMALL,
     PlateRead as PlateReadResult,
     PlateReader,
+    gate_reason,
+    laplacian_variance,
+    mean_confidence,
+    min_confidence,
     normalize_plate,
     parse_ocr_result,
 )
@@ -109,6 +116,19 @@ def reader_with(detections, ocr_result):
 
 def vehicle_crop():
     return np.full((40, 60, 3), 90, dtype=np.uint8)
+
+
+def textured_crop(width=400, height=120):
+    """A crop with hard vertical edges — a stand-in for legible glyphs.
+
+    A flat image has a Laplacian variance of exactly 0, which is what
+    `vehicle_crop()` gives and what makes it the "blurred" fixture; this
+    is its opposite, so a sharpness floor can be shown to pass as well
+    as to reject.
+    """
+    crop = np.full((height, width, 3), 20, dtype=np.uint8)
+    crop[:, ::4] = 240
+    return crop
 
 
 # --------------------------------------------------------------------------
@@ -205,14 +225,215 @@ def test_both_shapes_the_dependency_range_allows_are_read():
     """fast-plate-ocr 1.0 returns strings (optionally with an array of
     per-character probabilities); 1.1 returns PlatePrediction objects.
     The pin is 1.1 and the range allows 1.0, so both are parsed — the old
-    `str(texts)` fallback would have normalized a repr into a plate."""
+    `str(texts)` fallback would have normalized a repr into a plate.
+
+    Probabilities come back unreduced: the caller wants the mean and the
+    minimum, and a parser that reduced here could return only one.
+    """
     assert parse_ocr_result(["AB12"]) == ("AB12", None)
-    text, conf = parse_ocr_result((["AB12"], np.array([[0.5, 0.7]])))
-    assert (text, conf) == ("AB12", pytest.approx(0.6))
-    text, conf = parse_ocr_result([Prediction("AB12", char_probs=[1.0, 0.5])])
-    assert (text, conf) == ("AB12", pytest.approx(0.75))
+    text, probs = parse_ocr_result((["AB12"], np.array([[0.5, 0.7]])))
+    assert (text, mean_confidence(probs)) == ("AB12", pytest.approx(0.6))
+    text, probs = parse_ocr_result([Prediction("AB12", char_probs=[1.0, 0.5])])
+    assert (text, mean_confidence(probs)) == ("AB12", pytest.approx(0.75))
     # Anything else is "no text", never a stringified object.
     assert parse_ocr_result([object()]) == (None, None)
+
+
+def test_the_mean_hides_the_character_the_minimum_shows():
+    """The whole reason `ocr_min_confidence` exists: one substituted
+    character disappears into an average and is the entire failure."""
+    probs = [0.98, 0.98, 0.98, 0.98, 0.98, 0.35]
+    assert mean_confidence(probs) == pytest.approx(0.875, abs=1e-3)
+    assert min_confidence(probs) == pytest.approx(0.35)
+    # And an unreported confidence stays absent through both reductions.
+    assert mean_confidence(None) is None
+    assert min_confidence(None) is None
+    assert min_confidence([]) is None
+
+
+# --------------------------------------------------------------------------
+# Image-quality floors — why "confident and wrong" happens, and the fix
+# --------------------------------------------------------------------------
+
+
+def test_every_read_is_measured_even_with_no_floor_set():
+    """The floors cannot be chosen without the numbers, so the numbers are
+    taken unconditionally — including on a read that clears everything."""
+    reader = reader_with([_Detection(0.9)], [Prediction("ABC123", [0.9, 0.5])])
+    read = reader.read(vehicle_crop())
+
+    assert read.text == "ABC123"  # no floor set, nothing rejected
+    # The box is (2,2)-(30,12) of the vehicle crop.
+    assert (read.plate_width, read.plate_height) == (28, 10)
+    assert read.sharpness == pytest.approx(0.0)  # a flat crop has no edges
+    assert read.ocr_confidence == pytest.approx(0.7)
+    assert read.ocr_min_confidence == pytest.approx(0.5)
+
+
+def test_a_tiny_plate_is_rejected_however_confident_the_ocr_is():
+    """The observed failure mode: box confidence 0.92, OCR confidence
+    0.86, and six characters read six different ways off a 60-pixel
+    plate. No confidence floor catches that, because the model is
+    genuinely confident about characters it interpolated — the size of
+    the picture is what says the answer could not have been there."""
+    reader = reader_with([_Detection(0.92)], [Prediction("Z52576", [0.86] * 6)])
+    read = reader.read(vehicle_crop(), min_width=100)
+
+    assert read.text is None
+    assert read.reason == REASON_TOO_SMALL
+    assert read.plate_width == 28
+    # Recorded in full, so lowering the floor is a re-query of the table.
+    assert read.normalized == "Z52576"
+    assert read.ocr_confidence == pytest.approx(0.86)
+
+
+def test_a_blurred_plate_is_rejected_and_a_crisp_one_of_the_same_size_is_not():
+    """Size alone would pass a large, motion-smeared plate; sharpness is
+    what separates the two."""
+    box = _Box(0, 0, 400, 120)
+    blurred = reader_with([_Detection(0.9, box)], [Prediction("ABC123")])
+    assert blurred.read(vehicle_crop(), min_sharpness=50).reason == REASON_TOO_BLURRY
+
+    crisp = reader_with([_Detection(0.9, box)], [Prediction("ABC123")])
+    read = crisp.read(textured_crop(), min_sharpness=50)
+    assert read.text == "ABC123"
+    assert read.sharpness > 50
+
+
+def test_the_confidence_floor_is_on_the_weakest_character_not_the_mean():
+    """Five characters at 0.98 and one at 0.35 average to 0.87 — over any
+    mean floor an operator would set, and wrong in exactly one place."""
+    probs = [0.98, 0.98, 0.98, 0.98, 0.98, 0.35]
+    reader = reader_with([_Detection(0.9)], [Prediction("ABC123", probs)])
+    read = reader.read(vehicle_crop(), min_char_confidence=0.5)
+
+    assert read.text is None
+    assert read.reason == REASON_LOW_CONFIDENCE
+    assert read.ocr_confidence == pytest.approx(0.875, abs=1e-3)
+    assert read.ocr_min_confidence == pytest.approx(0.35)
+
+
+def test_a_confidence_the_ocr_never_reported_cannot_fail_the_floor():
+    """Absent is absent, not zero. An OCR build that reports no
+    per-character probabilities must not have 100% of its reads rejected
+    the moment someone sets a confidence floor."""
+    reader = reader_with([_Detection(0.9)], ["ABC123"])
+    read = reader.read(vehicle_crop(), min_char_confidence=0.9)
+
+    assert read.text == "ABC123"
+    assert read.ocr_min_confidence is None
+
+
+def test_the_floors_report_the_fault_an_operator_can_act_on():
+    """A 30-pixel plate that also read two characters is `too-small`: that
+    is the fact worth acting on, and the character floor is not what went
+    wrong. Order is diagnosis, so it is pinned."""
+    common = dict(min_chars=4, min_width=100, min_sharpness=10, min_char_confidence=0.5)
+    assert (
+        gate_reason(normalized="AB", plate_width=30, sharpness=2, char_confidence=0.1, **common)
+        == REASON_TOO_SMALL
+    )
+    assert (
+        gate_reason(normalized="AB", plate_width=200, sharpness=2, char_confidence=0.1, **common)
+        == REASON_TOO_BLURRY
+    )
+    assert (
+        gate_reason(normalized="AB", plate_width=200, sharpness=90, char_confidence=0.1, **common)
+        == REASON_TOO_SHORT
+    )
+    assert (
+        gate_reason(normalized="ABCD", plate_width=200, sharpness=90, char_confidence=0.1, **common)
+        == REASON_LOW_CONFIDENCE
+    )
+    assert (
+        gate_reason(normalized="ABCD", plate_width=200, sharpness=90, char_confidence=0.9, **common)
+        is None
+    )
+
+
+def test_an_unset_floor_is_off_not_a_floor_of_zero():
+    """Every floor defaults to 0, and a read must be unaffected by one —
+    otherwise adding these columns would change every existing install."""
+    assert (
+        gate_reason(
+            normalized="ABCD",
+            plate_width=1,
+            sharpness=0.0,
+            char_confidence=0.0,
+            min_chars=4,
+            min_width=0,
+            min_sharpness=0.0,
+            min_char_confidence=0.0,
+        )
+        is None
+    )
+
+
+def test_sharpness_of_an_empty_image_is_absent_not_perfectly_blurred():
+    assert laplacian_variance(np.zeros((0, 0, 3), dtype=np.uint8)) is None
+    assert laplacian_variance(np.full((8, 8, 3), 5, dtype=np.uint8)) == pytest.approx(0.0)
+
+
+def test_the_measurements_reach_the_store(sample_video, tmp_path):
+    """The module measures, ingest writes — the compute/state split means
+    neither half proves this on its own, and a metric that stops at the
+    process boundary is a column of NULLs on the screen that needs it."""
+    read = PlateReadResult(
+        text=None,
+        raw_text="Z52576",
+        normalized="Z52576",
+        detector_confidence=0.92,
+        ocr_confidence=0.86,
+        ocr_min_confidence=0.41,
+        plate_width=58,
+        plate_height=19,
+        sharpness=12.5,
+        reason=REASON_TOO_SMALL,
+    ).as_payload()
+    service = plate_service(sample_video, tmp_path, read)
+    service.run_camera(service.config.cameras[0])
+
+    with service.Session() as session:
+        row = session.query(PlateRead).first()
+    assert row is not None
+    assert row.plate_width == 58
+    assert row.plate_height == 19
+    assert row.sharpness == pytest.approx(12.5)
+    assert row.ocr_min_confidence == pytest.approx(0.41)
+    assert row.reason == REASON_TOO_SMALL
+
+
+def test_the_floors_travel_from_config_to_the_reader():
+    """A floor that lives in config and never reaches `read()` is a
+    setting that silently does nothing."""
+    import cv2
+
+    from siteloom.dispatch.base import Job
+
+    seen = {}
+
+    class RecordingReader:
+        def read(self, crop, **kwargs):
+            seen.update(kwargs)
+            return PlateReadResult(text=None, reason=REASON_NO_BOX)
+
+    cfg = IdentityConfig()
+    ident = cfg.identifiers["vehicle"]
+    ident.plate_min_width_px = 110
+    ident.plate_min_sharpness = 45.5
+    ident.plate_min_char_confidence = 0.6
+    ok, jpeg = cv2.imencode(".jpg", vehicle_crop())
+    assert ok
+    identity_module(RecordingReader(), cfg).process(
+        Job(module="identity", payload={"crop_jpeg": jpeg.tobytes(), "class_name": "car"})
+    )
+
+    assert seen == {
+        "min_chars": ident.plate_min_chars,
+        "min_width": 110,
+        "min_sharpness": 45.5,
+        "min_char_confidence": 0.6,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -479,7 +700,7 @@ def test_an_accepted_read_still_matches_by_plate(sample_video, tmp_path):
 # --------------------------------------------------------------------------
 
 
-def seeded_client(tmp_path, rows):
+def seeded_client(tmp_path, rows, configure=None):
     config = SiteConfig(
         site_id="t",
         cameras=[CameraConfig(id="cam1", adapter="file", source="x")],
@@ -488,6 +709,8 @@ def seeded_client(tmp_path, rows):
         ),
     )
     config.identity.enabled = False
+    if configure is not None:
+        configure(config)
     engine = make_engine(config.storage.db_url)
     init_db(engine)
     Session = get_session(engine)
@@ -529,6 +752,50 @@ def test_the_class_filter_isolates_motorcycles(tmp_path):
     assert "CAR999" not in bikes
     # The rejection explains itself rather than showing an empty cell.
     assert "under the character floor" in bikes
+
+
+def test_the_page_shows_what_the_floors_are_measured_against(tmp_path):
+    """A floor is chosen from these columns, so they have to be on the
+    screen — and the one that explains "confident and still wrong" is the
+    plate's size in pixels, not either confidence."""
+    client, _ = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "Z52576", "text": "Z52576",
+             "accepted": False, "reason": REASON_TOO_SMALL,
+             "detector_confidence": 0.92, "ocr_confidence": 0.86,
+             "ocr_min_confidence": 0.41, "plate_width": 58,
+             "plate_height": 19, "sharpness": 12.4},
+        ],
+    )
+    page = client.get("/plates").text
+
+    assert "58" in page and "19" in page  # the plate's size in pixels
+    assert "sharpness 12" in page
+    assert "min 0.41" in page  # the weakest character, beside the mean
+    assert "plate region too small to read" in page
+
+
+def test_a_configured_floor_names_the_setting_that_moves_it(tmp_path):
+    """A floor an operator cannot see is one they will debug as a bug."""
+
+    def configure(config):
+        config.identity.identifiers["vehicle"].plate_min_width_px = 110
+
+    client, _ = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+          "accepted": True}],
+        configure=configure,
+    )
+    page = client.get("/plates").text
+
+    assert "plate_min_width_px" in page
+    assert "110px" in page
+    # Unset floors stay off the line rather than rendering as "&ge; 0".
+    assert "plate_min_sharpness" not in page
+    # The character floor is always in force, so it is always named.
+    assert "plate_min_chars" in page
 
 
 def test_the_status_filter_separates_rejections_from_accepted_reads(tmp_path):

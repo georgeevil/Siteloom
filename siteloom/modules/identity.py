@@ -63,7 +63,13 @@ class IdentityModule:
             if ident.plate_ocr:
                 reader = self._get_plate_reader()
                 if reader is not None:
-                    read = reader.read(crop, min_chars=ident.plate_min_chars)
+                    read = reader.read(
+                        crop,
+                        min_chars=ident.plate_min_chars,
+                        min_width=ident.plate_min_width_px,
+                        min_sharpness=ident.plate_min_sharpness,
+                        min_char_confidence=ident.plate_min_char_confidence,
+                    )
                     plate = read.text
                     plate_read = read.as_payload()
                     if not ident.plate_save_crops:
