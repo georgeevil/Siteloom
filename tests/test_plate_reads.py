@@ -587,6 +587,324 @@ def test_an_unknown_verdict_is_refused(tmp_path):
     ).status_code == 400
 
 
+# --------------------------------------------------------------------------
+# Search, and the one-plate history page
+# --------------------------------------------------------------------------
+
+
+def test_search_strips_what_plate_matching_strips(tmp_path):
+    """"ab-12" finds the row whose raw text was "AB 12-CD": the operator's
+    punctuation goes through the same `normalize_plate` the OCR's did."""
+    client, _ = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "AB 12-CD", "text": "AB12CD",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "ZZ999", "text": "ZZ999",
+             "accepted": True},
+        ],
+    )
+    found = client.get("/plates?q=ab-12").text
+    assert "AB 12-CD" in found
+    assert "ZZ999" not in found
+
+
+def test_a_search_that_normalizes_to_nothing_matches_nothing(tmp_path):
+    """An explicit search must never silently become "no filter"."""
+    client, _ = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "AB12", "text": "AB12",
+          "accepted": True}],
+    )
+    page = client.get("/plates?q=--!--").text
+    assert "AB12" not in page
+    assert "No read matches this filter" in page
+
+
+def test_search_and_the_class_filter_narrow_together(tmp_path):
+    client, _ = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "AB12", "text": "AB12",
+             "accepted": True},
+            {"class_name": "motorcycle", "raw_text": "AB12", "text": "AB12",
+             "accepted": True},
+        ],
+    )
+    page = client.get("/plates?q=ab12&class=motorcycle").text
+    assert "motorcycle" in page and "AB12" in page
+    # The chips keep the search: switching class must not drop q.
+    assert "q=ab12" in page
+
+
+def seeded_plate_page(tmp_path):
+    """Two plates, one of them carried by a labeled vehicle identity."""
+    from siteloom.store import Identity
+
+    client, Session = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "AB 12-CD", "text": "AB12CD",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "ab12cd", "text": "AB12CD",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "ZZ999", "text": "ZZ999",
+             "accepted": True},
+        ],
+    )
+    with Session() as session:
+        session.add(
+            Identity(
+                identifier_key="vehicle",
+                class_name="car",
+                label="the gray van",
+                plate="AB12CD",
+                first_seen=TS,
+                last_seen=TS,
+                appearance_count=7,
+            )
+        )
+        session.commit()
+        identity_id = session.query(Identity).one().id
+    return client, identity_id
+
+
+def test_the_plate_page_gathers_one_plates_reads_and_its_identity(tmp_path):
+    client, identity_id = seeded_plate_page(tmp_path)
+    page = client.get("/plates/p/AB12CD").text
+
+    # Both reads of this plate, none of the other one.
+    assert page.count("event #") == 2
+    assert "ZZ999" not in page
+    # The write-once Identity.plate row, linked by name.
+    assert "the gray van" in page
+    assert f"/identities/{identity_id}" in page
+
+
+def test_the_plate_page_canonicalizes_its_url(tmp_path):
+    client, _ = seeded_plate_page(tmp_path)
+    hop = client.get("/plates/p/ab-12cd", follow_redirects=False)
+    assert hop.status_code == 307
+    assert hop.headers["location"] == "/plates/p/AB12CD"
+    assert client.get("/plates/p/--!--").status_code == 404
+
+
+def test_a_plate_nobody_read_says_so_instead_of_erroring(tmp_path):
+    client, _ = seeded_plate_page(tmp_path)
+    page = client.get("/plates/p/NEVER1")
+    assert page.status_code == 200
+    assert "No read of" in page.text
+
+
+def test_the_list_links_each_read_to_its_plate_page(tmp_path):
+    client, _ = seeded_plate_page(tmp_path)
+    assert '/plates/p/AB12CD' in client.get("/plates").text
+
+
+def test_a_verdict_from_the_plate_page_returns_to_it(tmp_path):
+    client, _ = seeded_plate_page(tmp_path)
+    with_read = client.get("/plates/p/ZZ999").text
+    assert "ZZ999" in with_read
+    import re
+
+    read_id = int(re.search(r"/plates/(\d+)/verdict", with_read).group(1))
+    hop = client.post(
+        f"/plates/{read_id}/verdict",
+        data={"verdict": "confirmed", "back": "/plates/p/ZZ999"},
+        follow_redirects=False,
+    )
+    assert hop.status_code == 303
+    assert hop.headers["location"] == "/plates/p/ZZ999"
+
+
+# --------------------------------------------------------------------------
+# Corrections: "wrong — it actually says…"
+# --------------------------------------------------------------------------
+
+
+def test_correcting_a_read_records_truth_and_derives_the_verdict(tmp_path):
+    """Correcting is judging: the verdict follows from whether the typed
+    truth agrees with what the OCR read, so a correction and a
+    "confirmed" verdict on a misread can never coexist."""
+    client, Session = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "ABI2CD", "text": "ABI2CD",
+          "accepted": True}],
+    )
+    with Session() as session:
+        read_id = session.query(PlateRead).one().id
+
+    # A disagreeing correction is a wrong verdict, normalized like the OCR's.
+    client.post(f"/plates/{read_id}/correct", data={"text": "ab-12cd"})
+    with Session() as session:
+        row = session.query(PlateRead).one()
+        assert row.corrected_text == "AB12CD"
+        assert row.verdict == "wrong"
+        assert row.verdict_at is not None
+
+    # An agreeing correction confirms.
+    client.post(f"/plates/{read_id}/correct", data={"text": "abi2cd"})
+    with Session() as session:
+        row = session.query(PlateRead).one()
+        assert row.corrected_text == "ABI2CD"
+        assert row.verdict == "confirmed"
+
+    # Clearing removes the correction; the judgement already made stands.
+    client.post(f"/plates/{read_id}/correct", data={"text": ""})
+    with Session() as session:
+        row = session.query(PlateRead).one()
+        assert row.corrected_text is None
+        assert row.verdict == "confirmed"
+
+    # Junk that normalizes to nothing is refused, not silently cleared.
+    assert (
+        client.post(f"/plates/{read_id}/correct", data={"text": "!!!"}).status_code
+        == 400
+    )
+
+
+def test_a_corrected_read_moves_to_the_true_plates_page(tmp_path):
+    """The per-plate page groups by best-known truth: a misread corrected
+    to this plate is evidence the vehicle was here; a read corrected
+    away no longer belongs to the page of its misreading."""
+    client, Session = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "ABI2CD", "text": "ABI2CD",
+          "accepted": True}],
+    )
+    with Session() as session:
+        read_id = session.query(PlateRead).one().id
+    client.post(f"/plates/{read_id}/correct", data={"text": "AB12CD"})
+
+    true_page = client.get("/plates/p/AB12CD").text
+    assert "ABI2CD" in true_page  # the OCR's misreading, shown as such
+    assert "corrected onto this page" in true_page
+    assert "No read of" in client.get("/plates/p/ABI2CD").text
+
+    # Search stays permissive — either spelling finds the row.
+    assert "ABI2CD" in client.get("/plates?q=abi2cd").text
+    assert "ABI2CD" in client.get("/plates?q=ab12cd").text
+
+
+# --------------------------------------------------------------------------
+# The watchlist
+# --------------------------------------------------------------------------
+
+
+def test_watching_a_plate_lists_it_and_badges_its_reads(tmp_path):
+    from siteloom.store import PlateWatch
+
+    client, Session = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "AB 12-CD", "text": "AB12CD",
+          "accepted": True}],
+    )
+    # The plate is normalized on the way in, like everywhere else.
+    client.post(
+        "/plates/watchlist", data={"plate": "ab-12cd", "label": "banned van"}
+    )
+    page = client.get("/plates").text
+    assert "banned van" in page
+    assert "watched" in page  # the badge on the matching read
+    assert "1 sighting" in page
+    assert "On the watchlist" in client.get("/plates/p/AB12CD").text
+
+    # Watching twice is an update, not an error or a second row.
+    client.post(
+        "/plates/watchlist", data={"plate": "AB12CD", "label": "expected guest"}
+    )
+    with Session() as session:
+        watch = session.query(PlateWatch).one()
+        assert watch.label == "expected guest"
+        watch_id = watch.id
+
+    client.post(f"/plates/watchlist/{watch_id}/delete")
+    with Session() as session:
+        assert session.query(PlateWatch).count() == 0
+
+    assert (
+        client.post("/plates/watchlist", data={"plate": "???"}).status_code == 400
+    )
+
+
+class FakeHooks:
+    def __init__(self):
+        self.fired = []
+
+    def fire(self, event_type, payload):
+        self.fired.append((event_type, payload))
+        return 1
+
+
+class FakeBus:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, subtopic, payload):
+        self.published.append((subtopic, payload))
+        return True
+
+
+def test_a_watched_plate_fires_the_alarm_once_per_event(sample_video, tmp_path):
+    """The first accepted read of a watched plate on an event fires the
+    webhook and the MQTT message; later frames of the same visit are the
+    same alarm and stay quiet."""
+    from siteloom.store import PlateWatch
+
+    read = PlateReadResult(
+        text="ABC123",
+        raw_text="ABC-123",
+        normalized="ABC123",
+        detector_confidence=0.95,
+        plate_jpeg=PLATE_JPEG,
+        min_chars=4,
+    ).as_payload()
+    service = plate_service(sample_video, tmp_path, read)
+    with service.Session() as session:
+        session.add(
+            PlateWatch(plate="ABC123", label="banned", note="", created_at=TS)
+        )
+        session.commit()
+    service.notifier = FakeHooks()
+    service.publisher = FakeBus()
+    service.run_camera(service.config.cameras[0])
+
+    with service.Session() as session:
+        accepted_reads = (
+            session.query(PlateRead).filter(PlateRead.accepted.is_(True)).count()
+        )
+    assert accepted_reads > 1, "the dedupe needs repeat reads to be exercised"
+    # The identity pipeline's own webhooks (identity.unknown for the
+    # freshly minted vehicle) still fire; the watch alarm rides alongside
+    # them and exactly once.
+    hits = [p for t, p in service.notifier.fired if t == "plate.watchlist"]
+    assert len(hits) == 1
+    payload = hits[0]
+    assert payload["plate"] == "ABC123"
+    assert payload["watch_label"] == "banned"
+    assert payload["event_id"] is not None
+    assert [p for s, p in service.publisher.published if s == "watchlist"] == [
+        payload
+    ]
+
+
+def test_an_unwatched_plate_fires_nothing(sample_video, tmp_path):
+    read = PlateReadResult(
+        text="ABC123",
+        raw_text="ABC-123",
+        normalized="ABC123",
+        detector_confidence=0.95,
+        plate_jpeg=PLATE_JPEG,
+        min_chars=4,
+    ).as_payload()
+    service = plate_service(sample_video, tmp_path, read)
+    service.notifier = FakeHooks()
+    service.publisher = FakeBus()
+    service.run_camera(service.config.cameras[0])
+    assert [t for t, _ in service.notifier.fired if t == "plate.watchlist"] == []
+    assert [s for s, _ in service.publisher.published if s == "watchlist"] == []
+
+
 def test_an_empty_table_says_why_rather_than_reading_as_quiet(tmp_path):
     """The /noise rule: an empty table must not imply no vehicle came
     past when the real answer is that nothing here can produce a row."""

@@ -97,6 +97,9 @@ PATH_PARAMS = {
     "read_id": "1",
     "link_id": "1",
     "camera_id": "cam1",
+    # /plates/p/{plate} — the canonical (normalized) spelling, since the
+    # route 307s anything else and a redirect body proves nothing.
+    "plate": "KX19ZTP",
     # The event crop, which stays visible by decision — the walk still
     # reads its bytes, because a name could only be in them by accident.
     "path": "cam1/2026-08-06/crop.jpg",

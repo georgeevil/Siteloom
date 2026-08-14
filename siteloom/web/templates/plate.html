@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block title %}Plate {{ plate }}{% endblock %}
+{% block subtitle %}every read of one plate{% endblock %}
+
+{#
+  One plate's history. The /plates list answers "how is the OCR doing";
+  this page answers "when was ABC123 here" — every read of the normalized
+  text plates are matched on (rejected near-misses included), the Identity
+  row an accepted read wrote, and a link from each read to its Event.
+#}
+
+{% block content %}
+<style>
+  .pd-head { margin-bottom: 14px; }
+  .pd-head .plate-big {
+    font-family: var(--font-mono); font-size: 24px; letter-spacing: .12em;
+    color: var(--text); margin: 0 0 6px;
+  }
+  .pd-head p { font-size: 12px; color: var(--muted); margin: 0; }
+  .pd-cards { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .pd-card {
+    border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel);
+    padding: 10px 14px; font-size: 12px; color: var(--muted); min-width: 130px;
+  }
+  .pd-card b { display: block; font-size: 15px; color: var(--text); font-weight: 600; }
+  .pd-identity {
+    display: flex; align-items: center; gap: 12px;
+    border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel);
+    padding: 10px 14px; margin-bottom: 14px; text-decoration: none;
+  }
+  .pd-identity:hover { border-color: var(--accent); }
+  .pd-identity img {
+    width: 56px; height: 56px; object-fit: cover; border-radius: 6px;
+    background: var(--raised); border: 1px solid var(--hairline);
+  }
+  .pd-identity .who { font-size: 13px; color: var(--text); font-weight: 600; }
+  .pd-identity .sub { font-size: 11px; color: var(--muted); }
+  .tablecard {
+    border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .prow {
+    display: grid;
+    grid-template-columns: 88px 1fr 110px 140px 96px 96px 150px;
+    align-items: center; gap: 12px; padding: 8px 14px; min-height: 56px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .prow:last-child { border-bottom: 0; }
+  .prow.head {
+    min-height: 30px; height: 30px; padding-top: 0; padding-bottom: 0;
+    background: var(--raised);
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .prow img {
+    display: block; width: 88px; height: 40px; object-fit: cover;
+    border-radius: 4px; background: var(--raised); border: 1px solid var(--hairline);
+  }
+  .nocrop {
+    display: flex; align-items: center; justify-content: center;
+    width: 88px; height: 40px; border-radius: 4px;
+    border: 1px dashed var(--control-border);
+    font-family: var(--font-mono); font-size: 8.5px; color: var(--faint);
+  }
+  .mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .mono a { color: inherit; }
+  .raw { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .why { font-size: 11px; color: var(--amber); }
+  .verdicts { display: flex; gap: 5px; }
+  .verdicts form { margin: 0; }
+  .vbtn {
+    font: inherit; font-size: 11px; padding: 3px 9px; border-radius: 5px;
+    cursor: pointer; border: 1px solid var(--control-border);
+    background: var(--raised); color: var(--muted);
+  }
+  .vbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .vbtn.on-yes { border-color: var(--green); color: var(--green); }
+  .vbtn.on-no { border-color: var(--red); color: var(--red); }
+  .pd-empty {
+    border: 1px dashed var(--control-border); border-radius: 8px;
+    padding: 18px 20px; color: var(--muted); font-size: 12.5px; line-height: 1.65;
+  }
+  .pd-watch {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    border: 1px solid var(--amber); border-radius: 8px;
+    padding: 8px 14px; margin-bottom: 14px; font-size: 12px; color: var(--text);
+  }
+  .pd-watch .sub { color: var(--muted); }
+  .pd-watch form { margin: 0; margin-left: auto; }
+  .pd-watchadd { display: flex; gap: 6px; align-items: center; margin-bottom: 14px; }
+  .pd-watchadd input[name="label"] {
+    font: inherit; font-size: 11.5px; padding: 4px 8px; border-radius: 5px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .fixline { font-size: 11px; color: var(--green); }
+  .fixline a { color: inherit; }
+  .fix { display: flex; gap: 4px; margin-top: 3px; }
+  .fix input {
+    font-family: var(--font-mono); font-size: 10.5px; padding: 2px 6px; width: 110px;
+    border-radius: 4px; border: 1px solid var(--control-border);
+    background: var(--raised); color: var(--text); text-transform: uppercase;
+  }
+</style>
+
+<div class="pd-head">
+  <p class="plate-big">{{ plate }}</p>
+  <p><a href="/plates">&larr; All plate reads</a></p>
+</div>
+
+{% if watch %}
+<div class="pd-watch">
+  <span>&#9733; On the watchlist{% if watch.label %} as <strong>{{ watch.label }}</strong>{% endif %}</span>
+  {% if watch.note %}<span class="sub">{{ watch.note }}</span>{% endif %}
+  <form method="post" action="/plates/watchlist/{{ watch.id }}/delete">
+    <input type="hidden" name="back" value="{{ back }}">
+    <button class="vbtn" type="submit">Remove</button>
+  </form>
+</div>
+{% else %}
+<form class="pd-watchadd" method="post" action="/plates/watchlist">
+  <input type="hidden" name="plate" value="{{ plate }}">
+  <input type="hidden" name="back" value="{{ back }}">
+  <input name="label" placeholder="Why it's watched (optional)" aria-label="Watch label">
+  <button class="vbtn" type="submit">Add to watchlist</button>
+</form>
+{% endif %}
+
+{% if total %}
+<div class="pd-cards">
+  <div class="pd-card"><b>{{ total }}</b>read{{ '' if total == 1 else 's' }}</div>
+  <div class="pd-card"><b>{{ accepted }}</b>accepted</div>
+  <div class="pd-card"><b>{{ local_time(first_at, '%Y-%m-%d %H:%M') }}</b>first read</div>
+  <div class="pd-card"><b>{{ local_time(last_at, '%Y-%m-%d %H:%M') }}</b>last read</div>
+  <div class="pd-card"><b>{{ cameras | join(', ') if cameras else '—' }}</b>camera{{ '' if cameras | length == 1 else 's' }}</div>
+</div>
+{% endif %}
+
+{% for identity in identities %}
+<a class="pd-identity" href="/identities/{{ identity.id }}">
+  {% if identity.best_crop_path %}
+  <img src="/media/{{ identity.best_crop_path }}" alt="best crop of {{ identity.name }}">
+  {% endif %}
+  <span>
+    <span class="who">{{ identity.name }}</span><br>
+    <span class="sub">{{ identity.identifier_key }} identity &middot;
+      seen {{ identity.appearance_count }} time{{ '' if identity.appearance_count == 1 else 's' }}
+      &mdash; visual matches of this vehicle land here too</span>
+  </span>
+</a>
+{% else %}
+{% if accepted %}
+<div class="pd-empty">
+  Accepted reads exist but no identity carries this plate — the vehicle may
+  have resolved before its plate was first read, and the plate learned onto
+  an identity that was later merged away.
+</div>
+{% endif %}
+{% endfor %}
+
+{% if reads %}
+<div class="tablecard">
+  <div class="prow head">
+    <div>Plate crop</div><div>Read</div><div>Class</div><div>When</div>
+    <div>Box conf</div><div>OCR conf</div><div>Verdict</div>
+  </div>
+  <div id="plate-rows">
+  {% for r in reads %}
+  <div class="prow">
+    <div>
+      {% if r.crop_path %}
+      <img src="/media/{{ r.crop_path }}" alt="plate crop" loading="lazy">
+      {% else %}
+      <span class="nocrop">no crop</span>
+      {% endif %}
+    </div>
+    <div>
+      <div class="mono" style="font-size: 13px; letter-spacing: .08em; color: var(--text);{{ ' text-decoration: line-through; color: var(--faint);' if not r.accepted }}">{{ r.display_text or '—' }}</div>
+      {% if r.reason %}
+        <div class="why">{{ reason_labels.get(r.reason, r.reason) }}
+          <span class="raw">({{ r.reason }}{% if r.reason == 'too-short' %}, floor {{ r.min_chars }}{% endif %})</span>
+        </div>
+      {% endif %}
+      {% if r.corrected_text %}
+      <div class="fixline">actually
+        {%- if r.corrected_text == plate %} {{ r.corrected_text }} (corrected onto this page)
+        {%- else %} <a href="/plates/p/{{ r.corrected_text }}">{{ r.corrected_text }}</a>
+        {%- endif %}</div>
+      {% endif %}
+      {% if r.verdict == 'wrong' or r.corrected_text %}
+      <form class="fix" method="post" action="/plates/{{ r.id }}/correct">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input name="text" value="{{ r.corrected_text or '' }}"
+               placeholder="actually reads…" aria-label="Correct plate text">
+        <button class="vbtn" type="submit">Fix</button>
+      </form>
+      {% endif %}
+    </div>
+    <div class="mono">{{ r.class_name or '—' }}<br>{{ r.camera_id or '' }}</div>
+    <div class="mono">
+      {{ local_time(r.at, '%Y-%m-%d %H:%M:%S') }}<br>
+      <a href="/events/{{ r.event_id }}">event #{{ r.event_id }}</a>
+    </div>
+    <div class="mono">
+      {{ '%.2f'|format(r.detector_confidence) if r.detector_confidence is not none else '—' }}
+    </div>
+    <div class="mono">
+      {{ '%.2f'|format(r.ocr_confidence) if r.ocr_confidence is not none else 'n/a' }}
+    </div>
+    <div class="verdicts">
+      <form method="post" action="/plates/{{ r.id }}/verdict">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input type="hidden" name="verdict" value="{{ '' if r.verdict == 'confirmed' else 'confirmed' }}">
+        <button class="vbtn{{ ' on-yes' if r.verdict == 'confirmed' }}" type="submit">Correct</button>
+      </form>
+      <form method="post" action="/plates/{{ r.id }}/verdict">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input type="hidden" name="verdict" value="{{ '' if r.verdict == 'wrong' else 'wrong' }}">
+        <button class="vbtn{{ ' on-no' if r.verdict == 'wrong' }}" type="submit">Wrong</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+</div>
+
+{% include "_load_more.html" %}
+
+{% else %}
+<div class="pd-empty">
+  No read of <strong>{{ plate }}</strong> has been recorded. Reads land here
+  by their normalized text — check the spelling, or search from
+  <a href="/plates">the full list</a>.
+</div>
+{% endif %}
+{% endblock %}
