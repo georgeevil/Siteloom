@@ -12,6 +12,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -60,6 +61,106 @@ CLASS_KINDS = {
     "vehicles": {"car", "truck", "bus", "motorcycle", "bicycle"},
     "other": set(),
 }
+
+
+@dataclass(frozen=True)
+class EventColumn:
+    """One column the events list can offer (CLD-108).
+
+    The offer is data in the spirit of nav.py's NAV, not a template fork
+    per column: index.html iterates this table for the header, the row
+    cells, the picker's checkboxes and the per-column hide rules, so
+    adding a column later is one entry here plus one cell branch in the
+    row macro. `key` is the column's identity everywhere it travels — the
+    `c-<key>` cell class, the `hide-<key>` class the picker toggles on
+    the list container, and the token stored in localStorage — so it must
+    stay CSS-class- and JSON-safe, and renaming one orphans saved
+    preferences (they degrade to the default set, never to an error).
+    """
+
+    key: str
+    label: str
+    #: In the server-rendered default set. The default is today's
+    #: composition plus Last seen — the sort column visible out of the
+    #: box, nothing an operator relies on gone (CLD-108).
+    default: bool
+    #: The column the list is ordered by. Marked in the header — the sort
+    #: stays on `last_seen` and the keyset cursor is untouched; this only
+    #: makes that fact visible instead of leaving the operator to infer
+    #: it from timestamps that stop being monotonic down the page.
+    sort: bool = False
+
+
+#: The events list's columns on offer, in render order. Status is not
+#: here on purpose: the review-status chip is the triage signal itself,
+#: the one cell the queue cannot mean anything without, so it is fixed
+#: rather than offered.
+EVENT_COLUMNS: tuple[EventColumn, ...] = (
+    EventColumn("arrived", "Arrived", default=True),
+    EventColumn("last-seen", "Last seen", default=True, sort=True),
+    EventColumn("duration", "Duration", default=False),
+    EventColumn("detection", "Detection", default=True),
+    EventColumn("camera", "Camera", default=True),
+    EventColumn("identity", "Identity", default=True),
+    EventColumn("confidence", "Conf", default=True),
+    EventColumn("detections", "Detections", default=False),
+)
+
+#: The columns the server hides by class on the list container. Every
+#: row always renders every cell — visibility is CSS keyed off these
+#: classes, which is what lets load-more fragments and the client-side
+#: picker share one mechanism (the fragment inherits the container's
+#: classes; the picker only edits them).
+DEFAULT_HIDDEN_COLUMNS: tuple[str, ...] = tuple(
+    c.key for c in EVENT_COLUMNS if not c.default
+)
+
+
+def duration_text(
+    first_seen: datetime,
+    last_seen: datetime,
+    *,
+    now: datetime | None = None,
+    active_gap_s: float = 0.0,
+) -> str:
+    """An event's dwell as a duration the operator can read (CLD-108).
+
+    "14 min", not two timestamps to subtract. Naive-UTC in, plain text
+    out — a difference has no zone, so this deliberately bypasses
+    `local_time` (there is nothing to convert; the *timestamps* still
+    render through it).
+
+    Renderings, decided here so they are testable:
+
+    * under a second — "< 1 s". A single-frame event has no measured
+      span; "0 s" would claim a measurement that was never made.
+    * under a minute — whole seconds ("38 s").
+    * under an hour — whole minutes ("14 min"), floored: triage wants
+      magnitude, not precision.
+    * an hour and up — "2 h 05", minutes zero-padded so columns align.
+    * possibly still growing — a trailing " +" ("14 min +") when
+      `last_seen` is within `active_gap_s` of `now`. The store has no
+      open/closed bit — de-fragmentation can extend `last_seen` for as
+      long as the subject keeps being seen — so "still active" is
+      necessarily a horizon, and the honest horizon is the track-link
+      gap: the window inside which ingest would still extend this very
+      event. The marker claims "may still be growing", never "live".
+    """
+    span = (last_seen - first_seen).total_seconds()
+    if span < 1:
+        text = "< 1 s"
+    elif span < 60:
+        text = f"{int(span)} s"
+    elif span < 3600:
+        text = f"{int(span // 60)} min"
+    else:
+        text = f"{int(span // 3600)} h {int(span % 3600 // 60):02d}"
+    ongoing = (
+        now is not None
+        and active_gap_s > 0
+        and (now - last_seen).total_seconds() <= active_gap_s
+    )
+    return text + " +" if ongoing else text
 
 
 # LIKE's own wildcards, and the character that turns them back into
@@ -765,10 +866,26 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             f"End of the list — {matched} event"
             f"{'' if matched == 1 else 's'} match these filters.",
         )
+        # Bound per request so "still growing" is judged against the
+        # moment this page rendered, with the same horizon ingest itself
+        # uses to extend an event (EventConfig.track_link_gap_s).
+        page_now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        def _duration(first_seen: datetime, last_seen: datetime) -> str:
+            return duration_text(
+                first_seen,
+                last_seen,
+                now=page_now,
+                active_gap_s=config.events.track_link_gap_s,
+            )
+
         return templates.TemplateResponse(
             request,
             "index.html",
             {
+                "columns": EVENT_COLUMNS,
+                "hidden_columns": DEFAULT_HIDDEN_COLUMNS,
+                "duration_text": _duration,
                 "chip_urls": chip_urls,
                 "identifier_keys": list(config.identity.identifiers.keys()),
                 "row_urls": {e.id: _triage_url(state, selected=e.id) for e in events},
