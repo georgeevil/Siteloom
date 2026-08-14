@@ -58,22 +58,37 @@ class UniFiProtectAdapter(CameraAdapter):
     def connect(self) -> None:
         if self._loop is not None:
             return
-        loop = asyncio.new_event_loop()
-        thread = threading.Thread(
-            target=loop.run_forever, name="uiprotect-loop", daemon=True
-        )
-        thread.start()
-        self._loop, self._thread = loop, thread
+        self._start_loop()
         try:
             self._run(self._connect())
         except Exception:
             self.close()
             raise
 
-    def _run(self, coro):
-        """Run a coroutine on the adapter's loop from sync code."""
+    def _start_loop(self) -> None:
+        """Start the private event loop without touching the console.
+        Split from connect() so tests can exercise loop-side behaviour
+        (timeouts, cancellation) against a stub client."""
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(
+            target=loop.run_forever, name="uiprotect-loop", daemon=True
+        )
+        thread.start()
+        self._loop, self._thread = loop, thread
+
+    def _run(self, coro, timeout: float | None = None):
+        """Run a coroutine on the adapter's loop from sync code.
+
+        `timeout` puts the deadline on the coroutine itself
+        (`asyncio.wait_for`), not on the Future's `.result()`: a timeout
+        on the sync side would abandon the coroutine still running on
+        the loop, holding its connection — the very state being escaped.
+        wait_for cancels it, so the dead transfer's socket is released.
+        """
         if self._loop is None:
             raise RuntimeError("adapter not connected")
+        if timeout:
+            coro = asyncio.wait_for(coro, timeout)
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     async def _connect(self) -> None:
@@ -200,11 +215,33 @@ class UniFiProtectAdapter(CameraAdapter):
         Protect's export boundaries are approximate (±a few seconds);
         callers stamping frame times should use `start` as the base and
         accept that fuzz rather than trying to correct for it.
+
+        The export runs under `unifi.download_timeout_s`: the NVR has
+        been seen going silent mid-transfer with the connection still
+        ESTABLISHED, which without a deadline blocks this call forever —
+        the backfill's heartbeat goes cold while the process looks alive.
+        On timeout the half-written file is removed (a truncated MP4 that
+        decodes part-way would be indistinguishable from a short clip)
+        and TimeoutError propagates; the backfill records the clip as
+        failed and moves to the next one instead of hanging the run.
         """
         output.parent.mkdir(parents=True, exist_ok=True)
-        self._run(
-            self._client.get_camera_video(stream_id, start, end, output_file=output)
-        )
+        timeout = self._cfg.download_timeout_s or None
+        try:
+            self._run(
+                self._client.get_camera_video(
+                    stream_id, start, end, output_file=output
+                ),
+                timeout=timeout,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            output.unlink(missing_ok=True)
+            raise TimeoutError(
+                f"NVR export of {stream_id} [{start} .. {end}] produced no "
+                f"complete file within {timeout:g}s — the transfer stalled. "
+                f"Re-queue it with --retry-failed; raise "
+                f"unifi.download_timeout_s if exports legitimately run longer."
+            ) from None
         return output
 
     def get_historical_clip(

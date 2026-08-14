@@ -529,33 +529,113 @@ def test_reassign_enrolls_when_there_was_nothing_to_move(edit_env):
     assert owner == edit_env.ids.other and score > 0.99
 
 
-def test_reassign_across_identifiers_never_moves_the_vector(edit_env):
-    """A face embedding is not a vehicle embedding — different pipeline,
-    different dimensionality, different collection. Moving one into the
-    other's gallery would be silent nonsense, so the vector is stripped
-    from the source and the target is enrolled with its own embedder."""
-    with edit_env.Session() as session:
-        person = Identity(
-            identifier_key="person",
+def _person_identity(env, key: str, label: str) -> int:
+    with env.Session() as session:
+        identity = Identity(
+            identifier_key=key,
             class_name="person",
-            label="Dana",
+            label=label,
             first_seen=datetime(2026, 8, 1),
             last_seen=datetime(2026, 8, 1),
         )
-        session.add(person)
+        session.add(identity)
         session.commit()
-        person_id = person.id
+        return identity.id
+
+
+def test_cross_kind_association_is_refused(edit_env):
+    """A person identity may not claim a car event — attach or reassign.
+
+    This is the "association mess" gate: one cross-kind link poisons the
+    gallery for every future match of that identity, and unwinding it is
+    identity surgery. The rule is by identifier applicability, not by
+    the Identity row's own class — Bo Truck (class "truck") claiming a
+    "car" event stays legal because the vehicle identifier spans both.
+    """
+    person_id = _person_identity(edit_env, "person", "Dana")
+
+    r = edit_env.client.post(
+        f"/events/{edit_env.ids.event}/identity",
+        data={"identity_id": person_id, "enroll": "0"},
+    )
+    assert r.status_code == 400
+    assert "cross-kind" in r.json()["detail"]
 
     r = edit_env.client.post(
         f"/events/{edit_env.ids.event}/identity/{edit_env.ids.link}/reassign",
         data={"identity_id": person_id},
+    )
+    assert r.status_code == 400
+    # Nothing moved: the refusal happened before any store edit.
+    store = _store(edit_env)
+    assert store.count_identity("vehicle", edit_env.ids.wrong) == 2
+    assert store.count_identity("person", person_id) == 0
+
+    # Minting a NEW identity under an inapplicable identifier is the
+    # same wrong link one step earlier.
+    r = edit_env.client.post(
+        f"/events/{edit_env.ids.event}/identity",
+        data={"identity_id": "new", "identifier": "face", "label": "Who"},
+    )
+    assert r.status_code == 400
+    assert "does not apply" in r.json()["detail"]
+
+
+def test_the_picker_offers_only_compatible_identities(edit_env):
+    """The offer side of the same rule: a person identity is not listed
+    on a car event's rail, and neither is the face identifier — the form
+    must not offer what the POST refuses."""
+    _person_identity(edit_env, "person", "Dana")
+    rail = edit_env.client.get(f"/events/{edit_env.ids.event}/rail").text
+    assert "Bo Truck" in rail
+    assert "Dana" not in rail
+    assert '<option value="vehicle">' in rail
+    assert '<option value="face">' not in rail
+
+
+def test_reassign_across_compatible_identifiers_never_moves_the_vector(edit_env):
+    """face -> person is the legitimate cross-identifier reassign (both
+    consume person events). A face embedding is not a person embedding —
+    different pipeline, different dimensionality, different collection —
+    so the vector is stripped from the source and the target is enrolled
+    with its own embedder, never moved raw between collections."""
+    face_id = _person_identity(edit_env, "face", "Dana Face")
+    person_id = _person_identity(edit_env, "person", "Dana")
+    with edit_env.Session() as session:
+        event = Event(
+            camera_id="cam1",
+            track_id=8,
+            class_name="person",
+            first_seen=datetime(2026, 8, 7, 15, 0, 0),
+            last_seen=datetime(2026, 8, 7, 15, 0, 30),
+            detection_count=1,
+            best_crop_path=edit_env.crop_paths["red"],
+            best_confidence=0.9,
+        )
+        session.add(event)
+        session.flush()
+        link = EventIdentity(
+            event_id=event.id,
+            identity_id=face_id,
+            identifier_key="face",
+            similarity=0.5,
+            matched_by="visual",
+        )
+        session.add(link)
+        session.commit()
+        event_id, link_id = event.id, link.id
+    store = _store(edit_env)
+    store.add("face", COLOURS["red"][1], face_id, crop_path=edit_env.crop_paths["red"])
+
+    r = edit_env.client.post(
+        f"/events/{event_id}/identity/{link_id}/reassign",
+        data={"identity_id": person_id},
         follow_redirects=False,
     )
     assert r.status_code == 303
-    store = _store(edit_env)
-    assert store.count_identity("vehicle", edit_env.ids.wrong) == 1
-    assert store.count_identity("vehicle", person_id) == 0
-    assert store.count_identity("person", person_id) == 1
+    assert store.count_identity("face", face_id) == 0  # stripped
+    assert store.count_identity("person", face_id) == 0  # never moved raw
+    assert store.count_identity("person", person_id) == 1  # re-enrolled
     with edit_env.Session() as session:
         assert session.get(Identity, person_id).vector_count == 1
 

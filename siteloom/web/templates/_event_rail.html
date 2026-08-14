@@ -138,7 +138,9 @@
         <option value="new">+ new identity</option>
       </select>
       <select name="identifier" aria-label="Identifier for a new identity">
-        {% for key in identifier_keys | default(['face', 'vehicle']) %}
+        {# Only identifiers that consume this event's class: the POST
+           refuses a cross-kind link, so the form must not offer one. #}
+        {% for key in rail.identifier_options | default(identifier_keys | default(['face', 'vehicle'])) %}
           <option value="{{ key }}">{{ key }}</option>
         {% endfor %}
       </select>
@@ -167,9 +169,10 @@
     {% else %}
       <form method="post" action="/events/{{ e.id }}/missed" class="miss-form">
         <input type="hidden" name="missed" value="1">
-        {# Attribution is the point (CLD-17): which identifier failed here. #}
+        {# Attribution is the point (CLD-17): which identifier failed
+           here — of the ones that could have run on this class. #}
         <select name="identifier">
-          {% for key in identifier_keys | default(['face', 'vehicle']) %}
+          {% for key in rail.identifier_options | default(identifier_keys | default(['face', 'vehicle'])) %}
             <option value="{{ key }}">{{ key }}</option>
           {% endfor %}
         </select>

@@ -82,7 +82,11 @@ def env(tmp_path):
             Event(
                 camera_id="cam1",
                 track_id=1,
-                class_name="person",
+                # A vehicle event, so the vehicle identities below are
+                # class-compatible picker candidates — this file is about
+                # who may be NAMED, not about cross-kind links, which are
+                # refused outright since the compatibility gate.
+                class_name="car",
                 first_seen=TS,
                 last_seen=TS,
                 detection_count=3,

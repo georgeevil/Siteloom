@@ -46,6 +46,8 @@
     if (!list) return;
 
     var busy = false;
+    var done = false;
+    var observer = null;
 
     function fail(message) {
       busy = false;
@@ -60,7 +62,7 @@
     }
 
     function load() {
-      if (busy || !button.href) return;
+      if (busy || done || !button.href) return;
       busy = true;
       root.dataset.state = "loading";
       button.hidden = true;
@@ -87,10 +89,19 @@
             button.textContent = next.textContent;
             root.dataset.state = "idle";
           } else {
+            // Terminal for real. Removing the button detaches it but the
+            // closure still holds it, and a detached anchor's .href still
+            // answers with the last URL — so without the flag (and the
+            // disconnect) the observer kept firing load(), re-fetching
+            // the final page and re-appending its rows forever. That is
+            // the "scroll never finishes" bug: the list grows with
+            // repeats of its own tail instead of ending.
+            done = true;
+            if (observer) observer.disconnect();
             button.remove();
             root.dataset.state = "end";
-            var done = root.querySelector("[data-load-end]");
-            if (done) done.hidden = false;
+            var note = root.querySelector("[data-load-end]");
+            if (note) note.hidden = false;
           }
           busy = false;
         })
@@ -107,14 +118,15 @@
     var sentinel = root.querySelector("[data-load-sentinel]");
     if (!sentinel || !("IntersectionObserver" in window)) return;
 
-    new IntersectionObserver(function (entries) {
+    observer = new IntersectionObserver(function (entries) {
       if (entries.some(function (e) { return e.isIntersecting; })) load();
     }, {
       root: scrollParent(sentinel),
       // Start fetching before the operator reaches the end, so a fast
       // scroll does not stall on an empty list.
       rootMargin: "400px 0px",
-    }).observe(sentinel);
+    });
+    observer.observe(sentinel);
   }
 
   function init() {

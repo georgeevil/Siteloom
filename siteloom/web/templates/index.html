@@ -24,6 +24,20 @@
   .filterbar .count {
     margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted);
   }
+  /* The timeframe picker: one bordered group, segments dividing it with
+     hairlines — reads as a single control, not five more chips. */
+  .timeframe {
+    display: inline-flex; align-items: stretch; overflow: hidden;
+    border: 1px solid var(--control-border); border-radius: 7px;
+  }
+  .tf-seg {
+    padding: 5px 9px; font-family: var(--font-mono); font-size: 11px; line-height: 1;
+    color: var(--muted); text-decoration: none; white-space: nowrap;
+    border-left: 1px solid var(--control-border);
+  }
+  .tf-seg:first-child { border-left: 0; }
+  .tf-seg:hover { color: var(--text); background: oklch(0.26 0.01 250); }
+  .tf-seg.on { background: oklch(0.29 0.06 200); color: oklch(0.9 0.08 200); }
   .advanced-wrap { position: relative; }
   .advanced-wrap > summary { list-style: none; cursor: pointer; display: inline-block; }
   .advanced-wrap > summary::-webkit-details-marker { display: none; }
@@ -90,6 +104,7 @@
   .rowhead .sortcol { color: var(--muted); }
   .rowhead .sort-mark { margin-left: 4px; color: var(--accent); font-size: 10px; }
   .r-time { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+  .r-date { display: block; font-size: 9px; color: var(--faint); letter-spacing: .04em; }
   .r-det { display: flex; align-items: center; gap: 9px; min-width: 0; }
   /* Crops are the detection bbox, so their aspect is the subject's: a person
      is tall, a car is wide. `contain` in a portrait-ish box shows the whole
@@ -359,6 +374,14 @@
   {% for key, label in kind_labels.items() %}
     <a class="chip{% if key in chips.kinds %} on{% endif %}" href="{{ chip_urls[key] }}">{{ label }}</a>
   {% endfor %}
+  <span class="chip-sep"></span>
+  {# Evidence facets, not class kinds: a plated event is already a
+     vehicle, so these narrow (AND) like Needs review does — the kind
+     chips to their left are the ones that widen. #}
+  <a class="chip{% if chips.has_plate %} on{% endif %}" href="{{ chip_urls.has_plate }}"
+     title="Only events with an accepted plate read">Plate read</a>
+  <a class="chip{% if chips.has_face %} on{% endif %}" href="{{ chip_urls.has_face }}"
+     title="Only events where the face pipeline matched someone">Face match</a>
 
   <details class="advanced-wrap">
   <summary class="chip{% if filters.camera or filters['class'] or filters.since or filters.until or filters.min_conf != '' or filters.min_count != '' %} on{% endif %}">More filters</summary>
@@ -366,6 +389,8 @@
     {% for k in chips.kinds %}<input type="hidden" name="kind" value="{{ k }}">{% endfor %}
     {% if chips.needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
     {% if chips.unmatched %}<input type="hidden" name="unmatched" value="1">{% endif %}
+    {% if chips.has_plate %}<input type="hidden" name="has_plate" value="1">{% endif %}
+    {% if chips.has_face %}<input type="hidden" name="has_face" value="1">{% endif %}
     {% if chips.show_ephemeral %}<input type="hidden" name="show_ephemeral" value="1">{% endif %}
     <select name="camera">
       <option value="">All cameras</option>
@@ -411,6 +436,25 @@
   <span class="count">
     {{ matched }} of {{ total }} events{% if hidden %} · <a href="{{ chip_urls.show_ephemeral }}" title="Show ephemeral events">{{ hidden }} ephemeral hidden</a>{% endif %}{% if chip_count %} · {{ chip_count }} filter{{ '' if chip_count == 1 else 's' }}{% endif %}
   </span>
+
+  {# The timeframe, observability-style: a segmented set of living
+     windows ("the last 24h", judged when the page loads) pinned to the
+     bar's right edge. A preset is a filter like any chip — the link
+     keeps everything else — and the absolute since/until inputs stay in
+     More filters for a custom range; picking a preset clears them, so
+     the two never silently AND together. #}
+  <span class="timeframe" role="group" aria-label="Timeframe">
+    {% for key in timeframe_presets %}
+    <a class="tf-seg{% if filters.last == key %} on{% endif %}"
+       href="{{ timeframe_urls[key] }}">{{ key }}</a>
+    {% endfor %}
+    <a class="tf-seg{% if not filters.last and not filters.since and not filters.until %} on{% endif %}"
+       href="{{ timeframe_urls['all'] }}"
+       title="No time window">All</a>
+    {% if filters.since or filters.until %}
+    <span class="tf-seg on" title="Custom range from More filters">custom</span>
+    {% endif %}
+  </span>
 </div>
 
 <div class="triage">
@@ -445,9 +489,18 @@
            current choice the moment it is appended. #}
         {% for col in columns %}
         {% if col.key == 'arrived' %}
-        <div class="r-time c-arrived">{{ local_time(e.first_seen, '%H:%M:%S') }}</div>
+        {# The date rides above the time: a bare clock is ambiguous the
+           moment the list spans a midnight, which every multi-day list
+           does. Faint so the times keep carrying the scanning weight. #}
+        <div class="r-time c-arrived">
+          <span class="r-date">{{ local_time(e.first_seen, '%b %d') }}</span>
+          {{ local_time(e.first_seen, '%H:%M:%S') }}
+        </div>
         {% elif col.key == 'last-seen' %}
-        <div class="r-time c-last-seen">{{ local_time(e.last_seen, '%H:%M:%S') }}</div>
+        <div class="r-time c-last-seen">
+          <span class="r-date">{{ local_time(e.last_seen, '%b %d') }}</span>
+          {{ local_time(e.last_seen, '%H:%M:%S') }}
+        </div>
         {% elif col.key == 'duration' %}
         <div class="r-time c-duration"
              title="Arrived to last seen; + means the event may still be extending">
@@ -573,7 +626,10 @@
     if (!list || !window.fetch || !window.history.pushState) return;
 
     list.addEventListener("click", function (ev) {
-      var row = ev.target.closest(".row");
+      // Only real event rows: the header shares the .row class for its
+      // column alignment but is a <div> with no href and no data-event —
+      // matching it here read null for both and navigated to "/null".
+      var row = ev.target.closest("a.row[data-event]");
       if (!row || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
       ev.preventDefault();
       var href = row.getAttribute("href");

@@ -40,6 +40,7 @@ from siteloom.store import (
     EventIdentity,
     Identity,
     NoiseEvent,
+    PlateRead,
     User,
     WebSession,
     get_session,
@@ -242,6 +243,34 @@ def _kind_clause(kind: str):
     return Event.class_name.in_(CLASS_KINDS[kind])
 
 
+def _has_plate_clause():
+    """Events carrying at least one accepted plate read.
+
+    An evidence facet, not a class kind: a plated event is already a
+    vehicle, so this narrows (AND) like Needs review does, rather than
+    widening like the kind chips."""
+    return (
+        select(PlateRead.id)
+        .where(PlateRead.event_id == Event.id, PlateRead.accepted.is_(True))
+        .exists()
+    )
+
+
+def _has_face_clause():
+    """Events with a face-identifier match. Same facet shape as plates:
+    the person kind says what was seen, this says the face pipeline
+    recognised someone in it."""
+    return (
+        select(EventIdentity.id)
+        .where(
+            EventIdentity.event_id == Event.id,
+            EventIdentity.identifier_key == "face",
+            EventIdentity.identity_id.is_not(None),
+        )
+        .exists()
+    )
+
+
 #: How many rows each keyset-paged list hands over at a time. Sized to
 #: the shape of the screen, not to a shared constant: a triage row is
 #: 52px and an identity card is a grid tile.
@@ -252,6 +281,19 @@ NOISE_PAGE = 100
 #: The query parameter carrying a keyset cursor. One name across the
 #: console so `_with_cursor` is the only place that spells it.
 CURSOR_PARAM = "after"
+
+
+#: The relative-timeframe presets (observability convention: "the last
+#: N", judged against request time). Spelled once: the route computes
+#: the window from this table and the template renders its labels, so a
+#: preset added here appears in the picker with no second list.
+TIMEFRAME_PRESETS: dict[str, timedelta] = {
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
 
 
 def _triage_url(base: dict, **overrides) -> str:
@@ -266,14 +308,16 @@ def _triage_url(base: dict, **overrides) -> str:
     describes one client's position in one scroll, so a link built here
     — a chip, a row, the rail's "back" — opens at the top of the
     filtered set for whoever it is pasted to. Only `_with_cursor` adds
-    one, and only to the load-more request.
+    one, and only to the load-more request. `last` *is* part of it —
+    "the last 24h" is a filter, and a pasted link should mean the same
+    living window for the recipient.
     """
     params: list[tuple[str, str]] = []
     merged = {**base, **overrides}
-    for key in ("camera", "class", "since", "until", "min_conf", "min_count"):
+    for key in ("camera", "class", "last", "since", "until", "min_conf", "min_count"):
         if merged.get(key):
             params.append((key, str(merged[key])))
-    for flag in ("needs_review", "unmatched", "show_ephemeral"):
+    for flag in ("needs_review", "unmatched", "has_plate", "has_face", "show_ephemeral"):
         if merged.get(flag):
             params.append((flag, "1"))
     for k in merged.get("kinds") or []:
@@ -398,14 +442,16 @@ def _viewer(request: Request) -> User | None:
     return getattr(request.state, "user", None)
 
 
-def _rail_context(session, event_id: int, user: User | None) -> dict | None:
+def _rail_context(session, event_id: int, user: User | None, config) -> dict | None:
     """Everything the triage detail rail shows for one event.
 
     `user` is the viewer, and decides only whether the identity picker
     gets its options (`_identity_candidates`). The event's *own* matched
     identities are shown to everyone who may read the event — withholding
     those would leave nothing to judge; the leak this closes was the list
-    of everybody else.
+    of everybody else. `config` scopes the picker and the identifier
+    selects to identifiers that consume this event's class — the offer
+    side of the rule the attach POST enforces.
     """
     # Eager-load what the rail template touches: on the index page the
     # template renders AFTER this session closes, so a lazy load there is
@@ -451,6 +497,7 @@ def _rail_context(session, event_id: int, user: User | None) -> dict | None:
         for zone in json.loads(d.zones):
             if zone not in zones:
                 zones.append(zone)
+    allowed = compatible_identifier_keys(config, event.class_name)
     return {
         "event": event,
         "camera": session.get(Camera, event.camera_id),
@@ -458,20 +505,57 @@ def _rail_context(session, event_id: int, user: User | None) -> dict | None:
         "identity_links": links,
         "misses": misses,
         "unlinked": unlinked,
-        "candidates": _identity_candidates(session, user),
+        "candidates": _identity_candidates(session, user, allowed),
+        # For the "new identity" / "missed by" selects: the configured
+        # identifiers that consume this class, so the form cannot offer
+        # what the POST refuses. (An auto-added key is not configured,
+        # so a dynamically-added class falls back to its own key.)
+        "identifier_options": sorted(
+            k for k in config.identity.identifiers if k in allowed
+        )
+        or sorted(allowed),
         "zones": zones,
         "status": event.review_status,
     }
 
 
-def _identity_candidates(session, user: User | None) -> list[Identity]:
+def compatible_identifier_keys(config, class_name: str) -> set[str]:
+    """The identifier keys whose pipeline consumes this event class.
+
+    The one compatibility rule for a manual association, shared by the
+    picker (what to offer) and the attach POST (what to accept) so the
+    two cannot drift. Keyed on the identifier, not on the Identity's own
+    class_name: a "car" identity may legitimately claim a "truck" event
+    because the vehicle identifier spans both — detector flapping across
+    vehicle classes is normal. What it refuses is the cross-kind link: a
+    person event attached to a vehicle identity poisons that gallery for
+    every future match, and nothing in the UI said so.
+
+    An identifier the registry auto-added is keyed by the class it was
+    minted for (identity/registry.py), hence the class name itself.
+    """
+    keys = {
+        key
+        for key, ident in config.identity.identifiers.items()
+        if class_name in ident.applies_to
+    }
+    keys.add(class_name)
+    return keys
+
+
+def _identity_candidates(
+    session, user: User | None, allowed_keys: set[str] | None = None
+) -> list[Identity]:
     """Who this event could be — the picker's options (CLD-36).
 
-    Not filtered to one identifier: the operator, not the resolver, is
-    deciding, and the face identifier missing someone is exactly when
-    they need to attach the person identity by hand. Labeled identities
-    sort first because naming a visit is the common case; the unknown
-    buckets stay reachable for merging two sightings of one stranger.
+    Not filtered to one identifier — the face identifier missing someone
+    is exactly when the operator attaches the person identity by hand —
+    but it IS filtered to the identifiers that consume the event's class
+    (`allowed_keys`): offering a vehicle identity on a person event
+    invites the cross-kind link the attach POST now refuses. Labeled
+    identities sort first because naming a visit is the common case; the
+    unknown buckets stay reachable for merging two sightings of one
+    stranger.
 
     Below the `/identities` floor the list is not built at all (CLD-103).
     The gate is here rather than at each call site because this is the
@@ -485,17 +569,12 @@ def _identity_candidates(session, user: User | None) -> list[Identity]:
     """
     if not redaction.may_name(user):
         return []
-    return list(
-        session.scalars(
-            select(Identity)
-            .order_by(
-                Identity.label.is_(None), Identity.label, Identity.last_seen.desc()
-            )
-            .limit(200)
-        )
-        .unique()
-        .all()
+    q = select(Identity).order_by(
+        Identity.label.is_(None), Identity.label, Identity.last_seen.desc()
     )
+    if allowed_keys is not None:
+        q = q.where(Identity.identifier_key.in_(allowed_keys))
+    return list(session.scalars(q.limit(200)).unique().all())
 
 
 def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
@@ -730,10 +809,13 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         request: Request,
         camera: str | None = None,
         class_name: str | None = Query(None, alias="class"),
+        last: str | None = None,
         since: str | None = None,
         until: str | None = None,
         needs_review: bool = False,
         unmatched: bool = False,
+        has_plate: bool = False,
+        has_face: bool = False,
         show_ephemeral: bool = False,
         min_conf: float | None = None,
         min_count: int | None = None,
@@ -767,10 +849,33 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 q = q.filter(Event.camera_id == camera)
             if class_name:
                 q = q.filter(Event.class_name == class_name)
-            if since:
-                q = q.filter(Event.last_seen >= datetime.fromisoformat(since))
-            if until:
-                q = q.filter(Event.first_seen <= datetime.fromisoformat(until))
+            # The timeframe. A preset (`last=24h`) wins over the absolute
+            # inputs: it is a living window judged at request time, which
+            # is what a pasted link should keep meaning. Unknown tokens
+            # fall through to "all time" rather than 400 — the picker is
+            # the only thing that mints them.
+            if last and last in TIMEFRAME_PRESETS:
+                q = q.filter(
+                    Event.last_seen
+                    >= datetime.now(timezone.utc).replace(tzinfo=None)
+                    - TIMEFRAME_PRESETS[last]
+                )
+            else:
+                last = None
+                # Operator-typed wall-clock bounds are an input boundary
+                # (CLD-100): converted site-local -> naive UTC here, not
+                # compared raw against UTC columns as they briefly were.
+                zone = localtime.site_zone(config)
+                if since:
+                    q = q.filter(
+                        Event.last_seen
+                        >= localtime.as_utc(datetime.fromisoformat(since), zone)
+                    )
+                if until:
+                    q = q.filter(
+                        Event.first_seen
+                        <= localtime.as_utc(datetime.fromisoformat(until), zone)
+                    )
             # Triage chips. The state chips narrow (AND); the class-kind
             # chips are alternatives (OR), so ticking People and Vehicles
             # widens the list rather than emptying it.
@@ -778,6 +883,10 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 q = q.filter(not_(status_clause("cleared")))
             if unmatched:
                 q = q.filter(unmatched_clause())
+            if has_plate:
+                q = q.filter(_has_plate_clause())
+            if has_face:
+                q = q.filter(_has_face_clause())
             if kinds:
                 q = q.filter(or_(*(_kind_clause(k) for k in kinds)))
             if min_conf is not None:
@@ -826,7 +935,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             # The rail is server-rendered so a deep link works without JS;
             # the fragment endpoint below swaps it in place when JS is on.
             rail = (
-                _rail_context(session, selected, _viewer(request))
+                _rail_context(session, selected, _viewer(request), config)
                 if selected
                 else None
             )
@@ -834,20 +943,33 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         state = {
             "camera": camera,
             "class": class_name,
+            "last": last,
             "since": since,
             "until": until,
             "needs_review": needs_review,
             "unmatched": unmatched,
+            "has_plate": has_plate,
+            "has_face": has_face,
             "show_ephemeral": show_ephemeral,
             "min_conf": min_conf,
             "min_count": min_count,
             "kinds": kinds,
         }
+        # The timeframe picker's links: each preset keeps every other
+        # filter, replaces the absolute window (the two would silently
+        # AND together), and drops the selection like any chip does.
+        timeframe_urls = {
+            key: _triage_url(state, last=key, since=None, until=None)
+            for key in TIMEFRAME_PRESETS
+        }
+        timeframe_urls["all"] = _triage_url(state, last=None, since=None, until=None)
         # Selecting a row is a filter-preserving link, and every chip
         # toggle drops the selection (the rail would outlive its row).
         chip_urls = {
             "needs_review": _triage_url(state, needs_review=not needs_review),
             "unmatched": _triage_url(state, unmatched=not unmatched),
+            "has_plate": _triage_url(state, has_plate=not has_plate),
+            "has_face": _triage_url(state, has_face=not has_face),
             "show_ephemeral": _triage_url(state, show_ephemeral=not show_ephemeral),
         }
         for k in CLASS_KINDS:
@@ -903,6 +1025,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "filters": {
                     "camera": camera or "",
                     "class": class_name or "",
+                    "last": last or "",
                     "since": since or "",
                     "until": until or "",
                     "min_conf": min_conf if min_conf is not None else "",
@@ -911,13 +1034,19 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "chips": {
                     "needs_review": needs_review,
                     "unmatched": unmatched,
+                    "has_plate": has_plate,
+                    "has_face": has_face,
                     "show_ephemeral": show_ephemeral,
                     "kinds": kinds,
                 },
                 "chip_count": int(needs_review)
                 + int(unmatched)
+                + int(has_plate)
+                + int(has_face)
                 + int(show_ephemeral)
                 + len(kinds),
+                "timeframe_urls": timeframe_urls,
+                "timeframe_presets": list(TIMEFRAME_PRESETS),
                 "matched": matched,
                 "total": total,
                 "hidden": hidden,
@@ -1017,7 +1146,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def event_rail(request: Request, event_id: int, back: str = "/"):
         """The triage detail rail on its own, for in-place swapping."""
         with Session() as session:
-            rail = _rail_context(session, event_id, _viewer(request))
+            rail = _rail_context(session, event_id, _viewer(request), config)
             if rail is None:
                 raise HTTPException(404)
             return templates.TemplateResponse(
@@ -1278,12 +1407,27 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         a name, which is the same label-and-learn shape as everywhere
         else (PRD §6.3).
         """
+        # The compatibility rule, enforced where the write happens: the
+        # picker only OFFERS compatible identities, but a crafted or
+        # stale form must not get past it — a person event attached to a
+        # vehicle identity poisons that gallery for every future match,
+        # and unwinding it is identity surgery. Same set the picker was
+        # built from (`compatible_identifier_keys`), so offer and
+        # enforcement cannot drift.
+        allowed = compatible_identifier_keys(config, event.class_name)
         if identity_id == "new":
             if identifier not in config.identity.identifiers:
                 raise HTTPException(
                     400,
                     f"unknown identifier {identifier!r}; expected one of "
                     + ", ".join(sorted(config.identity.identifiers)),
+                )
+            if identifier not in allowed:
+                raise HTTPException(
+                    400,
+                    f"identifier {identifier!r} does not apply to "
+                    f"{event.class_name!r} events; expected one of "
+                    + ", ".join(sorted(allowed)),
                 )
             identity = Identity(
                 identifier_key=identifier,
@@ -1301,6 +1445,13 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         identity = session.get(Identity, int(identity_id))
         if identity is None:
             raise HTTPException(404, f"no identity {identity_id}")
+        if identity.identifier_key not in allowed:
+            raise HTTPException(
+                400,
+                f"identity {identity.id} is a {identity.identifier_key!r} "
+                f"identity and cannot claim a {event.class_name!r} event — "
+                "cross-kind links poison the gallery for future matching.",
+            )
         return identity
 
     def _attach(session, vectors, event: Event, identity: Identity, enroll: bool):
