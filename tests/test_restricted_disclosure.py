@@ -368,7 +368,7 @@ def test_recognised_and_unrecognised_stay_legible_on_the_queue(env):
     assert body.count("Known vehicle") == 1, body.count("Known vehicle")
     assert IDENTITY_LABEL not in body
     # The unmatched row, still saying so — in the cell and in its class.
-    assert 'class="r-id unmatched"' in body
+    assert 'class="r-id c-identity unmatched"' in body
 
 
 def test_the_rail_still_says_the_event_was_recognised(env):

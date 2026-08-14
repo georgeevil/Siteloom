@@ -50,11 +50,26 @@
   .triage-list { flex: 1; min-width: 0; overflow: auto; container-type: inline-size; }
 
   .row {
-    display: grid; align-items: center; gap: 12px; padding: 0 14px;
+    display: flex; align-items: center; gap: 12px; padding: 0 14px;
     height: 52px; text-decoration: none; color: var(--text);
     border-bottom: 1px solid var(--row-rule); border-left: 2px solid transparent;
-    grid-template-columns: 70px minmax(130px, 1fr) 104px 84px;
   }
+  /* Column tracks (CLD-108). Flex, not grid: the picker removes cells
+     with display:none, and a grid template on the container would keep
+     the vacated track open — every combination of columns would need
+     its own template. Fixed bases with no shrink keep cells aligned
+     into columns; Detection is the one flexible cell, and Camera and
+     Identity may shrink into their ellipses before the row overflows
+     into the pane's own horizontal scroll. The header shares these
+     classes, which is what keeps it aligned with the rows. */
+  .c-arrived, .c-last-seen { flex: 0 0 70px; }
+  .c-duration { flex: 0 0 64px; }
+  .c-detection { flex: 1 1 130px; min-width: 0; }
+  .c-camera { flex: 0 1 104px; min-width: 72px; display: none; }
+  .c-identity { flex: 0 1 104px; min-width: 76px; }
+  .c-confidence { flex: 0 0 74px; display: none; }
+  .c-detections { flex: 0 0 64px; }
+  .c-status { flex: 0 0 84px; }
   .row:hover { background: oklch(0.235 0.01 250); color: var(--text); }
   .row.sel { background: oklch(0.25 0.02 220); }
   .row.rs-new { border-left-color: var(--accent); }
@@ -69,6 +84,11 @@
     letter-spacing: .07em; color: var(--faint); height: 30px;
   }
   .rowhead:hover { background: var(--canvas); }
+  /* The affordance saying which column orders the list (CLD-108): the
+     sort stays on Last seen, and now the operator can see that instead
+     of inferring it from timestamps that stop being monotonic. */
+  .rowhead .sortcol { color: var(--muted); }
+  .rowhead .sort-mark { margin-left: 4px; color: var(--accent); font-size: 10px; }
   .r-time { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
   .r-det { display: flex; align-items: center; gap: 9px; min-width: 0; }
   /* Crops are the detection bbox, so their aspect is the subject's: a person
@@ -90,7 +110,9 @@
   .r-cam, .r-id { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .r-id { font-weight: 500; }
   .r-id.unmatched { color: oklch(0.82 0.12 30); }
-  .r-conf { display: flex; align-items: center; gap: 6px; }
+  /* display comes from .c-confidence's tier rules, not from here — a
+     later `display: flex` would override the base tier's hiding. */
+  .r-conf { align-items: center; gap: 6px; }
   .bar { width: 42px; height: 4px; border-radius: 2px; background: oklch(0.3 0.01 250); }
   .bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
   .bar.low i { background: var(--amber); }
@@ -106,41 +128,84 @@
   .st-chip.st-flagged { background: oklch(0.31 0.08 30); color: oklch(0.86 0.12 30); }
   .st-chip.st-cleared { background: oklch(0.27 0.02 250); color: oklch(0.72 0.01 250); }
 
-  .r-cam, .r-conf { display: none; }
-
   /* Phone tier (CLD-25). The narrowest column set still wants ~452px
-     (70+130+104+84 plus gaps and padding), so on a 390px screen the
-     Status column ran off the edge — the chip saying whether an event
-     needs looking at was the part you could not see. Below 600px the row
-     stops being a table row and becomes a card, which is what the
-     handoff specifies and what makes the chip fit.
+     plus gaps and padding, so on a 390px screen the Status column ran
+     off the edge — the chip saying whether an event needs looking at
+     was the part you could not see. Below 600px the row stops being a
+     table row and becomes a card, which is what the handoff specifies
+     and what makes the chip fit.
 
-     Two lines rather than four columns: identity and time drop under the
-     detection block instead of competing with it for width. */
+     Two lines rather than columns: the detection block and the status
+     chip share the first, and the second — the card's secondary line —
+     is whatever facts the picker has on, wrapping in offer order:
+     identity pushed left, the times reading right. Camera and
+     confidence live in the detection block's sub-line at this width,
+     exactly as they did before the picker existed (CLD-108). */
   @container (max-width: 599px) {
     .rowhead { display: none; }
     .row {
-      grid-template-columns: minmax(0, 1fr) auto;
-      grid-template-areas: "det status" "id time";
-      height: auto; min-height: 76px; padding: 11px 14px;
-      align-items: center; row-gap: 3px;
+      flex-wrap: wrap; height: auto; min-height: 76px;
+      padding: 11px 14px; gap: 3px 10px;
     }
-    .r-det { grid-area: det; }
+    .c-detection { order: 1; flex: 1 1 60%; }
+    .c-status { order: 2; flex: 0 0 auto; margin-left: auto; }
+    /* A full-width zero-height flex item: the forced line break between
+       the card's first line and its secondary one. Without it a short
+       identity fits after the status chip and the card collapses back
+       into a jumbled row. */
+    .row::before { content: ""; order: 3; flex-basis: 100%; height: 0; }
+    .c-identity { order: 4; flex: 0 0 auto; min-width: 0; margin-right: auto; font-size: 12.5px; }
+    .c-arrived, .c-last-seen, .c-duration, .c-detections { order: 5; flex: 0 0 auto; }
+    /* Two bare clock times on one line are ambiguous; label the second.
+       Durations and counts label themselves. */
+    .c-last-seen::before { content: "last "; color: var(--faint); }
+    .c-detections::after { content: " det"; color: var(--faint); }
+    .c-camera, .c-confidence { display: none !important; }
     .r-thumb { width: 52px; height: 60px; }
     .r-name { font-size: 14px; font-weight: 700; }
-    .r-id { grid-area: id; font-size: 12.5px; }
-    .r-time { grid-area: time; justify-self: end; }
-    .row > div:last-child { grid-area: status; justify-self: end; }
   }
   @container (min-width: 600px) {
-    .row { grid-template-columns: 78px minmax(150px, 1fr) 104px 100px 84px; }
-    .r-cam { display: block; }
+    .c-arrived, .c-last-seen { flex-basis: 78px; }
+    .c-detection { flex-basis: 150px; }
+    .c-camera { display: block; }
     .r-sub .inline-cam { display: none; }
   }
   @container (min-width: 770px) {
-    .row { grid-template-columns: 78px minmax(180px, 1fr) 132px 118px 74px 92px; }
-    .r-conf { display: flex; }
+    .c-detection { flex-basis: 180px; }
+    .c-camera { flex-basis: 132px; }
+    .c-identity { flex-basis: 118px; }
+    .c-status { flex-basis: 92px; }
+    .c-confidence { display: flex; }
     .r-sub .inline-conf { display: none; }
+  }
+
+  /* The picker's hide rules, one per offered column (CLD-108). On the
+     list container rather than the rows so the slices infinite.js
+     appends inherit the choice with no per-row state; !important so a
+     hidden column stays hidden through the tier rules above. */
+  {% for col in columns %}
+  .triage-list.hide-{{ col.key }} .c-{{ col.key }} { display: none !important; }
+  {% endfor %}
+
+  /* The picker control itself. Server-rendered but hidden: without JS
+     there is no way to apply a choice, so the control simply is not
+     there (the default columns still render — nothing else is lost). */
+  .colpick {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 10;
+    display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+    background: var(--raised); border: 1px solid var(--hairline);
+    border-radius: 7px; box-shadow: 0 12px 32px oklch(0.1 0.01 250 / .5);
+  }
+  .colpick-opt {
+    display: flex; gap: 7px; align-items: center; cursor: pointer;
+    font-size: 12px; white-space: nowrap;
+  }
+  .colpick-opt input { margin: 0; accent-color: var(--accent); }
+  .colpick-sort { color: var(--accent); font-size: 10px; }
+  .colpick button {
+    margin-top: 4px; padding: 4px 9px; border-radius: 6px; cursor: pointer;
+    font: inherit; font-size: 11px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
   }
 
   /* Detail rail */
@@ -325,21 +390,43 @@
   </form>
   </details>
 
+  {# The column picker (CLD-108). Hidden until the script below can
+     apply a choice: the preference is per-browser localStorage, so with
+     no JS the control would be a form that does nothing. The server has
+     already rendered the default set either way. #}
+  <details class="advanced-wrap" id="column-picker" hidden>
+    <summary class="chip">Columns</summary>
+    <div class="colpick">
+      {% for col in columns %}
+      <label class="colpick-opt">
+        <input type="checkbox" value="{{ col.key }}"{% if col.default %} checked{% endif %}>
+        <span>{{ col.label }}{% if col.sort %} <span class="colpick-sort"
+          title="the list is ordered by this column">&#9662;</span>{% endif %}</span>
+      </label>
+      {% endfor %}
+      <button type="button" data-col-reset>Reset to default</button>
+    </div>
+  </details>
+
   <span class="count">
     {{ matched }} of {{ total }} events{% if hidden %} · <a href="{{ chip_urls.show_ephemeral }}" title="Show ephemeral events">{{ hidden }} ephemeral hidden</a>{% endif %}{% if chip_count %} · {{ chip_count }} filter{{ '' if chip_count == 1 else 's' }}{% endif %}
   </span>
 </div>
 
 <div class="triage">
-  <div class="triage-list" id="triage-list">
+  {# The non-default columns arrive hidden by class, not unrendered: the
+     cells are always in the markup, so the client-side picker (and the
+     rows infinite.js appends) only ever toggle classes here (CLD-108). #}
+  <div class="triage-list{% for key in hidden_columns %} hide-{{ key }}{% endfor %}" id="triage-list">
     {% if events %}
       <div class="row rowhead" aria-hidden="true">
-        <div>Time</div>
-        <div>Detection</div>
-        <div class="r-cam">Camera</div>
-        <div>Identity</div>
-        <div class="r-conf">Conf</div>
-        <div>Status</div>
+        {% for col in columns %}
+        <div class="c-{{ col.key }}{% if col.sort %} sortcol{% endif %}"
+             {%- if col.sort %} title="The list is ordered by this column, newest first"{% endif %}>
+          {{- col.label }}{%- if col.sort %}<span class="sort-mark">&#9662;</span>{% endif %}
+        </div>
+        {% endfor %}
+        <div class="c-status">Status</div>
       </div>
       {# The rows live in their own container because that is what
          infinite.js appends into (data-infinite-target below): appending
@@ -351,8 +438,23 @@
       {% set link = e.active_identities | first %}
       <a class="row rs-{{ st }}{% if selected == e.id %} sel{% endif %}"
          href="{{ row_urls[e.id] }}" data-event="{{ e.id }}">
-        <div class="r-time">{{ local_time(e.first_seen, '%H:%M:%S') }}</div>
-        <div class="r-det">
+        {# Every offered column renders in every row (CLD-108) —
+           visibility is the container's hide-* classes, so a row this
+           template serves into a load-more fragment carries the same
+           structure as the initial render and inherits the viewer's
+           current choice the moment it is appended. #}
+        {% for col in columns %}
+        {% if col.key == 'arrived' %}
+        <div class="r-time c-arrived">{{ local_time(e.first_seen, '%H:%M:%S') }}</div>
+        {% elif col.key == 'last-seen' %}
+        <div class="r-time c-last-seen">{{ local_time(e.last_seen, '%H:%M:%S') }}</div>
+        {% elif col.key == 'duration' %}
+        <div class="r-time c-duration"
+             title="Arrived to last seen; + means the event may still be extending">
+          {{- duration_text(e.first_seen, e.last_seen) -}}
+        </div>
+        {% elif col.key == 'detection' %}
+        <div class="r-det c-detection">
           {% if e.best_crop_path %}
             <img class="r-thumb" src="/media/{{ e.best_crop_path }}" alt="" loading="lazy">
           {% else %}
@@ -367,22 +469,29 @@
             </div>
           </div>
         </div>
-        <div class="r-cam">{{ e.camera.name if e.camera else e.camera_id }}</div>
+        {% elif col.key == 'camera' %}
+        <div class="r-cam c-camera">{{ e.camera.name if e.camera else e.camera_id }}</div>
+        {% elif col.key == 'identity' %}
         {# Fifty rows a page, and each one used to print a name — which
            is the directory /identities was closed to withhold, assembled
            by scrolling (CLD-111). Below the naming floor the cell says
            `Known person`; the recognised/unmatched distinction, which is
            the whole triage signal, is untouched. #}
-        <div class="r-id{% if not link %} unmatched{% endif %}">
+        <div class="r-id c-identity{% if not link %} unmatched{% endif %}">
           {{ identity_name(link.identity) if link else 'unmatched' }}
         </div>
-        <div class="r-conf">
+        {% elif col.key == 'confidence' %}
+        <div class="r-conf c-confidence">
           <span class="bar{% if e.best_confidence < 0.75 %} low{% endif %}">
             <i style="width: {{ (e.best_confidence * 100) | round | int }}%"></i>
           </span>
           <span>{{ '%.2f' | format(e.best_confidence) }}</span>
         </div>
-        <div><span class="st-chip st-{{ st }}">{{ st }}</span></div>
+        {% elif col.key == 'detections' %}
+        <div class="r-time c-detections">{{ e.detection_count }}</div>
+        {% endif %}
+        {% endfor %}
+        <div class="c-status"><span class="st-chip st-{{ st }}">{{ st }}</span></div>
       </a>
       {% endfor %}
       </div>
@@ -406,6 +515,56 @@
 </div>
 
 <script>
+  // The column picker (CLD-108). Progressive enhancement in the same
+  // sense as the rail swap below: the server rendered the default
+  // column set and left the control hidden; this reveals it, applies
+  // the per-browser choice from localStorage, and keeps it there. The
+  // choice is hide-* classes on the list container — never per-row
+  // state and never a URL parameter — so rows appended by infinite.js
+  // and links copied to a colleague both stay correct for free.
+  (function () {
+    var list = document.getElementById("triage-list");
+    var picker = document.getElementById("column-picker");
+    if (!list || !picker) return;
+    var KEY = "siteloom.events.columns";
+    var boxes = Array.prototype.slice.call(
+      picker.querySelectorAll("input[type=checkbox]"));
+
+    function paint() {
+      boxes.forEach(function (box) {
+        list.classList.toggle("hide-" + box.value, !box.checked);
+      });
+    }
+    function store() {
+      var visible = boxes.filter(function (b) { return b.checked; })
+                         .map(function (b) { return b.value; });
+      try {
+        localStorage.setItem(KEY, JSON.stringify(visible));
+      } catch (err) { /* storage refused: the choice lasts this page */ }
+    }
+
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(KEY)); } catch (err) {}
+    if (Array.isArray(saved)) {
+      // Keys are matched by value: one saved before a column was added
+      // (or after one is renamed) simply does not mention it, and an
+      // unknown token matches nothing — never an error.
+      boxes.forEach(function (box) {
+        box.checked = saved.indexOf(box.value) !== -1;
+      });
+      paint();
+    }
+
+    picker.addEventListener("change", function () { paint(); store(); });
+    picker.querySelector("[data-col-reset]")
+      .addEventListener("click", function () {
+        try { localStorage.removeItem(KEY); } catch (err) {}
+        boxes.forEach(function (box) { box.checked = box.defaultChecked; });
+        paint();
+      });
+    picker.hidden = false;
+  })();
+
   // Progressive enhancement only: without it every row is a real link that
   // renders the same rail server-side. With it, selecting a row swaps the
   // rail in place and keeps the list's scroll position.
