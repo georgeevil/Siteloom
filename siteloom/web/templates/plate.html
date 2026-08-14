@@ -129,8 +129,8 @@
 <div class="pd-cards">
   <div class="pd-card"><b>{{ total }}</b>read{{ '' if total == 1 else 's' }}</div>
   <div class="pd-card"><b>{{ accepted }}</b>accepted</div>
-  <div class="pd-card"><b>{{ first_at.strftime('%Y-%m-%d %H:%M') }}</b>first read</div>
-  <div class="pd-card"><b>{{ last_at.strftime('%Y-%m-%d %H:%M') }}</b>last read</div>
+  <div class="pd-card"><b>{{ local_time(first_at, '%Y-%m-%d %H:%M') }}</b>first read</div>
+  <div class="pd-card"><b>{{ local_time(last_at, '%Y-%m-%d %H:%M') }}</b>last read</div>
   <div class="pd-card"><b>{{ cameras | join(', ') if cameras else '—' }}</b>camera{{ '' if cameras | length == 1 else 's' }}</div>
 </div>
 {% endif %}
@@ -197,7 +197,7 @@
     </div>
     <div class="mono">{{ r.class_name or '—' }}<br>{{ r.camera_id or '' }}</div>
     <div class="mono">
-      {{ r.at.strftime('%Y-%m-%d %H:%M:%S') }}<br>
+      {{ local_time(r.at, '%Y-%m-%d %H:%M:%S') }}<br>
       <a href="/events/{{ r.event_id }}">event #{{ r.event_id }}</a>
     </div>
     <div class="mono">

@@ -167,7 +167,7 @@
   <div class="wrow">
     <a class="plate" style="font-size: 12.5px;" href="/plates/p/{{ w.plate }}">{{ w.plate }}</a>
     <span class="wlabel">{{ w.label or '—' }}</span>
-    <span class="mono">{{ w.sightings }} sighting{{ '' if w.sightings == 1 else 's' }}{% if w.last_seen %}, last {{ w.last_seen.strftime('%Y-%m-%d %H:%M') }}{% endif %}</span>
+    <span class="mono">{{ w.sightings }} sighting{{ '' if w.sightings == 1 else 's' }}{% if w.last_seen %}, last {{ local_time(w.last_seen, '%Y-%m-%d %H:%M') }}{% endif %}</span>
     {% if w.note %}<span class="wnote">{{ w.note }}</span>{% endif %}
     <form method="post" action="/plates/watchlist/{{ w.id }}/delete">
       <input type="hidden" name="back" value="{{ back }}">
