@@ -114,6 +114,15 @@ class UniFiConfig(BaseModel):
     # the key additionally unlocks Protect's public API endpoints.
     api_key: str = ""
     verify_ssl: bool = False
+    # Ceiling on one clip export (`get_camera_video`). The NVR has been
+    # observed going silent mid-transfer with the TCP connection left
+    # ESTABLISHED — without a deadline the read blocks forever and the
+    # backfill sits "running" with a cold heartbeat (a 69-minute stall in
+    # practice, on a clip that takes seconds). Generous on purpose: it
+    # exists to catch a dead transfer, never to cut off a slow one — a
+    # chunked backfill window of several minutes of 4K video is still far
+    # inside it. 0 disables the deadline.
+    download_timeout_s: float = 120.0
 
 
 class BackendConfig(BaseModel):

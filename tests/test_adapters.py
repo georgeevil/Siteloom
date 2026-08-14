@@ -106,3 +106,61 @@ def test_unowned_source_never_deletes_its_file(sample_video):
     list(source.frames(sample_fps=5.0))
     source.close()
     assert sample_video.exists()
+
+
+# -- stalled export deadline ------------------------------------------------
+#
+# The NVR has been observed going silent mid-transfer with the TCP
+# connection left ESTABLISHED: without a deadline download_clip blocks
+# forever and the backfill's heartbeat goes cold while the process looks
+# alive (a 69-minute stall in practice). The deadline is wait_for on the
+# adapter's own loop, so the dead transfer's coroutine is cancelled too.
+
+
+def _connected_adapter(timeout_s):
+    adapter = UniFiProtectAdapter(unifi=UniFiConfig(download_timeout_s=timeout_s))
+    adapter._start_loop()
+    return adapter
+
+
+def test_a_stalled_export_times_out_and_removes_the_partial_file(tmp_path):
+    import asyncio
+
+    class StalledClient:
+        def get_camera_video(self, stream_id, start, end, output_file):
+            async def hang():
+                output_file.write_bytes(b"partial")  # NVR sent a little...
+                await asyncio.sleep(3600)  # ...then went silent
+            return hang()
+
+    adapter = _connected_adapter(0.2)
+    adapter._client = StalledClient()
+    out = tmp_path / "clip.mp4"
+    try:
+        with pytest.raises(TimeoutError) as err:
+            adapter.download_clip("cam-1", T0, T0 + timedelta(seconds=2), out)
+    finally:
+        adapter._client = None
+        adapter.close()
+    assert "stalled" in str(err.value)
+    # The half-written file is gone: a truncated MP4 that decodes part-way
+    # is indistinguishable from a legitimately short clip.
+    assert not out.exists()
+
+
+def test_zero_disables_the_deadline(tmp_path):
+    class QuickClient:
+        def get_camera_video(self, stream_id, start, end, output_file):
+            async def write():
+                output_file.write_bytes(b"whole clip")
+            return write()
+
+    adapter = _connected_adapter(0.0)
+    adapter._client = QuickClient()
+    out = tmp_path / "clip.mp4"
+    try:
+        result = adapter.download_clip("cam-1", T0, T0 + timedelta(seconds=2), out)
+    finally:
+        adapter._client = None
+        adapter.close()
+    assert result == out and out.read_bytes() == b"whole clip"
