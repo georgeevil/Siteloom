@@ -430,6 +430,55 @@ def check_plate_ocr(report: Report, config) -> None:
         )
 
 
+def check_identity_gating(report: Report, config) -> None:
+    """Identifiers running with CLD-41's consistency gates switched off.
+
+    The gates are what stop a near-tie between two known identities from
+    being resolved by a coin flip, and a single weak crop from minting an
+    identity that then becomes a vector-space magnet. They are also the
+    easiest thing in the config to lose by accident — before CLD-125 an
+    identifier block that named `face:` at all dropped every field it did
+    not restate — so their effective values are reported here rather than
+    left to be inferred from a file that does not mention them.
+
+    Two rules, and the asymmetry is deliberate. `min_margin: 0` is never
+    intentional: it means ambiguity resolves to a guess for *any* class.
+    `min_sightings: 1` is intentional for vehicles (few, strict
+    threshold, and the plate-learning flow expects first-sighting rows),
+    so it is only worth reporting where the churn actually comes from —
+    identifiers that apply to people.
+    """
+    ungated: list[str] = []
+    for key, ident in config.identity.identifiers.items():
+        reasons = []
+        if ident.min_margin <= 0:
+            reasons.append("no margin")
+        if ident.min_sightings <= 1 and "person" in ident.applies_to:
+            reasons.append("mints on one sighting")
+        if reasons:
+            ungated.append(f"{key} ({', '.join(reasons)})")
+
+    if not ungated:
+        report.add(
+            "identity gating",
+            OK,
+            ", ".join(
+                f"{key} margin {ident.min_margin:g}/{ident.min_sightings} sighting"
+                + ("s" if ident.min_sightings != 1 else "")
+                for key, ident in config.identity.identifiers.items()
+            )
+            or "no identifiers configured",
+        )
+        return
+    report.add(
+        "identity gating",
+        WARN,
+        "gates off for " + ", ".join(ungated) + " — ambiguous matches resolve to a guess",
+        "set min_margin (0.05 face, 0.02 generic) and min_sightings: 2 "
+        "on identity.identifiers in the site config",
+    )
+
+
 def check_jobs(report: Report, config) -> None:
     """Runs still marked `running` whose process is gone. They are what
     makes `siteloom jobs` untrustworthy until they are reaped."""
@@ -550,6 +599,7 @@ CHECKS = [
     check_detection_model,
     check_face_models,
     check_plate_ocr,
+    check_identity_gating,
     check_jobs,
     check_integrations,
     check_services,

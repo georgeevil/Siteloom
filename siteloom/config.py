@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ZoneConfig(BaseModel):
@@ -378,6 +378,58 @@ class IdentityConfig(BaseModel):
     identifiers: dict[str, IdentifierConfig] = Field(
         default_factory=_default_identifiers
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _overlay_identifier_defaults(cls, data):
+        """A named identifier overlays its built-in defaults (CLD-125).
+
+        `identifiers` is a dict with a default_factory, so a config that
+        spells out its identifiers used to REPLACE `_default_identifiers`
+        wholesale: every field the operator did not restate fell back to
+        the bare field defaults, which for `min_margin`/`min_sightings`
+        are 0.0/1 — the pre-CLD-41 behavior. Naming `face:` only to
+        adjust its `threshold:` therefore switched off consistency
+        gating, silently, and the more carefully a site was tuned the
+        more of CLD-41 it lost. That is what the live site ran with.
+
+        So an entry whose key is a built-in one is merged *over* the
+        built-in rather than replacing it, and only for keys the operator
+        named — omitting `vehicle` entirely still removes it, which is
+        the one thing wholesale replacement got right.
+
+        This runs `mode="before"`, on the raw mapping, for the reason
+        that makes the whole fix work: after validation an absent
+        `min_sightings` and an explicit `min_sightings: 1` are the same
+        value, and an operator who deliberately wants first-sighting
+        minting must still be able to say so.
+        """
+        if not isinstance(data, dict):
+            return data
+        given = data.get("identifiers")
+        if not isinstance(given, dict):
+            return data
+
+        builtin = _default_identifiers()
+        merged: dict[str, object] = {}
+        for key, entry in given.items():
+            base = builtin.get(key)
+            if base is None or entry is None:
+                merged[key] = entry
+                continue
+            # Entries arrive as mappings from YAML and as models from
+            # code (tests, the console's config editor); both have to
+            # merge, and a model was built with every field set, so it
+            # carries no "unstated" fields to fill in.
+            if isinstance(entry, IdentifierConfig):
+                merged[key] = entry
+                continue
+            if not isinstance(entry, dict):
+                merged[key] = entry
+                continue
+            merged[key] = {**base.model_dump(), **entry}
+
+        return {**data, "identifiers": merged}
     # Dynamically added classes: when a detection class has no configured
     # identifier, create a generic one for it at runtime (own collection,
     # default threshold) instead of ignoring it.

@@ -66,6 +66,13 @@ identity:
   enabled: true
   vector_db_path: identity_db   # Qdrant embedded mode — a directory, no server
   auto_add_classes: true        # unseen classes get a generic identifier on the fly
+  # An identifier you name is merged OVER the defaults below, key by
+  # key: writing `face: {threshold: 0.42}` keeps face's min_margin and
+  # min_sightings rather than dropping them (CLD-125 — it used to drop
+  # them, which switched off the CLD-41 gating silently). Stating a
+  # value always wins, including `min_sightings: 1`; omitting a whole
+  # identifier still removes it. `siteloom doctor` prints the gates
+  # actually in force.
   # identifiers:                # per-class algorithms; defaults shown
   #   face:    {algo: face,    applies_to: [person], threshold: 0.36,
   #             min_margin: 0.05, min_sightings: 2}

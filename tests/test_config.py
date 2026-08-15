@@ -182,3 +182,114 @@ def test_event_rules_round_trip_through_yaml(tmp_path):
     again = load_config(path)
     assert again.events.min_detections == 7
     assert again.events.class_groups == [["car", "truck", "bus"]]
+
+
+# -- identifier defaults survive being named (CLD-125) ----------------------
+#
+# `identifiers` has a default_factory, so a config that spells out its
+# identifiers used to replace the built-ins wholesale and every unstated
+# field fell back to the bare field default — 0.0 margin, 1 sighting, the
+# pre-CLD-41 behavior. Naming `face:` to change its threshold therefore
+# switched off consistency gating without saying so.
+
+
+def _identifiers(yaml_text: str, tmp_path: Path):
+    path = tmp_path / "site.yaml"
+    path.write_text(yaml_text)
+    return load_config(path).identity.identifiers
+
+
+def test_naming_an_identifier_keeps_the_gates_it_did_not_mention(tmp_path):
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    face:
+      algo: face
+      applies_to: [person]
+      threshold: 0.42
+""",
+        tmp_path,
+    )
+    face = idents["face"]
+    assert face.threshold == 0.42  # what the operator said wins
+    assert face.min_margin == 0.05  # ... and what they did not say is kept
+    assert face.min_sightings == 2
+
+
+def test_an_explicit_value_still_beats_the_default(tmp_path):
+    """The whole reason the merge runs on the raw mapping: after
+    validation, absent and `1` are the same value, and an operator who
+    wants first-sighting minting must still be able to ask for it."""
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    face:
+      algo: face
+      applies_to: [person]
+      min_sightings: 1
+      min_margin: 0.0
+""",
+        tmp_path,
+    )
+    assert idents["face"].min_sightings == 1
+    assert idents["face"].min_margin == 0.0
+
+
+def test_omitting_an_identifier_still_removes_it(tmp_path):
+    """Merging is per named key. Wholesale replacement got one thing
+    right — a config that lists only `face` runs only `face` — and that
+    has to survive."""
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    face:
+      algo: face
+      applies_to: [person]
+""",
+        tmp_path,
+    )
+    assert set(idents) == {"face"}
+
+
+def test_an_identifier_with_no_built_in_is_left_alone(tmp_path):
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    dog:
+      algo: generic
+      applies_to: [dog]
+      threshold: 0.7
+""",
+        tmp_path,
+    )
+    assert idents["dog"].threshold == 0.7
+    # Not silently gated: a new identifier is the operator's own, and
+    # auto-added classes mint on the first sighting by design.
+    assert idents["dog"].min_sightings == 1
+
+
+def test_a_config_naming_nothing_keeps_every_built_in(tmp_path):
+    idents = _identifiers("site_id: s\n", tmp_path)
+    assert set(idents) == {"face", "person", "vehicle"}
+    assert idents["person"].min_sightings == 2
+    assert idents["vehicle"].min_sightings == 1  # deliberate, PRD §6.4
+
+
+def test_saved_config_round_trips_its_gates(tmp_path):
+    """The console writes a full dump, so a saved file states every
+    field — the merge must be a no-op over it, not a re-defaulting."""
+    from siteloom.config import save_config
+
+    cfg = SiteConfig(site_id="s")
+    cfg.identity.identifiers["face"].min_sightings = 3
+    path = tmp_path / "site.yaml"
+    save_config(cfg, path)
+    assert load_config(path).identity.identifiers["face"].min_sightings == 3

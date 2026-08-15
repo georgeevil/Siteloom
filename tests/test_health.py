@@ -144,6 +144,56 @@ def test_abandoned_runs_are_flagged(config):
     assert "jobs reap" in check.remedy
 
 
+# -- identity gating is reported, not inferred (CLD-125) --------------------
+
+
+def _gating_report(**identifiers):
+    from siteloom.config import IdentifierConfig
+
+    cfg = SiteConfig(site_id="t")
+    cfg.identity.identifiers = {
+        key: IdentifierConfig(**kwargs) for key, kwargs in identifiers.items()
+    }
+    return run_checks(cfg, [health.check_identity_gating]).checks[0]
+
+
+def test_the_built_in_identifiers_are_gated():
+    check = run_checks(SiteConfig(site_id="t"), [health.check_identity_gating])
+    assert check.checks[0].status == OK
+    # The effective values are printed, because the file they came from
+    # may not mention them at all.
+    assert "face margin 0.05/2 sightings" in check.checks[0].detail
+
+
+def test_an_ungated_person_identifier_warns_with_the_fix():
+    check = _gating_report(
+        face=dict(algo="face", applies_to=["person"], threshold=0.36)
+    )
+    assert check.status == WARN
+    assert "face" in check.detail and "no margin" in check.detail
+    assert "mints on one sighting" in check.detail
+    assert "min_sightings: 2" in check.remedy
+
+
+def test_a_vehicle_minting_on_one_sighting_is_not_a_complaint():
+    """Deliberate for vehicles: few of them, a strict threshold, and the
+    plate-learning flow expects first-sighting rows."""
+    check = _gating_report(
+        vehicle=dict(
+            algo="generic", applies_to=["car"], min_margin=0.02, min_sightings=1
+        )
+    )
+    assert check.status == OK
+
+
+def test_a_zero_margin_is_reported_for_any_class():
+    check = _gating_report(
+        vehicle=dict(algo="generic", applies_to=["car"], min_sightings=1)
+    )
+    assert check.status == WARN
+    assert "no margin" in check.detail
+
+
 def test_process_alive_on_self_and_on_the_departed():
     assert health.process_alive(os.getpid())
     assert not health.process_alive(_dead_pid())
