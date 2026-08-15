@@ -99,6 +99,14 @@ class IngestService:
         # Filled lazily so backfill's synthetic file cameras — which are
         # not in config.cameras — get rules too (PRD §6.6 parity).
         self._event_rules: dict[str, EventConfig] = {}
+        # When each (event, identifier) last had an OCR attempt, in frame
+        # time (CLD-130's cadence cap). Frame time, never wall clock, so
+        # backfill and live ration identically. In-memory on purpose: a
+        # restart forgetting it costs one extra OCR per visit, which is
+        # cheaper than a table nobody else reads. Keyed by event id, so a
+        # visit's cadence survives the CLD-40 merges (the id in hand at
+        # decision time is the one the last frame used).
+        self._plate_ocr_last: dict[tuple[int, str], datetime] = {}
         self._sync_cameras()
 
         self.resolver: IdentityResolver | None = None
@@ -387,22 +395,46 @@ class IngestService:
         x1, y1, x2, y2 = det["bbox"]
         if min(x2 - x1, y2 - y1) < rules.identify_min_crop_px:
             return
+        identity_cfg = self.config.identity
+        # Plate extras, resolved here because only this layer knows the
+        # camera: the effective quality floors (CLD-128, one resolution
+        # shared with any future replay) and the identifiers whose OCR is
+        # rationed out this frame (CLD-130 — reading a parked car on
+        # every sampled frame bought 1,437 rows and no information; the
+        # embedding still runs, so re-ID is unchanged).
+        plate_floors: dict[str, dict] = {}
+        skip_plate_ocr: list[str] = []
+        for key, ident in identity_cfg.identifiers.items():
+            if not ident.plate_ocr:
+                continue
+            plate_floors[key] = identity_cfg.plate_floors_for(key, cam)._asdict()
+            interval = ident.plate_ocr_interval_s
+            last = self._plate_ocr_last.get((event.id, key))
+            if (
+                interval > 0
+                and last is not None
+                and (ts - last).total_seconds() < interval
+            ):
+                skip_plate_ocr.append(key)
         result = self.dispatcher.submit_and_wait(
             Job(
                 module="identity",
                 payload={
                     "crop_jpeg": det["crop_jpeg"],
                     "class_name": det["class_name"],
+                    "plate_floors": plate_floors,
+                    "skip_plate_ocr": skip_plate_ocr,
                 },
             )
         )
         if not result.ok:
             log.error("identity job failed on %s: %s", cam.id, result.error)
             return
-        identity_cfg = self.config.identity
         registry = identity_cfg.identifiers
         for emb in result.result["embeddings"]:
             ident_cfg = registry.get(emb["identifier"])
+            if emb.get("plate_read") is not None:
+                self._note_plate_ocr(event.id, emb["identifier"], ts)
             # The OCR attempt is recorded before anything is decided with
             # it, and whether or not it produced a plate (CLD-85). The
             # module computed it; writing rows is this layer's job, which
@@ -504,6 +536,21 @@ class IngestService:
                     ),
                     payload,
                 )
+
+    def _note_plate_ocr(self, event_id: int, identifier: str, ts: datetime) -> None:
+        """Remember when this visit last had an OCR attempt (CLD-130).
+
+        The map is advisory state, not a record — PlateRead rows are the
+        record — so it is pruned by size rather than persisted: a 24 h
+        soak must not grow it unboundedly, and dropping an old entry
+        costs at most one extra OCR on a visit that outlived it.
+        """
+        self._plate_ocr_last[(event_id, identifier)] = ts
+        if len(self._plate_ocr_last) > 1024:
+            newest = sorted(
+                self._plate_ocr_last.items(), key=lambda kv: kv[1], reverse=True
+            )[:512]
+            self._plate_ocr_last = dict(newest)
 
     def _notify_watch_hit(self, session, event: Event, plate: str) -> None:
         """Fire the watchlist alarm on the first accepted read of a

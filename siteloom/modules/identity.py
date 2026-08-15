@@ -9,6 +9,16 @@ run THIS code and only embeddings/metadata travel upstream.
 Job payload:
     crop_jpeg:  bytes — the detection crop (first-pass filter output)
     class_name: str
+    plate_floors: {identifier: {min_chars, min_width_px, min_sharpness,
+                   min_char_confidence}} — optional; the floors resolved
+                   by `IdentityConfig.plate_floors_for` for the camera
+                   this crop came from (CLD-128). Absent keys fall back
+                   to the identifier's site-wide values, which keeps a
+                   directly-driven module (tests, replay) working.
+    skip_plate_ocr: [identifier, ...] — optional; identifiers whose OCR
+                   ingest rationed out for this frame (CLD-130's cadence
+                   cap). The embedding still runs — only the OCR is
+                   skipped, and no PlateRead travels for it.
 Result:
     {"embeddings": [{identifier, algo, vector: [float], plate: str|None,
                      plate_read: dict|None}]}
@@ -60,15 +70,25 @@ class IdentityModule:
             vector = embedder.embed(crop)
             plate = None
             plate_read = None
-            if ident.plate_ocr:
+            if ident.plate_ocr and key not in payload.get("skip_plate_ocr", ()):
                 reader = self._get_plate_reader()
                 if reader is not None:
+                    # The floors the application layer resolved for this
+                    # camera (CLD-128), else the identifier's site-wide
+                    # values — same numbers, no camera named.
+                    floors = (payload.get("plate_floors") or {}).get(key) or {}
                     read = reader.read(
                         crop,
-                        min_chars=ident.plate_min_chars,
-                        min_width=ident.plate_min_width_px,
-                        min_sharpness=ident.plate_min_sharpness,
-                        min_char_confidence=ident.plate_min_char_confidence,
+                        min_chars=floors.get("min_chars", ident.plate_min_chars),
+                        min_width=floors.get(
+                            "min_width_px", ident.plate_min_width_px
+                        ),
+                        min_sharpness=floors.get(
+                            "min_sharpness", ident.plate_min_sharpness
+                        ),
+                        min_char_confidence=floors.get(
+                            "min_char_confidence", ident.plate_min_char_confidence
+                        ),
                     )
                     plate = read.text
                     plate_read = read.as_payload()

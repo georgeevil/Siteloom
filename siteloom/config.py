@@ -8,7 +8,7 @@ on it — never a code change.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -53,6 +53,62 @@ class EventRulesOverride(BaseModel):
     identify_only_significant: bool | None = None
 
 
+class PlateFloors(NamedTuple):
+    """The plate-quality floors in force for one read (CLD-128).
+
+    One value object rather than four loose keywords, so the resolution
+    (`IdentityConfig.plate_floors_for`) has a shape ingest and any future
+    replay share — the same reason `threshold_for` exists. `_asdict()`
+    is the serializable form that rides in the identity job payload.
+    """
+
+    min_chars: int
+    min_width_px: int
+    min_sharpness: float
+    min_char_confidence: float
+
+
+class PlateFloorsOverride(BaseModel):
+    """Per-camera plate-quality floors (CLD-128) — only set fields apply.
+
+    Legibility is a property of *this camera at this distance in this
+    light*, not of the site: 100 px is a sane width floor on a gate
+    camera at two metres and rejects every correct read on a camera
+    watching the street (measured on `backyard-puerta`: correct reads
+    run 34–100 px there, and six reads in the whole table ever exceeded
+    100 px). A field left None inherits the identifier's site-wide
+    value, exactly like `EventRulesOverride`.
+    """
+
+    min_chars: int | None = None
+    min_width_px: int | None = None
+    min_sharpness: float | None = None
+    min_char_confidence: float | None = None
+
+    @field_validator("min_chars", "min_width_px")
+    @classmethod
+    def _non_negative_int(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("plate floors cannot be negative")
+        return value
+
+    @field_validator("min_sharpness")
+    @classmethod
+    def _non_negative(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("plate floors cannot be negative")
+        return value
+
+    @field_validator("min_char_confidence")
+    @classmethod
+    def _confidence_range(cls, value: float | None) -> float | None:
+        if value is not None and not (0.0 <= value <= 1.0):
+            raise ValueError(
+                "plate_floors.min_char_confidence is a probability in 0..1"
+            )
+        return value
+
+
 class CameraIdentityOverride(BaseModel):
     """Per-camera identity gates (CLD-39).
 
@@ -67,6 +123,10 @@ class CameraIdentityOverride(BaseModel):
     """
 
     thresholds: dict[str, float] = {}
+    # Per-camera plate-quality floors (CLD-128). Flat, not keyed by
+    # identifier: the floors describe what this camera's pixels can
+    # carry, which is the same fact for every identifier reading them.
+    plate_floors: PlateFloorsOverride | None = None
 
     @field_validator("thresholds")
     @classmethod
@@ -316,6 +376,18 @@ class IdentifierConfig(BaseModel):
     plate_min_width_px: int = 0
     plate_min_sharpness: float = 0.0
     plate_min_char_confidence: float = 0.0
+    # Floor on how often the same vehicle is OCR'd, in seconds of frame
+    # time (CLD-130). A car dwelling in frame is OCR'd on every sampled
+    # frame otherwise — one parked car produced 1,437 reads in six
+    # minutes, so the screen an operator opens to ask "which plates came
+    # past?" was a per-frame log of one vehicle, and most of the
+    # inference budget re-derived a string it already had. A *time* cap,
+    # never a count cap: cross-frame consensus (CLD-114) wants several
+    # independent reads spread over a visit, and a count cap would
+    # starve a long approach of exactly those samples. 0 = every frame
+    # (the pre-CLD-130 behavior). The embedding still runs on skipped
+    # frames — only the OCR is rationed.
+    plate_ocr_interval_s: float = 1.0
     # Keep the plate sub-crop for each read, under `<media_dir>/plates/`.
     # A third image with its own purpose: `crop_jpeg` is simultaneously
     # the display thumbnail and the embedder input, so the evidence image
@@ -469,6 +541,57 @@ class IdentityConfig(BaseModel):
                 return value
         ident = self.identifiers.get(identifier_key)
         return ident.threshold if ident is not None else None
+
+    def plate_floors_for(
+        self, identifier_key: str, camera: "CameraConfig | None" = None
+    ) -> PlateFloors:
+        """Effective plate-quality floors for one identifier on one camera.
+
+        Camera override field by field, then the identifier's site-wide
+        values, then the bare defaults (an identifier the config never
+        named — the registry's auto-added kind — has no plate OCR, but
+        asking is still answerable). The counterpart of `threshold_for`
+        one floor down (CLD-128): one place decides, so ingest and any
+        future replay cannot disagree about which bar a read faced.
+        """
+        ident = self.identifiers.get(identifier_key)
+        floors = PlateFloors(
+            min_chars=ident.plate_min_chars if ident is not None else 4,
+            min_width_px=ident.plate_min_width_px if ident is not None else 0,
+            min_sharpness=ident.plate_min_sharpness if ident is not None else 0.0,
+            min_char_confidence=(
+                ident.plate_min_char_confidence if ident is not None else 0.0
+            ),
+        )
+        override = (
+            camera.identity.plate_floors
+            if camera is not None and camera.identity is not None
+            else None
+        )
+        if override is None:
+            return floors
+        return PlateFloors(
+            min_chars=(
+                override.min_chars
+                if override.min_chars is not None
+                else floors.min_chars
+            ),
+            min_width_px=(
+                override.min_width_px
+                if override.min_width_px is not None
+                else floors.min_width_px
+            ),
+            min_sharpness=(
+                override.min_sharpness
+                if override.min_sharpness is not None
+                else floors.min_sharpness
+            ),
+            min_char_confidence=(
+                override.min_char_confidence
+                if override.min_char_confidence is not None
+                else floors.min_char_confidence
+            ),
+        )
 
 
 class AudioConfig(BaseModel):
