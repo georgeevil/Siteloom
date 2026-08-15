@@ -101,6 +101,27 @@
     content: "Loading…"; font-family: var(--font-mono); font-size: 10.5px;
     color: var(--muted); animation: slpulse 1.2s infinite;
   }
+
+  /* Scanned-but-not-indexed banner (CLD-126). A pending library renders
+     as a grid of blank placeholders, which reads as a failed import
+     unless the screen says otherwise. Same shape as the /classes
+     banner. */
+  .backlog {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 11px 14px; margin-bottom: 16px; line-height: 1.55;
+    border: 1px solid oklch(0.42 0.08 85); border-radius: 8px;
+    font-size: 12px; color: oklch(0.87 0.1 85);
+  }
+  .backlog + .backlog { margin-top: -8px; }
+  .backlog.retry { border-color: oklch(0.4 0.09 30); color: oklch(0.86 0.12 30); }
+  .backlog form { margin-left: auto; }
+  .bl-btn {
+    padding: 7px 14px; border-radius: 6px; border: 0; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600;
+    background: var(--accent); color: var(--on-accent);
+  }
+  .bl-btn:hover { background: var(--accent-hover); }
+  .bl-pick { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 </style>
 {% endblock %}
 
@@ -148,6 +169,53 @@
 </div>
 
 <div class="scroller">
+  {% if backlog and backlog.pending %}
+  <div class="backlog">
+    <span>
+      <strong>{{ backlog.pending }}</strong>
+      item{{ '' if backlog.pending == 1 else 's' }} not indexed yet — thumbnails
+      and detections appear after indexing.
+    </span>
+    {% if backlog.target %}
+    <form method="post" action="/library/index">
+      <input type="hidden" name="source_id" value="{{ backlog.target }}">
+      <button type="submit" class="bl-btn">Start indexing</button>
+    </form>
+    {% else %}
+    {# Several sources are waiting, and they cannot share one run: a
+       Takeout archive needs the importer and a directory needs the
+       plain pass, so the operator picks rather than the button
+       guessing (CLD-92). #}
+    <span class="bl-pick">
+      {% for s in backlog.sources %}
+      <a class="chip" href="{{ library_url(filters, source_id=s.id) }}"
+        >{{ s.name }} · {{ s.pending }}</a>
+      {% endfor %}
+    </span>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if backlog and backlog.failed %}
+  <div class="backlog retry">
+    <span>
+      <strong>{{ backlog.failed }}</strong>
+      item{{ '' if backlog.failed == 1 else 's' }} failed earlier. Nothing
+      retries them on its own.
+      {# Said whether or not a button can be offered: a failed item that
+         goes unmentioned is indistinguishable from one that was never
+         there, which is the whole reason `failed` is counted apart from
+         `pending`. #}
+      {%- if not backlog.target %} Filter to one source to retry them.{% endif %}
+    </span>
+    {% if backlog.target %}
+    <form method="post" action="/library/index">
+      <input type="hidden" name="source_id" value="{{ backlog.target }}">
+      <input type="hidden" name="retry_failed" value="1">
+      <button type="submit" class="bl-btn">Retry failed</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
   {% if items %}
   <div class="grid" id="library-grid">
     {% for i in items %}
