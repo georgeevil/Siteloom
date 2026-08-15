@@ -350,6 +350,36 @@ to change one of them), and `doctor`'s `services` check reports the clash
 between installed units. Both quote the same remedy. A restart at 4am is a late
 time to discover a configuration that could never have worked.
 
+## Starting over (`siteloom reset`)
+
+```bash
+siteloom reset --config site.yaml --dry-run   # inventory only, changes nothing
+siteloom reset --config site.yaml             # prints the same, then asks
+siteloom reset --config site.yaml --yes       # no prompt (scripts)
+```
+
+Erases everything the site has observed and learned: events, detections,
+identities and their vectors, plate reads, incidents, the library index and its
+crops. What survives is what was never learned in the first place — the config
+(cameras, credentials, thresholds), the library's **original archives**,
+downloaded model weights, and the logs. `--keep-users` holds back operator
+accounts and their sessions.
+
+Three properties are worth knowing before you run it:
+
+- **All three stores or none.** Rows, `media_dir` and the vector directory are
+  cleared together. Clearing the rows alone would leave galleries that still
+  match faces belonging to identities that no longer exist.
+- **It refuses rather than half-works.** A running `serve`/`run`/job (a live
+  `OperationRun`, not a stale one) blocks it, because that process holds the
+  vector store open and would write fresh rows into the database underneath.
+  So does a registered library source that sits *inside* `media_dir` — clearing
+  it would delete the operator's own archive, so nothing is removed at all.
+- **Ids restart at 1.** A reset install should not hand out event 1260 as its
+  first event.
+
+Only the CLI can do this; there is deliberately no console button.
+
 ## Logs
 
 `serve`, `frigate` and every job share the project's logging setup: a Rich
