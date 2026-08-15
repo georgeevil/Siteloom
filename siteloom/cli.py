@@ -522,5 +522,75 @@ def cameras(config: Path = CONFIG_OPT):
             adapter.close()
 
 
+@app.command()
+def reset(
+    config: Path = CONFIG_OPT,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be removed; change nothing"
+    ),
+    keep_users: bool = typer.Option(
+        False, "--keep-users", help="Keep operator accounts and their sessions"
+    ),
+):
+    """Erase everything this site has observed and learned.
+
+    Events, detections, identities and their vectors, plate reads, the
+    library index and its crops — the install is left as it came out of
+    the box. The config, the library's original archives, downloaded
+    model weights and the logs are kept (`siteloom/reset.py` says why).
+    """
+    from siteloom.cli_library import _light_setup
+    from siteloom.reset import (
+        UnsafeReset,
+        check_safe,
+        format_bytes,
+        perform_reset,
+        plan_reset,
+    )
+
+    cfg, Session = _light_setup(config, level="WARNING")
+    with Session() as session:
+        plan = plan_reset(cfg, session, keep_users=keep_users)
+        try:
+            check_safe(cfg, session, plan)
+        except UnsafeReset as exc:
+            typer.echo(f"refused: {exc}", err=True)
+            raise typer.Exit(1) from None
+
+        typer.echo(f"site: {cfg.site_name or cfg.site_id}")
+        for table in plan.tables:
+            if table.rows:
+                typer.echo(f"  {table.rows:>7}  {table.name}")
+        for target in plan.paths:
+            if target.files:
+                typer.echo(
+                    f"  {target.files:>7}  files in {target.path} "
+                    f"({format_bytes(target.bytes)} — {target.label})"
+                )
+        typer.echo(
+            f"total: {plan.rows} rows, {plan.files} files "
+            f"({format_bytes(plan.bytes)}); keeping {', '.join(plan.kept)}"
+        )
+
+        if plan.is_empty:
+            typer.echo("already out of the box — nothing to remove")
+            return
+        if dry_run:
+            typer.echo("dry run — nothing removed")
+            return
+        if not yes and not typer.confirm("permanently erase all of this?"):
+            raise typer.Abort()
+
+        problems = perform_reset(cfg, session, plan)
+
+    for problem in problems:
+        typer.echo(f"could not remove {problem}", err=True)
+    if problems:
+        typer.echo(f"reset incomplete: {len(problems)} path(s) left behind", err=True)
+        raise typer.Exit(1)
+    typer.echo("reset complete — the site is out of the box again")
+
+
 if __name__ == "__main__":
     app()
