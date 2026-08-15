@@ -302,16 +302,89 @@ def encode_plate_crop(plate_bgr: np.ndarray) -> bytes | None:
     return bytes(buf.tobytes())
 
 
+#: The detector's logger, whose one shouted non-problem is quieted below.
+_DETECTOR_LOG = "open_image_models.detection.core.yolo_v9.inference"
+
+
+def quiet_empty_nms(record: logging.LogRecord) -> bool:
+    """Drop the CoreML empty-NMS complaint, unless DEBUG is asked for.
+
+    The plate detector's end-to-end graph does its NMS inside the model,
+    and Apple's CoreML execution provider cannot run that subgraph when
+    **no box survives**: it reports a zero-element tensor where it wants
+    a dynamic shape (upstream onnxruntime#20372). ONNX Runtime logs it as
+    an ERROR, open_image_models catches it and returns "no detections",
+    and that is the correct answer — the crop had no plate in it.
+
+    So a WARNING per plateless crop is a lie about severity, and there
+    are a lot of them. Measured on 400 real crops from this site
+    (2026-08-15): the error fired on 45, and on **none** of those did a
+    CPU session — which never hits the bug — find a plate. Over the whole
+    400 the two providers disagreed about exactly one crop, in the other
+    direction, at the confidence threshold. Nothing is being lost.
+
+    Matched on this failure's own words, because the same log line
+    reports genuine inference failures too — a real one still arrives as
+    a WARNING, loudly.
+
+    Dropped rather than merely relabelled, and that distinction cost a
+    round: demoting the record to DEBUG changes nothing on its own,
+    because the logger's level was already cleared when `.warning()` was
+    called and handlers here sit at NOTSET, so the line prints anyway
+    with a different word in front of it.
+
+    It survives when the *application* is running at DEBUG — asked of the
+    root logger, not of the detector's own, which open_image_models pins
+    at INFO. Keying on that one would put the escape hatch behind an
+    incantation nobody would guess; keying on the root means
+    `--log-level DEBUG`, which is what an operator reaches for, shows how
+    often this really fires.
+    """
+    message = record.getMessage()
+    if "CoreML" not in message or "zero elements" not in message:
+        return True
+    if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
+        return False
+    record.levelno = logging.DEBUG
+    record.levelname = "DEBUG"
+    return True
+
+
+def _build_detector() -> Any:
+    """The plate detector, with its one known non-problem quieted.
+
+    Two halves, because the complaint arrives twice by two routes: ONNX
+    Runtime's own C++ logger writes to stderr (silenced per session, so
+    other sessions — the OCR model's above all — keep every diagnostic
+    they have), and open_image_models re-logs the caught exception
+    through Python (demoted by the filter).
+
+    CoreML is kept rather than sidestepped by pinning the session to CPU:
+    measured on this site's crops, CPU costs 19.5 ms against CoreML's
+    7.2 ms for the same answers, which is real throughput on every
+    vehicle crop, spent to silence a log line.
+    """
+    import onnxruntime as ort
+    from open_image_models.detection.factory import create_detector
+
+    detector_log = logging.getLogger(_DETECTOR_LOG)
+    if quiet_empty_nms not in detector_log.filters:
+        detector_log.addFilter(quiet_empty_nms)
+
+    options = ort.SessionOptions()
+    options.log_severity_level = 4  # fatal only, this session alone
+    return create_detector(
+        "yolo-v9-t-384-license-plate-end2end", sess_options=options
+    )
+
+
 class PlateReader:
     """Detect the plate region in a vehicle crop, then OCR it."""
 
     def __init__(self) -> None:
         from fast_plate_ocr import LicensePlateRecognizer
-        from open_image_models import LicensePlateDetector
 
-        self._detector = LicensePlateDetector(
-            detection_model="yolo-v9-t-384-license-plate-end2end"
-        )
+        self._detector = _build_detector()
         self._ocr = LicensePlateRecognizer("cct-xs-v1-global-model")
 
     def _run_ocr(
