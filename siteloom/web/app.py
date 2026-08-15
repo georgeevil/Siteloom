@@ -1971,6 +1971,14 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     from siteloom.web.live import LiveHub
 
     hub = LiveHub(config)
+    # Two registrations, because the lifespan hook alone is unreachable
+    # for the case that matters (CLD-132). uvicorn's shutdown waits for
+    # open connections *first* and runs the lifespan shutdown after — so
+    # `on_shutdown` fires only once every stream has already ended, and
+    # an MJPEG stream is a response that never ends on its own. The
+    # lifespan hook still covers TestClient and any other host; `serve`
+    # reaches `app.state.live_hub` directly, ahead of the wait.
+    app.state.live_hub = hub
     app.router.on_shutdown.append(hub.stop)
 
     @app.get("/live", response_class=HTMLResponse)
