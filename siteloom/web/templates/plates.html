@@ -3,18 +3,26 @@
 {% block subtitle %}what the OCR actually read{% endblock %}
 
 {#
-  Plate reads (CLD-85). One row per OCR attempt, failures included.
+  Plate reads (CLD-85, re-cut in CLD-130/131). The default view answers
+  the question an operator opens this screen with — "which plates came
+  past?" — one row per vehicle visit (event + best-known text), accepted
+  reads only, newest first. Everything else is one chip away:
 
-  The rejected rows are the point. A read under the character floor used
-  to return None and leave nothing behind, which is why "how is plate OCR
-  doing on motorcycle plates?" (CLD-9) could only ever be answered by eye,
-  once. Here a rejection carries its reason, its raw text before
-  normalization, both confidences and the crop the OCR saw — so lowering
-  the floor is a re-read of this table rather than a re-run of anything.
-
-  The empty state follows the /noise rule: an empty table must never read
-  as "no vehicles came past" when the real answer is that nothing on this
-  install can produce a row.
+  * "Individual reads" is the per-frame log underneath a visit — one row
+    per OCR attempt, failures included, with the reason and the raw text
+    before normalization. The rejected rows stay recorded because they
+    are data (the CLD-119 floors were derived from them), they just no
+    longer lead the screen.
+  * The status chips default to accepted; the header says how many reads
+    the current view hides, so an empty or filtered table never reads as
+    "no vehicles came past" (the /noise rule).
+  * The timeframe picker is the events screen's (CLD-121), adopted here
+    (CLD-115): presets are living windows and travel in links, cursors
+    never do.
+  * Checkbox selection + the bulk bar judge many reads at once — on a
+    table where one parked car contributed 1,437 rows, per-row judging
+    is not a workflow. Checkboxes attach to the bulk form via form=,
+    so the per-row verdict forms never nest inside it.
 #}
 
 {% block content %}
@@ -68,7 +76,9 @@
     background: var(--raised); color: var(--muted);
   }
   .pl-search button:hover { border-color: var(--accent); color: var(--accent); }
-  .pl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .pl-chips {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; align-items: center;
+  }
   .pl-chips .grp {
     display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
     padding-right: 10px; margin-right: 4px; border-right: 1px solid var(--hairline);
@@ -81,24 +91,61 @@
   }
   .chip:hover { border-color: var(--accent); color: var(--accent); }
   .chip.active { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+  /* The timeframe picker, exactly the events screen's control: one
+     bordered group of segments so it reads as a single control. */
+  .timeframe {
+    display: inline-flex; align-items: stretch; overflow: hidden;
+    border: 1px solid var(--control-border); border-radius: 7px;
+  }
+  .tf-seg {
+    padding: 5px 9px; font-family: var(--font-mono); font-size: 11px; line-height: 1;
+    color: var(--muted); text-decoration: none; white-space: nowrap;
+    border-left: 1px solid var(--control-border);
+  }
+  .tf-seg:first-child { border-left: 0; }
+  .tf-seg:hover { color: var(--text); background: oklch(0.26 0.01 250); }
+  .tf-seg.on { background: oklch(0.29 0.06 200); color: oklch(0.9 0.08 200); }
+  .tf-custom { display: inline-flex; gap: 4px; align-items: center; }
+  .tf-custom input {
+    padding: 3px 6px; border-radius: 6px; font: inherit; font-size: 10.5px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .tf-custom button {
+    padding: 3px 8px; border-radius: 6px; font: inherit; font-size: 10.5px; cursor: pointer;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--muted);
+  }
+  .hiddenline { font-size: 11.5px; color: var(--amber); margin: 0 0 10px; }
+  .hiddenline a { color: inherit; }
+  .bulkbar {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 8px; font-size: 11.5px; color: var(--muted);
+  }
+  .bulkbar .vbtn { font-size: 11px; }
+  .selcount { font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); }
   .tablecard {
     border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
     background: var(--panel);
   }
   .prow {
     display: grid;
-    grid-template-columns: 88px 1fr 100px 118px 104px 116px 150px;
+    grid-template-columns: 24px 88px 1fr 100px 118px 104px 116px 150px;
     align-items: center; gap: 12px; padding: 8px 14px; min-height: 56px;
     border-bottom: 1px solid var(--row-rule);
   }
-  .prow:last-child { border-bottom: 0; }
-  .prow.head {
+  .grow {
+    display: grid;
+    grid-template-columns: 24px 88px 1fr 110px 100px 170px 96px 150px;
+    align-items: center; gap: 12px; padding: 8px 14px; min-height: 56px;
+    border-bottom: 1px solid var(--row-rule);
+  }
+  .prow:last-child, .grow:last-child { border-bottom: 0; }
+  .prow.head, .grow.head {
     min-height: 30px; height: 30px; padding-top: 0; padding-bottom: 0;
     background: var(--raised);
     font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
     letter-spacing: .07em; color: var(--faint);
   }
-  .prow img {
+  .prow img, .grow img {
     display: block; width: 88px; height: 40px; object-fit: cover;
     border-radius: 4px; background: var(--raised); border: 1px solid var(--hairline);
   }
@@ -118,6 +165,7 @@
   a.plate:hover { color: var(--accent); }
   a.plate.rejected { text-decoration: line-through; }
   .raw { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .raw a { color: inherit; }
   .why { font-size: 11px; color: var(--amber); }
   .verdicts { display: flex; gap: 5px; }
   .verdicts form { margin: 0; }
@@ -129,6 +177,8 @@
   .vbtn:hover { border-color: var(--accent); color: var(--accent); }
   .vbtn.on-yes { border-color: var(--green); color: var(--green); }
   .vbtn.on-no { border-color: var(--red); color: var(--red); }
+  .judged-yes { color: var(--green); }
+  .judged-no { color: var(--red); }
   .pl-empty {
     border: 1px dashed var(--control-border); border-radius: 8px;
     padding: 18px 20px; color: var(--muted); font-size: 12.5px; line-height: 1.65;
@@ -143,8 +193,13 @@
 <div class="pl-head">
   <h2>Plate reads</h2>
   <p>
+    {% if filters.view == 'grouped' -%}
+    One row per vehicle visit — the reads it groups are one click away,
+    failures included, with the reason and the raw text before normalization.
+    {%- else -%}
     One row per OCR attempt on a vehicle crop — the failures too, with the
     reason and the raw text before normalization.
+    {%- endif %}
     {%- if total %}
       <span class="mono">· {{ total }} read{{ '' if total == 1 else 's' }},
         {{ accepted }} accepted, {{ judged }} judged{% if wrong %}, {{ wrong }} wrong{% endif %}</span>
@@ -153,7 +208,10 @@
       <br><span class="mono">{{ row.key }} floors:
         {%- for f in row.floors %} {{ f.label }} &ge; {{ f.value }}
           (<code>identity.identifiers.{{ row.key }}.{{ f.field }}</code>){{ ',' if not loop.last }}
-        {%- endfor %} — move one and re-read this table; nothing needs re-running.</span>
+        {%- endfor %} — move one and re-read this table; nothing needs re-running.
+        {%- if row.camera_overrides %} Per-camera overrides:
+          {%- for c in row.camera_overrides %} {{ c }}{{ ';' if not loop.last }}{% endfor %}.
+        {%- endif %}</span>
     {%- endfor %}
   </p>
   <p style="margin-top:6px; font-size:11.5px;">
@@ -196,10 +254,15 @@
 
 {% if total %}
 <form class="pl-search" method="get" action="/plates">
-  {# Search is one filter among three: the hidden inputs keep the chips'
-     state, exactly as the chips keep the search. #}
+  {# Search is one filter among several: the hidden inputs keep the rest
+     of the state, exactly as the chips keep the search. #}
   {% if filters['class'] %}<input type="hidden" name="class" value="{{ filters['class'] }}">{% endif %}
-  {% if filters.status %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+  {% if filters.status != 'accepted' %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+  {% if filters.view != 'grouped' %}<input type="hidden" name="view" value="{{ filters.view }}">{% endif %}
+  {% if filters.last %}<input type="hidden" name="last" value="{{ filters.last }}">{% endif %}
+  {% if filters.since %}<input type="hidden" name="since" value="{{ filters.since }}">{% endif %}
+  {% if filters.until %}<input type="hidden" name="until" value="{{ filters.until }}">{% endif %}
+  {% if filters.event %}<input type="hidden" name="event" value="{{ filters.event }}">{% endif %}
   <input type="search" name="q" value="{{ filters.q or '' }}"
          placeholder="Search a plate — spacing and dashes don't matter"
          aria-label="Search plate reads">
@@ -211,6 +274,12 @@
 
 <div class="pl-chips">
   <span class="grp">
+    <a class="chip{{ ' active' if filters.view == 'grouped' }}" href="{{ view_urls['grouped'] }}"
+       title="One row per vehicle visit">Visits</a>
+    <a class="chip{{ ' active' if filters.view == 'reads' }}" href="{{ view_urls['reads'] }}"
+       title="One row per OCR attempt">Individual reads</a>
+  </span>
+  <span class="grp">
     {% for chip in class_chips %}
     <a class="chip{{ ' active' if chip.active }}" href="{{ chip.url }}">{{ chip.label }}</a>
     {% endfor %}
@@ -220,13 +289,134 @@
     <a class="chip{{ ' active' if chip.active }}" href="{{ chip.url }}">{{ chip.label }}</a>
     {% endfor %}
   </span>
+  {% if filters.event %}
+  <span class="grp">
+    <a class="chip active" href="{{ clear_event }}"
+       title="Stop filtering to this event">event #{{ filters.event }} ✕</a>
+  </span>
+  {% endif %}
+  {# The timeframe, observability-style: living windows judged at request
+     time. A preset is a filter and travels in the link; picking one
+     clears the absolute bounds so the two never silently AND together. #}
+  <span class="timeframe" role="group" aria-label="Timeframe">
+    {% for key in timeframe_presets %}
+    <a class="tf-seg{% if filters.last == key %} on{% endif %}"
+       href="{{ timeframe_urls[key] }}">{{ key }}</a>
+    {% endfor %}
+    <a class="tf-seg{% if not filters.last and not filters.since and not filters.until %} on{% endif %}"
+       href="{{ timeframe_urls['all'] }}" title="No time window">All</a>
+  </span>
+  <form class="tf-custom" method="get" action="/plates">
+    {% if filters['class'] %}<input type="hidden" name="class" value="{{ filters['class'] }}">{% endif %}
+    {% if filters.status != 'accepted' %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+    {% if filters.view != 'grouped' %}<input type="hidden" name="view" value="{{ filters.view }}">{% endif %}
+    {% if filters.q %}<input type="hidden" name="q" value="{{ filters.q }}">{% endif %}
+    {% if filters.event %}<input type="hidden" name="event" value="{{ filters.event }}">{% endif %}
+    <input type="datetime-local" name="since" value="{{ filters.since or '' }}" aria-label="From (site wall clock)">
+    <input type="datetime-local" name="until" value="{{ filters.until or '' }}" aria-label="Until (site wall clock)">
+    <button type="submit">Apply</button>
+  </form>
+</div>
+
+{% if hidden_by_status %}
+<p class="hiddenline">
+  {{ hidden_by_status }} read{{ '' if hidden_by_status == 1 else 's' }} in this window {{ 'is' if hidden_by_status == 1 else 'are' }} outside the “{{ filters.status }}” view —
+  rejections stay recorded (they are what the floors are tuned from), they
+  just don't lead the screen.
+  <a href="{{ show_all_url }}">Every read</a> shows them.
+</p>
+{% endif %}
+{% endif %}
+
+{% if groups or reads %}
+{# The bulk bar: its form stands alone and the row checkboxes attach via
+   form=, so the per-row verdict forms never nest inside it (nested
+   forms are invalid HTML and submit unpredictably). #}
+<form id="bulk" method="post" action="/plates/bulk"></form>
+<div class="bulkbar">
+  <input type="checkbox" id="sel-all" aria-label="Select everything in view">
+  <span class="selcount" id="sel-count">select rows to judge them together</span>
+  <input type="hidden" name="back" value="{{ back }}" form="bulk">
+  <button class="vbtn" type="submit" form="bulk" name="action" value="confirmed">Mark correct</button>
+  <button class="vbtn" type="submit" form="bulk" name="action" value="wrong">Mark wrong</button>
+  <button class="vbtn" type="submit" form="bulk" name="action" value="clear">Clear verdicts</button>
 </div>
 {% endif %}
 
-{% if reads %}
+{% if groups %}
+<div class="tablecard">
+  <div class="grow head">
+    <div></div><div>Best crop</div><div>Plate</div><div>Reads</div>
+    <div>Class</div><div>Visit</div><div>Judged</div><div>Verdict</div>
+  </div>
+  <div id="plate-rows">
+  {% for g in groups %}
+  <div class="grow">
+    <div>
+      <input type="checkbox" form="bulk" name="group" class="selbox"
+             value="{{ g.event_id }}:{{ g.text }}"
+             aria-label="Select this visit's reads">
+    </div>
+    <div>
+      {% if g.crop_path %}
+      <img src="/media/{{ g.crop_path }}" alt="plate crop" loading="lazy">
+      {% else %}
+      <span class="nocrop">no crop</span>
+      {% endif %}
+    </div>
+    <div>
+      {% if g.text %}
+      <a class="plate{{ '' if g.accepted_n else ' rejected' }}" href="/plates/p/{{ g.text }}">{{ g.text }}</a>
+      {% if g.text in watched_plates %}
+      <span class="wbadge" title="on the watchlist">watched</span>
+      {% endif %}
+      {% else %}
+      <div class="plate rejected">no text</div>
+      {% endif %}
+      <div class="raw"><a href="/events/{{ g.event_id }}">event #{{ g.event_id }}</a></div>
+    </div>
+    <div class="mono">
+      <a href="{{ g.reads_url }}" title="The individual reads behind this row">{{ g.reads }} read{{ '' if g.reads == 1 else 's' }}</a>
+      {%- if g.accepted_n and g.accepted_n != g.reads %}<br><span class="raw">{{ g.accepted_n }} accepted</span>{% endif %}
+    </div>
+    <div class="mono">{{ g.class_name or '—' }}<br>{{ g.camera_id or '' }}</div>
+    <div class="mono">
+      {{ local_time(g.first_at, '%Y-%m-%d %H:%M:%S') }}
+      {%- if g.last_at != g.first_at %}<br>→ {{ local_time(g.last_at, '%H:%M:%S') }}{% endif %}
+    </div>
+    <div class="mono">
+      {% if g.confirmed_n %}<span class="judged-yes">{{ g.confirmed_n }} ✓</span>{% endif %}
+      {% if g.wrong_n %}<span class="judged-no">{{ g.wrong_n }} ✗</span>{% endif %}
+      {% if not g.confirmed_n and not g.wrong_n %}—{% endif %}
+    </div>
+    <div class="verdicts">
+      {# A verdict belongs to the visit, not to frame 743: these judge
+         every read in the group at once, through the same bulk action
+         the selection uses. #}
+      <form method="post" action="/plates/bulk">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input type="hidden" name="group" value="{{ g.event_id }}:{{ g.text }}">
+        <button class="vbtn{{ ' on-yes' if g.confirmed_n == g.reads }}" type="submit"
+                name="action" value="{{ 'clear' if g.confirmed_n == g.reads else 'confirmed' }}">Correct</button>
+      </form>
+      <form method="post" action="/plates/bulk">
+        <input type="hidden" name="back" value="{{ back }}">
+        <input type="hidden" name="group" value="{{ g.event_id }}:{{ g.text }}">
+        <button class="vbtn{{ ' on-no' if g.wrong_n == g.reads }}" type="submit"
+                name="action" value="{{ 'clear' if g.wrong_n == g.reads else 'wrong' }}">Wrong</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+</div>
+
+{% include "_load_more.html" %}
+
+{% elif reads %}
 <div class="tablecard">
   <div class="prow head">
-    <div>Plate crop</div><div>Read</div><div>Class</div><div>When</div>
+    <div></div><div>Plate crop</div><div>Read</div><div>Class</div><div>When</div>
     <div>Plate size</div><div>Confidence</div><div>Verdict</div>
   </div>
   {# Own container: infinite.js appends the next slice's rows here, and
@@ -234,6 +424,10 @@
   <div id="plate-rows">
   {% for r in reads %}
   <div class="prow">
+    <div>
+      <input type="checkbox" form="bulk" name="read" class="selbox"
+             value="{{ r.id }}" aria-label="Select this read">
+    </div>
     <div>
       {% if r.crop_path %}
       <img src="/media/{{ r.crop_path }}" alt="plate crop" loading="lazy">
@@ -318,9 +512,16 @@
 
 {% elif total %}
 <div class="pl-empty">
-  <h3>No read matches this filter</h3>
+  <h3>No {{ 'visit' if filters.view == 'grouped' else 'read' }} matches this filter</h3>
   {{ total }} read{{ '' if total == 1 else 's' }} recorded in total — the filters
-  above narrow them. Clearing them shows everything.
+  above narrow them.
+  {% if hidden_by_status %}
+    {{ hidden_by_status }} of them {{ 'is' if hidden_by_status == 1 else 'are' }}
+    hidden by the “{{ filters.status }}” view alone —
+    <a href="{{ show_all_url }}">Every read</a> shows them.
+  {% else %}
+    Clearing the filters shows everything.
+  {% endif %}
 </div>
 
 {% elif empty_reason == 'waiting' %}
@@ -351,5 +552,34 @@
   <code>identity.enabled</code> is false, so no crop reaches the plate
   reader and this table cannot fill.
 </div>
+{% endif %}
+
+{% if groups or reads %}
+<script>
+  // Selection is a convenience layer only: every checkbox is a real form
+  // control (attached to #bulk via form=), so the bulk buttons work with
+  // this script broken. It adds select-all and a live count — including
+  // over rows infinite.js appends later, hence the delegated listener.
+  (function () {
+    var all = document.getElementById("sel-all");
+    var count = document.getElementById("sel-count");
+    function boxes() {
+      return Array.prototype.slice.call(document.querySelectorAll(".selbox"));
+    }
+    function update() {
+      var n = boxes().filter(function (b) { return b.checked; }).length;
+      count.textContent = n
+        ? n + " selected"
+        : "select rows to judge them together";
+    }
+    all.addEventListener("change", function () {
+      boxes().forEach(function (b) { b.checked = all.checked; });
+      update();
+    });
+    document.addEventListener("change", function (e) {
+      if (e.target.classList && e.target.classList.contains("selbox")) update();
+    });
+  })();
+</script>
 {% endif %}
 {% endblock %}

@@ -747,10 +747,12 @@ def test_the_class_filter_isolates_motorcycles(tmp_path):
              "accepted": False, "reason": REASON_TOO_SHORT, "min_chars": 4},
         ],
     )
-    everything = client.get("/plates").text
+    # The per-frame log, every status — the rejections no longer lead
+    # the default view (CLD-131), but they are all one filter away.
+    everything = client.get("/plates?view=reads&status=all").text
     assert "CAR999" in everything and "zz1" in everything
 
-    bikes = client.get("/plates?class=motorcycle").text
+    bikes = client.get("/plates?view=reads&status=all&class=motorcycle").text
     assert "zz1" in bikes
     assert "CAR999" not in bikes
     # The rejection explains itself rather than showing an empty cell.
@@ -771,7 +773,7 @@ def test_the_page_shows_what_the_floors_are_measured_against(tmp_path):
              "plate_height": 19, "sharpness": 12.4},
         ],
     )
-    page = client.get("/plates").text
+    page = client.get("/plates?view=reads&status=all").text
 
     assert "58" in page and "19" in page  # the plate's size in pixels
     assert "sharpness 12" in page
@@ -811,9 +813,9 @@ def test_the_status_filter_separates_rejections_from_accepted_reads(tmp_path):
              "accepted": False, "reason": REASON_TOO_SHORT},
         ],
     )
-    rejected = client.get("/plates?status=rejected").text
+    rejected = client.get("/plates?view=reads&status=rejected").text
     assert "zz1" in rejected and "CAR999" not in rejected
-    accepted = client.get("/plates?status=accepted").text
+    accepted = client.get("/plates?view=reads&status=accepted").text
     assert "CAR999" in accepted and "zz1" not in accepted
 
 
@@ -874,7 +876,7 @@ def test_search_strips_what_plate_matching_strips(tmp_path):
              "accepted": True},
         ],
     )
-    found = client.get("/plates?q=ab-12").text
+    found = client.get("/plates?view=reads&q=ab-12").text
     assert "AB 12-CD" in found
     assert "ZZ999" not in found
 
@@ -886,7 +888,7 @@ def test_a_search_that_normalizes_to_nothing_matches_nothing(tmp_path):
         [{"class_name": "car", "raw_text": "AB12", "text": "AB12",
           "accepted": True}],
     )
-    page = client.get("/plates?q=--!--").text
+    page = client.get("/plates?view=reads&q=--!--").text
     assert "AB12" not in page
     assert "No read matches this filter" in page
 
@@ -1052,8 +1054,8 @@ def test_a_corrected_read_moves_to_the_true_plates_page(tmp_path):
     assert "No read of" in client.get("/plates/p/ABI2CD").text
 
     # Search stays permissive — either spelling finds the row.
-    assert "ABI2CD" in client.get("/plates?q=abi2cd").text
-    assert "ABI2CD" in client.get("/plates?q=ab12cd").text
+    assert "ABI2CD" in client.get("/plates?view=reads&q=abi2cd").text
+    assert "ABI2CD" in client.get("/plates?view=reads&q=ab12cd").text
 
 
 # --------------------------------------------------------------------------
@@ -1287,3 +1289,370 @@ def test_the_detector_session_logs_only_fatal():
         assert options.log_severity_level == 4
     finally:
         detector_log.filters = before
+
+
+# --------------------------------------------------------------------------
+# Per-camera plate floors (CLD-128)
+# --------------------------------------------------------------------------
+
+
+def test_plate_floors_resolve_camera_first_then_identifier():
+    """One function of the same shape as `threshold_for`: camera override
+    field by field, then the identifier's site-wide value — so ingest and
+    any future replay cannot disagree about which bar a read faced."""
+    from siteloom.config import CameraIdentityOverride, PlateFloorsOverride
+
+    config = SiteConfig(
+        site_id="t",
+        cameras=[
+            CameraConfig(
+                id="street",
+                adapter="file",
+                source="x",
+                identity=CameraIdentityOverride(
+                    plate_floors=PlateFloorsOverride(
+                        min_width_px=30, min_char_confidence=0.85
+                    )
+                ),
+            )
+        ],
+    )
+    config.identity.identifiers["vehicle"].plate_min_width_px = 100
+    config.identity.identifiers["vehicle"].plate_min_sharpness = 55.0
+
+    floors = config.identity.plate_floors_for("vehicle", config.cameras[0])
+    assert floors.min_width_px == 30  # the camera's word wins
+    assert floors.min_char_confidence == pytest.approx(0.85)
+    assert floors.min_sharpness == pytest.approx(55.0)  # inherited
+    assert floors.min_chars == 4  # inherited
+
+    site = config.identity.plate_floors_for("vehicle", None)
+    assert site.min_width_px == 100
+
+
+def test_floors_for_an_unknown_identifier_are_the_bare_defaults():
+    config = SiteConfig(
+        site_id="t", cameras=[CameraConfig(id="c", adapter="file", source="x")]
+    )
+    floors = config.identity.plate_floors_for("bike", config.cameras[0])
+    assert floors.min_chars == DEFAULT_MIN_CHARS
+    assert floors.min_width_px == 0
+
+
+def test_the_module_prefers_the_floors_in_the_payload():
+    """The floors the application layer resolved for the camera reach the
+    reader; the identifier's site-wide value is only the fallback."""
+    import cv2
+
+    from siteloom.dispatch.base import Job
+
+    cfg = IdentityConfig()
+    cfg.identifiers["vehicle"].plate_min_width_px = 100  # would reject 28px
+    module = identity_module(
+        reader_with([_Detection(0.9)], [Prediction("AB1234", char_probs=[0.99])]),
+        cfg,
+    )
+    ok, jpeg = cv2.imencode(".jpg", vehicle_crop())
+    assert ok
+    result = module.process(
+        Job(
+            module="identity",
+            payload={
+                "crop_jpeg": jpeg.tobytes(),
+                "class_name": "car",
+                "plate_floors": {"vehicle": {"min_width_px": 20}},
+            },
+        )
+    )
+    vehicle = [e for e in result["embeddings"] if e["identifier"] == "vehicle"][0]
+    assert vehicle["plate"] == "AB1234"  # 28px clears the camera's 20
+
+    # And without the payload the site-wide 100px floor still bites.
+    bare = module.process(
+        Job(
+            module="identity",
+            payload={"crop_jpeg": jpeg.tobytes(), "class_name": "car"},
+        )
+    )
+    vehicle = [e for e in bare["embeddings"] if e["identifier"] == "vehicle"][0]
+    assert vehicle["plate"] is None
+    assert vehicle["plate_read"]["reason"] == REASON_TOO_SMALL
+
+
+def test_camera_floor_overrides_are_named_on_the_page(tmp_path):
+    """A floor that only bites on one camera is the one an operator will
+    debug as a bug — so the page names it (the CLD-128 half of the
+    'floors are visible' rule)."""
+    from siteloom.config import CameraIdentityOverride, PlateFloorsOverride
+
+    def configure(config):
+        config.cameras[0].identity = CameraIdentityOverride(
+            plate_floors=PlateFloorsOverride(min_width_px=30)
+        )
+
+    client, _ = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+          "accepted": True}],
+        configure=configure,
+    )
+    page = client.get("/plates").text
+    assert "cam1: plate width ≥ 30px" in page
+
+
+# --------------------------------------------------------------------------
+# The OCR cadence cap (CLD-130)
+# --------------------------------------------------------------------------
+
+
+class RationedPlateIdentity:
+    """A stub that honours the module contract for `skip_plate_ocr`: no
+    OCR on a rationed frame, embedding regardless."""
+
+    def __init__(self):
+        self.payloads = []
+
+    def process(self, job):
+        payload = job.payload
+        self.payloads.append(payload)
+        skipped = "vehicle" in payload.get("skip_plate_ocr", ())
+        read = (
+            None
+            if skipped
+            else PlateReadResult(
+                text="AB1234", raw_text="AB1234", normalized="AB1234", min_chars=4
+            ).as_payload()
+        )
+        return {
+            "embeddings": [
+                {
+                    "identifier": "vehicle",
+                    "algo": "generic",
+                    "vector": [1.0, 0.0, 0.0, 0.0],
+                    "plate": None if read is None else "AB1234",
+                    "plate_read": read,
+                }
+            ]
+        }
+
+
+def _rationed_service(sample_video, tmp_path, module, interval=None):
+    config = SiteConfig(
+        site_id="test-site",
+        cameras=[
+            CameraConfig(
+                id="cam1",
+                adapter="file",
+                source=str(sample_video),
+                sample_fps=5.0,
+                modules=["detection", "identity"],
+            )
+        ],
+        identity=IdentityConfig(vector_db_path=str(tmp_path / "vectors")),
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/cap.db", media_dir=str(tmp_path / "media")
+        ),
+    )
+    if interval is not None:
+        config.identity.identifiers["vehicle"].plate_ocr_interval_s = interval
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", StubMotorcycleDetector())
+    dispatcher.register("identity", module)
+    return IngestService(config, dispatcher=dispatcher)
+
+
+def test_the_ocr_cadence_is_capped_by_frame_time(sample_video, tmp_path):
+    """A vehicle dwelling in frame is OCR'd at most once per interval —
+    measured in frame time, so backfill and live ration identically —
+    while the embedding keeps running on every identified frame."""
+    module = RationedPlateIdentity()
+    service = _rationed_service(sample_video, tmp_path, module)
+    service.run_camera(service.config.cameras[0])
+
+    with service.Session() as session:
+        reads = session.query(PlateRead).order_by(PlateRead.at).all()
+        times = [r.at for r in reads]
+    assert reads, "the first frame of a visit is always OCR'd"
+    # Rationed: strictly fewer OCR attempts than identified frames, and
+    # never two attempts inside the interval.
+    assert len(module.payloads) > len(reads)
+    for earlier, later in zip(times, times[1:]):
+        assert (later - earlier).total_seconds() >= 1.0
+    # The floors ride in every payload, resolved for the camera.
+    assert all("vehicle" in p["plate_floors"] for p in module.payloads)
+
+
+def test_an_interval_of_zero_reads_every_frame(sample_video, tmp_path):
+    """0 = off — the pre-CLD-130 behavior stays one setting away."""
+    module = RationedPlateIdentity()
+    service = _rationed_service(sample_video, tmp_path, module, interval=0.0)
+    service.run_camera(service.config.cameras[0])
+
+    with service.Session() as session:
+        count = session.query(PlateRead).count()
+    assert count == len(module.payloads)
+
+
+# --------------------------------------------------------------------------
+# The grouped view, the default view, and bulk verdicts (CLD-130/131)
+# --------------------------------------------------------------------------
+
+
+def test_the_default_view_leads_with_accepted_visits(tmp_path):
+    """An operator opening /plates is asking "what plates came past?" —
+    not for the `no-box` diagnostics and the reads the system already
+    refused. Those stay recorded, one chip away, and counted out loud
+    (the /noise rule: a filtered table must never read as quiet)."""
+    client, _ = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "CAR999", "text": "CAR999",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "CAR999", "text": "CAR999",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "CAR999", "text": "CAR999",
+             "accepted": True},
+            {"class_name": "car", "accepted": False, "reason": REASON_NO_BOX},
+            {"class_name": "car", "raw_text": "zz1", "text": "ZZ1",
+             "accepted": False, "reason": REASON_TOO_SHORT},
+        ],
+    )
+    page = client.get("/plates").text
+    # One row for the visit, not three for the frames.
+    assert "CAR999" in page
+    assert "3 reads" in page
+    # The rejections do not lead — and the no-box diagnostic least of all.
+    assert "zz1" not in page
+    assert "no plate region found" not in page
+    # ...but they are counted, and the escape hatch is offered.
+    assert "2 reads in this window are outside" in page
+    assert "Every read" in page
+
+
+def test_a_visit_groups_by_best_known_text(tmp_path):
+    """A read corrected onto a plate joins that plate's group: the group
+    key is the operator's correction first, the OCR's text second — the
+    same best-known truth the per-plate page uses."""
+    client, _ = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "TYB506", "text": "TYB506",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "TYB506", "text": "TYB506",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "T8B506", "text": "T8B506",
+             "accepted": True, "corrected_text": "TYB506"},
+        ],
+    )
+    page = client.get("/plates").text
+    assert "3 reads" in page
+    assert "T8B506" not in page  # the misreading is inside the group
+
+
+def test_a_group_expands_to_its_own_reads(tmp_path):
+    client, Session = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+             "accepted": True},
+        ],
+    )
+    with Session() as session:
+        event_id = session.query(Event).one().id
+    page = client.get("/plates").text
+    assert "view=reads" in page
+    assert f"event={event_id}" in page
+
+    reads = client.get(
+        f"/plates?view=reads&status=all&event={event_id}&q=AB1234"
+    ).text
+    assert reads.count("AB1234") >= 2
+
+
+def test_a_group_verdict_judges_the_visit_not_frame_743(tmp_path):
+    client, Session = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "ZZ999", "text": "ZZ999",
+             "accepted": True},
+        ],
+    )
+    with Session() as session:
+        event_id = session.query(Event).one().id
+
+    client.post(
+        "/plates/bulk",
+        data={"action": "confirmed", "group": f"{event_id}:AB1234"},
+    )
+    with Session() as session:
+        judged = session.query(PlateRead).filter_by(verdict="confirmed").all()
+        untouched = session.query(PlateRead).filter_by(text="ZZ999").one()
+    assert len(judged) == 2
+    assert all(r.text == "AB1234" for r in judged)
+    assert untouched.verdict is None
+
+    # Clearing a group undoes the verdicts without touching corrections.
+    client.post(
+        "/plates/bulk",
+        data={"action": "clear", "group": f"{event_id}:AB1234"},
+    )
+    with Session() as session:
+        assert session.query(PlateRead).filter(
+            PlateRead.verdict.is_not(None)
+        ).count() == 0
+
+
+def test_bulk_verdicts_over_a_selection(tmp_path):
+    client, Session = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": "AA1111", "text": "AA1111",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "BB2222", "text": "BB2222",
+             "accepted": True},
+            {"class_name": "car", "raw_text": "CC3333", "text": "CC3333",
+             "accepted": True},
+        ],
+    )
+    with Session() as session:
+        ids = [r.id for r in session.query(PlateRead).order_by(PlateRead.id)]
+
+    client.post("/plates/bulk", data={"action": "wrong", "read": ids[:2]})
+    with Session() as session:
+        wrong = {r.id for r in session.query(PlateRead).filter_by(verdict="wrong")}
+    assert wrong == set(ids[:2])
+
+    assert client.post(
+        "/plates/bulk", data={"action": "maybe", "read": ids}
+    ).status_code == 400
+    assert client.post(
+        "/plates/bulk", data={"action": "wrong", "group": "notanevent:X"}
+    ).status_code == 400
+
+
+# --------------------------------------------------------------------------
+# The timeframe (CLD-131, the picker from CLD-121/115)
+# --------------------------------------------------------------------------
+
+
+def test_the_timeframe_is_a_living_window(tmp_path):
+    """Rows seeded at a fixed past instant: a short preset excludes them,
+    a long one includes them, and both are judged at request time."""
+    client, _ = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "AB1234", "text": "AB1234",
+          "accepted": True}],
+    )
+    assert "AB1234" not in client.get("/plates?last=1h").text
+    assert "AB1234" in client.get("/plates?last=30d").text
+    # An unknown token degrades to all time — the picker is the only
+    # thing that mints presets.
+    assert "AB1234" in client.get("/plates?last=3w").text
+    # A hand-mangled absolute bound is a 400, never silently "no filter".
+    assert client.get("/plates?since=notatime").status_code == 400

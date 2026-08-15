@@ -49,8 +49,9 @@ from urllib.parse import urlencode
 
 from fastapi import Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import false, func, or_, select
+from sqlalchemy import case, false, func, or_, select, tuple_
 
+from siteloom import localtime
 from siteloom.identity.plates import normalize_plate
 from siteloom.store import PLATE_VERDICTS, Identity, PlateRead, PlateWatch
 from siteloom.web import nav, paging
@@ -78,6 +79,29 @@ def _status_clause(status: str):
 
 STATUSES = ("accepted", "rejected", "unjudged") + PLATE_VERDICTS
 
+#: The default status view is accepted reads (CLD-131). The rejections
+#: keep being recorded — the CLD-119 floors were derived from them and
+#: CLD-114's consensus needs them — but an operator opening this screen
+#: is asking "what plates came past?", and a default of newest-first
+#: everything answered with `no-box` diagnostics and the reads the
+#: system itself refused. "all" is the explicit ask for every read.
+DEFAULT_STATUS = "accepted"
+
+#: The two shapes of the list (CLD-130): "grouped" collapses a vehicle's
+#: visit to one row per (event, best-known text) — the unit an operator
+#: actually judges — and "reads" is the per-frame log underneath it.
+VIEWS = ("grouped", "reads")
+DEFAULT_VIEW = "grouped"
+
+#: What a group's key text is: the operator's correction wins over the
+#: OCR, and a read with no text at all groups under "" — never NULL,
+#: because NULL breaks both GROUP BY identity and the keyset cursor.
+BEST_TEXT = func.coalesce(PlateRead.corrected_text, PlateRead.text, "")
+
+#: Bulk actions over a selection (CLD-131) — the same vocabulary as the
+#: per-row verdict, plus the clear that undoes either.
+BULK_ACTIONS = {"confirmed": "confirmed", "wrong": "wrong", "clear": None}
+
 #: What each rejection reason means in words. The reason codes are
 #: `identity/plates.py`'s; spelling them out here is what makes a row
 #: readable by someone who has never opened that file.
@@ -103,13 +127,38 @@ FLOOR_FIELDS = (
 )
 
 
+#: How a per-camera override field renders on the page, keyed as the
+#: `PlateFloors` tuple spells them (the config-side names, CLD-128).
+_OVERRIDE_LABELS = {
+    "min_width_px": ("plate width", "px"),
+    "min_sharpness": ("sharpness", ""),
+    "min_chars": ("characters", ""),
+    "min_char_confidence": ("weakest character", ""),
+}
+
+
 def _floor_rows(config) -> list[dict]:
     """One line per plate identifier: which floors are in force.
 
     Only the ones actually set, plus the character floor, which is
     always in force. A list of four `0`s would read as configuration
-    when it is the absence of it.
+    when it is the absence of it. Cameras overriding a floor (CLD-128)
+    are named too — a floor an operator cannot see is a floor they will
+    debug as a bug, and that goes double for one that only bites on one
+    camera.
     """
+    camera_overrides = []
+    for cam in config.cameras:
+        override = cam.identity.plate_floors if cam.identity else None
+        if override is None:
+            continue
+        parts = [
+            f"{_OVERRIDE_LABELS[field][0]} ≥ {value}{_OVERRIDE_LABELS[field][1]}"
+            for field, value in override.model_dump().items()
+            if value is not None
+        ]
+        if parts:
+            camera_overrides.append(f"{cam.id}: {', '.join(parts)}")
     rows = []
     for key, ident in config.identity.identifiers.items():
         if not ident.plate_ocr:
@@ -119,7 +168,7 @@ def _floor_rows(config) -> list[dict]:
             for field, label, unit in FLOOR_FIELDS
             if getattr(ident, field) or field == "plate_min_chars"
         ]
-        rows.append({"key": key, "floors": floors})
+        rows.append({"key": key, "floors": floors, "camera_overrides": camera_overrides})
     return rows
 
 
@@ -153,7 +202,7 @@ def _chip_rows(filters: dict, classes: list[str]) -> tuple[list[dict], list[dict
     """The class and status chip strips. Built here, not in Jinja:
     `class` is the query parameter's name and it cannot be spelled as a
     keyword argument in a template expression. Every chip keeps the other
-    two filters, search included."""
+    filters, search and timeframe included."""
     class_chips = [
         {
             "label": "All classes",
@@ -168,33 +217,174 @@ def _chip_rows(filters: dict, classes: list[str]) -> tuple[list[dict], list[dict
         }
         for name in classes
     ]
+    # Accepted leads because it is the default view; "Every read" is the
+    # explicit opt into the rejections, never the resting state.
     status_chips = [
-        {
-            "label": "Every read",
-            "url": plates_url(filters, status=None),
-            "active": not filters["status"],
-        }
-    ] + [
         {
             "label": name,
             "url": plates_url(filters, status=name),
             "active": filters["status"] == name,
         }
         for name in STATUSES
+    ] + [
+        {
+            "label": "Every read",
+            "url": plates_url(filters, status="all"),
+            "active": filters["status"] == "all",
+        }
     ]
     return class_chips, status_chips
 
 
-def _list_clauses(filters: dict) -> list:
-    """The list page's WHERE, straight from its three filters."""
+def _time_clauses(filters: dict, config) -> list:
+    """The timeframe's WHERE over `PlateRead.at` — the picker the events
+    screen grew in CLD-121, adopted here (CLD-115/CLD-131).
+
+    A preset (`last=24h`) is a living window judged at request time and
+    wins over the absolute bounds — the two must never silently AND.
+    Absolute bounds are operator-typed wall clock, an input boundary
+    (CLD-100): converted site-local -> naive UTC here, never compared
+    raw against the UTC column.
+    """
+    from siteloom.web.app import TIMEFRAME_PRESETS
+
+    clauses = []
+    if filters["last"]:
+        clauses.append(
+            PlateRead.at
+            >= datetime.now(timezone.utc).replace(tzinfo=None)
+            - TIMEFRAME_PRESETS[filters["last"]]
+        )
+        return clauses
+    zone = localtime.site_zone(config)
+    for key, column_op in (("since", "ge"), ("until", "le")):
+        raw = filters[key]
+        if not raw:
+            continue
+        try:
+            bound = localtime.as_utc(datetime.fromisoformat(raw), zone)
+        except ValueError:
+            # A hand-mangled bound is a bad request, not a 500 and not a
+            # silent "no filter" — an explicit ask must never widen.
+            raise HTTPException(400, f"unreadable timeframe bound {raw!r}") from None
+        clauses.append(PlateRead.at >= bound if column_op == "ge" else PlateRead.at <= bound)
+    return clauses
+
+
+def _list_clauses(filters: dict, config, *, status: bool = True) -> list:
+    """The list page's WHERE, straight from its filters.
+
+    `status=False` leaves the status filter out — that variant counts
+    what the current status view hides, so an empty or filtered default
+    view can say how many rejections sit one chip away (the /noise rule).
+    """
     clauses = []
     if filters["class"]:
         clauses.append(PlateRead.class_name == filters["class"])
-    if filters["status"]:
+    if status and filters["status"] != "all":
         clauses.append(_status_clause(filters["status"]))
     if filters["q"]:
         clauses.append(search_clause(filters["q"]))
+    if filters["event"]:
+        clauses.append(PlateRead.event_id == filters["event"])
+    clauses.extend(_time_clauses(filters, config))
     return clauses
+
+
+#: The grouped view's sort key labels — spelled once because the cursor
+#: must carry every column the ORDER BY does (CLD-104), and the group
+#: key text rides along to break last_at/event ties between two texts
+#: in one event.
+_GROUP_SORT_TYPES = (datetime, int, str)
+
+
+def _grouped_page(session, clauses: list, after: str | None):
+    """One slice of (event, best text) groups, most recent visit first.
+
+    Grouping is display only (CLD-130): the underlying rows stay — they
+    are the measurement the floors were tuned from and the input the
+    CLD-114 consensus gate needs — this query only presents a vehicle's
+    visit as the single row an operator judges.
+    """
+    from siteloom.web.app import _cursor_values
+
+    sub = (
+        select(
+            PlateRead.event_id.label("event_id"),
+            BEST_TEXT.label("text"),
+            func.count().label("reads"),
+            func.min(PlateRead.at).label("first_at"),
+            func.max(PlateRead.at).label("last_at"),
+            func.sum(case((PlateRead.accepted.is_(True), 1), else_=0)).label(
+                "accepted_n"
+            ),
+            func.sum(case((PlateRead.verdict == "confirmed", 1), else_=0)).label(
+                "confirmed_n"
+            ),
+            func.sum(case((PlateRead.verdict == "wrong", 1), else_=0)).label(
+                "wrong_n"
+            ),
+            func.max(PlateRead.camera_id).label("camera_id"),
+            func.max(PlateRead.class_name).label("class_name"),
+        )
+        .where(*clauses)
+        .group_by(PlateRead.event_id, BEST_TEXT)
+        .subquery()
+    )
+    sort = (sub.c.last_at, sub.c.event_id, sub.c.text)
+    query = select(sub).order_by(
+        sub.c.last_at.desc(), sub.c.event_id.desc(), sub.c.text.desc()
+    )
+    values = _cursor_values(after, _GROUP_SORT_TYPES)
+    if values is not None:
+        query = query.where(paging.after(sort, values))
+    fetched = session.execute(query.limit(PLATES_PAGE + 1)).all()
+    return paging.take(
+        list(fetched), PLATES_PAGE, lambda g: (g.last_at, g.event_id, g.text)
+    )
+
+
+def _group_crops(session, clauses: list, groups: list) -> dict:
+    """The best crop per group on this page, keyed (event_id, text).
+
+    "Best" prefers an accepted read, then the strongest weakest-character
+    confidence, then sharpness — the same ordering a human picks the
+    evidence image by. One query for the whole page, not one per group:
+    a group can hold a thousand rows (the CLD-130 measurement), and this
+    never fetches them, only the row a window function ranked first.
+    """
+    keys = [(g.event_id, g.text) for g in groups]
+    if not keys:
+        return {}
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=(PlateRead.event_id, BEST_TEXT),
+            order_by=(
+                PlateRead.accepted.desc(),
+                func.coalesce(PlateRead.ocr_min_confidence, -1.0).desc(),
+                func.coalesce(PlateRead.sharpness, -1.0).desc(),
+                PlateRead.id.desc(),
+            ),
+        )
+        .label("rank")
+    )
+    inner = (
+        select(
+            PlateRead.event_id.label("event_id"),
+            BEST_TEXT.label("text"),
+            PlateRead.crop_path.label("crop_path"),
+            rank,
+        )
+        .where(
+            PlateRead.crop_path.is_not(None),
+            tuple_(PlateRead.event_id, BEST_TEXT).in_(keys),
+            *clauses,
+        )
+        .subquery()
+    )
+    rows = session.execute(select(inner).where(inner.c.rank == 1)).all()
+    return {(r.event_id, r.text): r.crop_path for r in rows}
 
 
 def _paged_reads(session, clauses: list, after: str | None):
@@ -264,15 +454,153 @@ def _watch_rows(session) -> tuple[list[dict], set[str]]:
     return rows, {watch.plate for watch in watches}
 
 
+def _filters(
+    class_name: str | None,
+    status: str | None,
+    q: str | None,
+    view: str | None = None,
+    last: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    event: int | None = None,
+) -> dict:
+    from siteloom.web.app import TIMEFRAME_PRESETS
+
+    # Unknown tokens fall to the defaults rather than 400 — the chips
+    # are the only things that mint them.
+    return {
+        "class": (class_name or "").strip() or None,
+        "status": status if status in STATUSES + ("all",) else DEFAULT_STATUS,
+        "q": (q or "").strip() or None,
+        "view": view if view in VIEWS else DEFAULT_VIEW,
+        "last": last if last in TIMEFRAME_PRESETS else None,
+        "since": (since or "").strip() or None,
+        "until": (until or "").strip() or None,
+        "event": event,
+    }
+
+
+def _page_counts(session, filters: dict, clauses: list, config) -> dict:
+    """The list page's numbers, one place.
+
+    `hidden_by_status` is what the status chip is hiding within the same
+    other filters — the /noise rule: a table defaulting to accepted reads
+    must say how many rejections sit one chip away, or an empty default
+    view reads as "nothing came past".
+    """
+    counts = {
+        "matching": session.scalar(
+            select(func.count()).select_from(PlateRead).where(*clauses)
+        )
+        or 0,
+        "total": session.scalar(select(func.count()).select_from(PlateRead)) or 0,
+        "accepted": session.scalar(
+            select(func.count())
+            .select_from(PlateRead)
+            .where(PlateRead.accepted.is_(True))
+        )
+        or 0,
+        "judged": session.scalar(
+            select(func.count())
+            .select_from(PlateRead)
+            .where(PlateRead.verdict.is_not(None))
+        )
+        or 0,
+        "wrong": session.scalar(
+            select(func.count())
+            .select_from(PlateRead)
+            .where(PlateRead.verdict == "wrong")
+        )
+        or 0,
+        "hidden_by_status": 0,
+    }
+    if filters["status"] != "all":
+        in_timeframe = (
+            session.scalar(
+                select(func.count())
+                .select_from(PlateRead)
+                .where(*_list_clauses(filters, config, status=False))
+            )
+            or 0
+        )
+        counts["hidden_by_status"] = max(0, in_timeframe - counts["matching"])
+    return counts
+
+
+def _parse_groups(tokens: list[str]) -> list[tuple[int, str]]:
+    """`<event_id>:<text>` pairs off the bulk form, or a 400.
+
+    The text half is normalized-plate alphabet plus the empty no-text
+    group, so the first colon is unambiguous.
+    """
+    groups: list[tuple[int, str]] = []
+    for token in tokens:
+        event_part, _, text_part = token.partition(":")
+        try:
+            groups.append((int(event_part), text_part))
+        except ValueError:
+            raise HTTPException(400, f"unreadable group {token!r}") from None
+    return groups
+
+
+def _bulk_targets(session, read_ids: list[int], groups: list[tuple[int, str]]):
+    """Every read a bulk action names: listed ids, plus each group's rows
+    by the same best-known-text key the grouped view groups on — so the
+    buttons judge exactly the rows the row summarised."""
+    targets = []
+    if read_ids:
+        targets.extend(
+            session.scalars(select(PlateRead).where(PlateRead.id.in_(read_ids))).all()
+        )
+    for event_id, text in groups:
+        targets.extend(
+            session.scalars(
+                select(PlateRead).where(
+                    PlateRead.event_id == event_id, BEST_TEXT == text
+                )
+            ).all()
+        )
+    return targets
+
+
+def _grouped_rows(session, clauses: list, filters: dict, after: str | None):
+    """The grouped view's page: the slice plus template-ready dicts,
+    each carrying its best crop and its expand-to-reads link."""
+    slice_ = _grouped_page(session, clauses, after)
+    groups = [dict(g._mapping) for g in slice_.rows]
+    crops = _group_crops(session, clauses, slice_.rows)
+    for g in groups:
+        g["crop_path"] = crops.get((g["event_id"], g["text"]))
+        g["unjudged_n"] = g["reads"] - g["confirmed_n"] - g["wrong_n"]
+        # The per-frame log, narrowed to the visit and the group's text,
+        # every status shown — the count already includes rejections.
+        g["reads_url"] = plates_url(
+            filters,
+            view="reads",
+            event=g["event_id"],
+            q=g["text"] or None,
+            status="all",
+        )
+    return slice_, groups
+
+
 def plates_url(base: dict, **overrides) -> str:
     """A link to this list with some filters changed, keeping the rest.
 
     No cursor, ever: this builds the links an operator clicks and copies,
     and every one has to open at the top of the set it names (CLD-104).
+    `last` *is* part of it — "the last 24h" is a filter, and a pasted
+    link should mean the same living window for the recipient. The two
+    defaults (grouped, accepted) are omitted so the bare `/plates` stays
+    the canonical spelling of the default view.
     """
     params: list[tuple[str, str]] = []
     merged = {**base, **overrides}
-    for key in ("class", "status", "q"):
+    if merged.get("view") and merged["view"] != DEFAULT_VIEW:
+        params.append(("view", str(merged["view"])))
+    if merged.get("status") and merged["status"] != DEFAULT_STATUS:
+        params.append(("status", str(merged["status"])))
+    for key in ("class", "q", "last", "since", "until", "event"):
         if merged.get(key):
             params.append((key, str(merged[key])))
     return "/plates?" + urlencode(params) if params else "/plates"
@@ -306,58 +634,28 @@ def register(app, templates, Session, config) -> None:
 
     nav.add("/plates", "Plate reads", "PR", after="/stats")
 
-    def _filters(class_name: str | None, status: str | None, q: str | None) -> dict:
-        return {
-            "class": (class_name or "").strip() or None,
-            "status": status if status in STATUSES else None,
-            "q": (q or "").strip() or None,
-        }
-
     @app.get("/plates", response_class=HTMLResponse)
     def plates(
         request: Request,
         after: str | None = None,
         status: str | None = None,
         q: str | None = None,
+        view: str | None = None,
+        last: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        event: int | None = None,
     ):
+        from siteloom.web.app import TIMEFRAME_PRESETS
+
         # `class` is a Python keyword, so it cannot be a parameter name;
         # read straight off the query string instead of renaming the
         # parameter an operator sees in the URL.
         class_name = request.query_params.get("class")
-        filters = _filters(class_name, status, q)
-        clauses = _list_clauses(filters)
+        filters = _filters(class_name, status, q, view, last, since, until, event)
+        clauses = _list_clauses(filters, config)
         with Session() as session:
-            matching = (
-                session.scalar(
-                    select(func.count()).select_from(PlateRead).where(*clauses)
-                )
-                or 0
-            )
-            total = session.scalar(select(func.count()).select_from(PlateRead)) or 0
-            accepted = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(PlateRead)
-                    .where(PlateRead.accepted.is_(True))
-                )
-                or 0
-            )
-            judged = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(PlateRead)
-                    .where(PlateRead.verdict.is_not(None))
-                )
-                or 0
-            )
-            wrong = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(PlateRead)
-                    .where(PlateRead.verdict == "wrong")
-                )
-                or 0
-            )
+            counts = _page_counts(session, filters, clauses, config)
             # Class facets come from the rows, not from config: a class
             # can be added to detection.classes at any time (NFR3), and a
             # hard-coded list would hide the reads it produced.
@@ -370,8 +668,14 @@ def register(app, templates, Session, config) -> None:
                     .order_by(PlateRead.class_name)
                 ).all()
             ]
-            slice_ = _paged_reads(session, clauses, after)
-            rows = slice_.rows
+            grouped = filters["view"] == "grouped"
+            if grouped:
+                slice_, groups = _grouped_rows(session, clauses, filters, after)
+                rows = []
+            else:
+                slice_ = _paged_reads(session, clauses, after)
+                rows = slice_.rows
+                groups = []
             watch_rows, watched_plates = _watch_rows(session)
 
         plate_identifiers = [
@@ -381,27 +685,44 @@ def register(app, templates, Session, config) -> None:
         ]
         page_url = plates_url(filters)
         class_chips, status_chips = _chip_rows(filters, classes)
+        # The timeframe picker's links: each preset keeps every other
+        # filter, replaces the absolute window (the two would silently
+        # AND together).
+        timeframe_urls = {
+            key: plates_url(filters, last=key, since=None, until=None)
+            for key in TIMEFRAME_PRESETS
+        }
+        timeframe_urls["all"] = plates_url(filters, last=None, since=None, until=None)
+        view_urls = {key: plates_url(filters, view=key) for key in VIEWS}
+        unit = "visit" if grouped else "read"
         return templates.TemplateResponse(
             request,
             "plates.html",
             {
                 "site_name": config.site_name or config.site_id,
                 "reads": rows,
+                "groups": groups,
                 "filters": filters,
                 "classes": classes,
                 "class_chips": class_chips,
                 "status_chips": status_chips,
+                "timeframe_urls": timeframe_urls,
+                "timeframe_presets": list(TIMEFRAME_PRESETS),
+                "view_urls": view_urls,
                 "back": page_url,
                 "clear_search": plates_url(filters, q=None),
+                "clear_event": plates_url(filters, event=None),
+                "show_all_url": plates_url(filters, status="all"),
+                "hidden_by_status": counts["hidden_by_status"],
                 "reason_labels": REASON_LABELS,
                 "watches": watch_rows,
                 "watched_plates": watched_plates,
-                "matching": matching,
-                "total": total,
-                "accepted": accepted,
-                "judged": judged,
-                "wrong": wrong,
-                "empty_reason": _empty_reason(config, total),
+                "matching": counts["matching"],
+                "total": counts["total"],
+                "accepted": counts["accepted"],
+                "judged": counts["judged"],
+                "wrong": counts["wrong"],
+                "empty_reason": _empty_reason(config, counts["total"]),
                 "plate_identifiers": plate_identifiers,
                 "floor_rows": _floor_rows(config),
                 "more": _more(
@@ -409,9 +730,9 @@ def register(app, templates, Session, config) -> None:
                     None
                     if slice_.exhausted
                     else _with_cursor(page_url, slice_.next_cursor),
-                    f"Load {PLATES_PAGE} more reads",
-                    f"End of the list — {matching} read"
-                    f"{'' if matching == 1 else 's'} match this filter.",
+                    f"Load {PLATES_PAGE} more {unit}s",
+                    f"End of the list — {counts['matching']} read"
+                    f"{'' if counts['matching'] == 1 else 's'} match this filter.",
                 ),
             },
         )
@@ -536,6 +857,38 @@ def register(app, templates, Session, config) -> None:
             read.verdict_at = _now() if choice else None
             session.commit()
         # Back to the list the operator was judging from, filters intact.
+        return _plates_redirect(back)
+
+    @app.post("/plates/bulk")
+    def plates_bulk(
+        action: str = Form(...),
+        read: list[int] = Form(default=[]),
+        group: list[str] = Form(default=[]),
+        back: str = Form("/plates"),
+    ):
+        """One verdict over a selection (CLD-131) or a visit (CLD-130).
+
+        On a table where one parked car contributes hundreds of rows,
+        per-row judging is not a workflow — and a verdict belongs to
+        "this vehicle's visit", not to frame 743. `read` entries are
+        individual row ids; `group` entries are `<event_id>:<text>`
+        pairs naming every read whose best-known text (the operator's
+        correction first, the OCR's text second) matches — the same
+        definition the grouped view groups by, so the buttons judge
+        exactly the rows the row summarised. Same vocabulary as the
+        per-row verdict, and `clear` undoes either; corrections are
+        untouched — clearing a verdict must not erase typed ground truth.
+        """
+        if action not in BULK_ACTIONS:
+            raise HTTPException(400, f"unknown bulk action {action!r}")
+        verdict = BULK_ACTIONS[action]
+        stamp = _now() if verdict else None
+        groups = _parse_groups(group)
+        with Session() as session:
+            for row in _bulk_targets(session, read, groups):
+                row.verdict = verdict
+                row.verdict_at = stamp
+            session.commit()
         return _plates_redirect(back)
 
     @app.post("/plates/{read_id}/correct")
