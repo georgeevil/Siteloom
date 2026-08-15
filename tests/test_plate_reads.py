@@ -23,6 +23,7 @@ is not installed, so the reader, the detector and the OCR are all stubs.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -47,12 +48,14 @@ from siteloom.identity.plates import (
     REASON_TOO_SMALL,
     PlateRead as PlateReadResult,
     PlateReader,
+    _build_detector,
     gate_reason,
     laplacian_variance,
     mean_confidence,
     min_confidence,
     normalize_plate,
     parse_ocr_result,
+    quiet_empty_nms,
 )
 from siteloom.ingest import IngestService
 from siteloom.modules.identity import IdentityModule
@@ -1177,3 +1180,110 @@ def test_an_empty_table_says_why_rather_than_reading_as_quiet(tmp_path):
     past when the real answer is that nothing here can produce a row."""
     client, _ = seeded_client(tmp_path, [])
     assert "Identity resolution is off" in client.get("/plates").text
+
+
+# -- the CoreML empty-NMS complaint (upstream onnxruntime#20372) ------------
+#
+# The detector's end-to-end NMS cannot run on CoreML when no box
+# survives, so a plateless crop logs an ERROR from ONNX Runtime and a
+# WARNING from open_image_models — for the correct answer, on ~11% of
+# real crops. Measured over 400 of this site's crops, a CPU session
+# (which never hits the bug) found a plate in none of the ones CoreML
+# errored on, so the severity is what is wrong, not the outcome.
+
+
+def _record(message: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        name="open_image_models.detection.core.yolo_v9.inference",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+
+
+COREML_EMPTY_NMS = (
+    "An error occurred during model inference: [ONNXRuntimeError] : 1 : FAIL : "
+    "Non-zero status code returned while running CoreMLExecutionProvider_... node. "
+    "Input (/end2end/Add_1_output_0) has a dynamic shape ({-1}) but the runtime "
+    "shape ({0}) has zero elements. This is not supported by the CoreML EP."
+)
+
+
+def test_the_empty_nms_complaint_is_dropped_at_normal_levels():
+    """Dropped, not relabelled. Demoting the record alone changes
+    nothing — the logger's level was cleared when .warning() was called
+    and handlers sit at NOTSET, so a DEBUG-labelled line still prints."""
+    root = logging.getLogger()
+    before = root.level
+    root.setLevel(logging.INFO)
+    try:
+        assert quiet_empty_nms(_record(COREML_EMPTY_NMS)) is False
+    finally:
+        root.setLevel(before)
+
+
+def test_it_is_still_there_when_the_app_runs_at_debug():
+    """Asked of the root logger, because open_image_models pins its own
+    at INFO — keying on that one would hide the escape hatch behind an
+    incantation instead of `--log-level DEBUG`."""
+    root = logging.getLogger()
+    before = root.level
+    root.setLevel(logging.DEBUG)
+    try:
+        record = _record(COREML_EMPTY_NMS)
+        assert quiet_empty_nms(record) is True
+        assert record.levelname == "DEBUG"
+    finally:
+        root.setLevel(before)
+
+
+def test_a_genuine_inference_failure_still_warns():
+    """The same log line reports real failures. Matching on this one's
+    own words is what keeps a broken model loud."""
+    record = _record(
+        "An error occurred during model inference: [ONNXRuntimeError] : 6 : "
+        "RUNTIME_EXCEPTION : Exception during initialization: bad allocation"
+    )
+    assert quiet_empty_nms(record) is True
+    assert record.levelno == logging.WARNING
+
+
+def test_the_filter_is_installed_once_however_many_readers_exist():
+    """One PlateReader per camera is normal; a filter added per reader
+    would stack up copies of the same test on every record."""
+    ort = pytest.importorskip("onnxruntime")
+    pytest.importorskip("open_image_models")
+    del ort
+
+    detector_log = logging.getLogger(
+        "open_image_models.detection.core.yolo_v9.inference"
+    )
+    before = list(detector_log.filters)
+    try:
+        _build_detector()
+        _build_detector()
+        assert detector_log.filters.count(quiet_empty_nms) == 1
+    finally:
+        detector_log.filters = before
+
+
+def test_the_detector_session_logs_only_fatal():
+    """The native ORT logger writes to stderr, where no Python filter can
+    reach it — so it is quieted per session, leaving every other session
+    (the OCR model's especially) with all of its diagnostics."""
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("open_image_models")
+
+    detector_log = logging.getLogger(
+        "open_image_models.detection.core.yolo_v9.inference"
+    )
+    before = list(detector_log.filters)
+    try:
+        detector = _build_detector()
+        options = detector.model.get_session_options()
+        assert options.log_severity_level == 4
+    finally:
+        detector_log.filters = before

@@ -35,7 +35,10 @@ dev = [
 # without it the vehicle identifier degrades to visual re-ID only.
 plates = [
     "fast-plate-ocr[onnx]>=1.0",
-    "open-image-models>=0.4",
+    # >=0.6 for create_detector: the deprecated LicensePlateDetector
+    # cannot be handed the SessionOptions that quiet the CoreML
+    # empty-NMS error (identity/plates.py).
+    "open-image-models>=0.6",
 ]
 
 [project.scripts]
