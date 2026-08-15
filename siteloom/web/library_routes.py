@@ -825,6 +825,61 @@ def daily_queue(session, config, day: date) -> dict:
     }
 
 
+def index_backlog(session, source_id: int | None = None) -> dict:
+    """What has been scanned but not indexed, and which source to act on.
+
+    Two-phase indexing is deliberate — `scan()` is cheap and registers
+    rows as `pending`, `process()` is expensive and bounded — but it
+    leaves a legitimate state where the library is full of rows and
+    empty of pictures, because `thumb_path` is only written by the
+    second pass. The grid rendered that as several hundred blank
+    placeholders and said nothing, which reads as "my import failed"
+    (CLD-126). These counts already existed per source for the sources
+    panel; what was missing was saying so where it looks broken.
+
+    `failed` is reported separately from `pending` for the reason it
+    always is: nothing picks a failed item up again, so folding the two
+    together would promise a run that will never happen.
+
+    `target` is the source a single button may act on — the one being
+    filtered to, or the only one with a backlog. When several have one,
+    there is deliberately no target: a Takeout archive and a plain
+    directory need different passes (CLD-92), so the caller offers a
+    choice rather than guessing.
+    """
+    q = select(LibraryItem.source_id, LibraryItem.status, func.count()).group_by(
+        LibraryItem.source_id, LibraryItem.status
+    )
+    if source_id:
+        q = q.filter(LibraryItem.source_id == source_id)
+    per_source: dict[int, dict[str, int]] = {}
+    for sid, status, count in session.execute(q):
+        per_source.setdefault(sid, {})[status] = count
+
+    names = dict(
+        session.execute(
+            select(LibrarySource.id, func.coalesce(LibrarySource.name, ""))
+        ).all()
+    )
+    sources = [
+        {
+            "id": sid,
+            "name": names.get(sid) or f"source {sid}",
+            "pending": counts.get("pending", 0),
+            "failed": counts.get("failed", 0),
+        }
+        for sid, counts in sorted(per_source.items())
+        if counts.get("pending") or counts.get("failed")
+    ]
+    target = source_id or (sources[0]["id"] if len(sources) == 1 else None)
+    return {
+        "pending": sum(s["pending"] for s in sources),
+        "failed": sum(s["failed"] for s in sources),
+        "sources": sources,
+        "target": target,
+    }
+
+
 def register(app, templates, Session, config):  # noqa: C901 — route table
     def ctx(**kw) -> dict:
         return {"site_name": config.site_name or config.site_id, **kw}
@@ -851,6 +906,121 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 config.identity, shared_store(config, "import")
             )
         return LibraryIndexer(config, Session, build_dispatcher(config), resolver)
+
+    def _start_index_run(
+        source_id: int,
+        *,
+        identify: bool,
+        auto_verify: bool = False,
+        retry_failed: bool = False,
+    ) -> str | None:
+        """Start one background index pass over a source. Returns why it
+        could not, or None once the thread is running.
+
+        The wizard's step 2 and the library banner's "Start indexing" are
+        the same job behind two buttons, so they share this — and above
+        all they share the guard, which exists because two passes would
+        fight over the same pending rows and the one embedded vector
+        store.
+
+        Always **one source**, never "everything pending", and that is
+        the CLD-92 rule rather than a limitation: which pass runs is
+        decided by the source's kind, so a Takeout archive gets the
+        importer (sidecar people tags, name proposals) and anything else
+        gets the ordinary indexer. A run spanning both kinds would have
+        to pick one, and picking the plain pass writes face annotations —
+        which is exactly what makes `takeout import` skip an item later.
+        Indexing a Takeout source with the wrong pass is not slow, it is
+        lossy.
+        """
+        thread = _import_state["thread"]
+        if thread is not None and thread.is_alive():
+            return "An index run is already going."
+
+        with Session() as session:
+            source = session.get(LibrarySource, source_id)
+            if source is None:
+                raise HTTPException(404)
+            source_name = source.name
+            source_path = source.path
+            source_kind = source.kind
+
+        if config.identity.enabled:
+            # Resolved here rather than inside the worker, for the reason
+            # /train/enroll gives: embedded Qdrant allows one client per
+            # path per machine, so a backfill or live ingest holding it
+            # is ordinary — and a 503 naming it beats a job that starts,
+            # dies in a thread, and leaves the operator watching /jobs
+            # for a run that never appears. The store is process-wide, so
+            # the indexer built below reuses this one.
+            from siteloom.web.identity_ops import shared_store
+
+            shared_store(config, "index run")
+
+        def work():
+            from siteloom.progress import ProgressReporter
+
+            try:
+                indexer = _build_indexer()
+                if source_kind == "takeout":
+                    from siteloom.library.takeout import TakeoutImporter
+
+                    # The resume command has to carry the auto-verify
+                    # choice. Dropping a flag on resume is exactly the
+                    # bug _resume_command was written for, and this is
+                    # the flag whose loss writes unreviewed rows that
+                    # training/dataset.py reads as ground truth.
+                    flag = "" if auto_verify else " --no-auto-verify"
+                    with ProgressReporter(
+                        Session,
+                        "takeout-import",
+                        target=source_path,
+                        bar=False,
+                        resume_command=(
+                            f"siteloom takeout import {source_path}{flag}"
+                        ),
+                    ) as progress:
+                        TakeoutImporter(
+                            indexer,
+                            auto_verify_unambiguous=auto_verify,
+                            progress=progress,
+                        ).import_tree(
+                            source_path,
+                            name=source_name,
+                            batch_size=config.library.batch_size,
+                        )
+                    return
+
+                retry = " --retry-failed" if retry_failed else ""
+                with ProgressReporter(
+                    Session,
+                    "library-index",
+                    target=source_name,
+                    bar=False,
+                    resume_command=(
+                        f"siteloom library index --source {source_id} --all{retry}"
+                    ),
+                ) as progress:
+                    indexer.process(
+                        source_id=source_id,
+                        # Same sentinel `library index --all` uses: process
+                        # is batch-committed and interruptible internally,
+                        # so "everything pending" is a limit, not a
+                        # single transaction.
+                        limit=10**9,
+                        identify=identify,
+                        progress=progress,
+                        retry_failed=retry_failed,
+                    )
+            except Exception:  # pragma: no cover — surfaced via OperationRun
+                log.exception("library index run failed")
+            finally:
+                _import_state["thread"] = None
+
+        thread = threading.Thread(target=work, name="siteloom-import", daemon=True)
+        _import_state["thread"] = thread
+        thread.start()
+        return None
 
     def _import_ctx(step: str, **kw) -> dict:
         roots = list(config.library.import_roots)
@@ -949,109 +1119,57 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
         one batch-driven job whose progress lands in OperationRun, which
         is what /jobs already renders. Nothing here re-implements a
         progress bar the platform owns.
-
-        Which pass runs is decided by the source kind, not by this
-        endpoint's caller. A Takeout source gets TakeoutImporter: sidecar
-        people tags, face detection, two-pass name proposals. Anything
-        else gets the ordinary indexer. Choosing "Google Takeout" in step
-        1 and then running a plain directory index — which is what this
-        did before CLD-92 — succeeds silently and proposes nothing.
         """
-        thread = _import_state["thread"]
-        if thread is not None and thread.is_alive():
-            return templates.TemplateResponse(
-                request,
-                "import.html",
-                _import_ctx("scan", error="An index run is already going."),
-                status_code=409,
+        refusal = _start_index_run(
+            source_id,
+            identify=identify == "1",
+            auto_verify=auto_verify == "1",
+        )
+        if refusal:
+            # To /jobs, where the run that refused this one is visible,
+            # rather than back to step 2: that step renders the scan
+            # result it was reached with, which this request no longer
+            # has — it raised UndefinedError instead of saying anything.
+            # The notice is the same channel cancel and reap answer on.
+            return RedirectResponse(
+                "/jobs?" + urlencode({"notice": refusal}), status_code=303
             )
-        with Session() as session:
-            source = session.get(LibrarySource, source_id)
-            if source is None:
-                raise HTTPException(404)
-            source_name = source.name
-            source_path = source.path
-            source_kind = source.kind
-
-        wants_identify = identify == "1"
-        wants_auto_verify = auto_verify == "1"
-
-        if config.identity.enabled:
-            # Resolved here rather than inside the worker, for the reason
-            # /train/enroll gives: embedded Qdrant allows one client per
-            # path per machine, so a backfill or live ingest holding it
-            # is ordinary — and a 503 naming it beats a job that starts,
-            # dies in a thread, and leaves the operator watching /jobs
-            # for a run that never appears. The store is process-wide, so
-            # the indexer built below reuses this one.
-            from siteloom.web.identity_ops import shared_store
-
-            shared_store(config, "index run")
-
-        def work():
-            from siteloom.progress import ProgressReporter
-
-            try:
-                indexer = _build_indexer()
-                if source_kind == "takeout":
-                    from siteloom.library.takeout import TakeoutImporter
-
-                    # The resume command has to carry the auto-verify
-                    # choice. Dropping a flag on resume is exactly the
-                    # bug _resume_command was written for, and this is
-                    # the flag whose loss writes unreviewed rows that
-                    # training/dataset.py reads as ground truth.
-                    flag = "" if wants_auto_verify else " --no-auto-verify"
-                    with ProgressReporter(
-                        Session,
-                        "takeout-import",
-                        target=source_path,
-                        bar=False,
-                        resume_command=(
-                            f"siteloom takeout import {source_path}{flag}"
-                        ),
-                    ) as progress:
-                        TakeoutImporter(
-                            indexer,
-                            auto_verify_unambiguous=wants_auto_verify,
-                            progress=progress,
-                        ).import_tree(
-                            source_path,
-                            name=source_name,
-                            batch_size=config.library.batch_size,
-                        )
-                    return
-
-                with ProgressReporter(
-                    Session,
-                    "library-index",
-                    target=source_name,
-                    bar=False,
-                    resume_command=(
-                        f"siteloom library index --source {source_id} --all"
-                    ),
-                ) as progress:
-                    indexer.process(
-                        source_id=source_id,
-                        # Same sentinel `library index --all` uses: process
-                        # is batch-committed and interruptible internally,
-                        # so "everything pending" is a limit, not a
-                        # single transaction.
-                        limit=10**9,
-                        identify=wants_identify,
-                        progress=progress,
-                    )
-            except Exception:  # pragma: no cover — surfaced via OperationRun
-                log.exception("library import indexing failed")
-            finally:
-                _import_state["thread"] = None
-
-        thread = threading.Thread(target=work, name="siteloom-import", daemon=True)
-        _import_state["thread"] = thread
-        thread.start()
         return RedirectResponse(
             f"/library/import/done?source_id={source_id}", status_code=303
         )
+
+    @app.post("/library/index")
+    def library_start_index(
+        source_id: int = Form(...),
+        retry_failed: str = Form("0"),
+    ):
+        """Start indexing from the library's own banner (CLD-126).
+
+        The wizard is where an archive is registered; this is for the
+        library an operator is already looking at, whose items are
+        registered and blank. Same job, same guard, same OperationRun —
+        so it lands on /jobs, which is where a long run is watched.
+
+        `identify` is not offered as a choice here. `library.identify_on_index`
+        is the site's answer to that question and the CLI already reads
+        it; a second, differently-defaulted switch on a banner would make
+        two runs of "the same" pass behave differently.
+
+        A refusal lands on /jobs too, carrying its reason as a notice.
+        This is a form a person clicked, so the answer has to be a page —
+        and the operator's next question ("then what *is* running?") is
+        answered by where they land.
+        """
+        refusal = _start_index_run(
+            source_id,
+            identify=config.library.identify_on_index,
+            retry_failed=retry_failed == "1",
+        )
+        if refusal:
+            return RedirectResponse(
+                "/jobs?" + urlencode({"notice": refusal}), status_code=303
+            )
+        return RedirectResponse("/jobs", status_code=303)
 
     @app.get("/library/import/done")
     def import_done(request: Request, source_id: int):
@@ -1200,6 +1318,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 ).all()
             )
             source_names = {s.id: (s.name or s.path) for s in sources}
+            backlog = index_backlog(session, source_id)
         return templates.TemplateResponse(
             request,
             "library.html",
@@ -1207,6 +1326,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 items=items,
                 sources=sources,
                 counts=counts,
+                backlog=backlog,
                 matched=matched,
                 total=sum(counts.values()),
                 source_names=source_names,
