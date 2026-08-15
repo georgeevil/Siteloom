@@ -239,6 +239,50 @@ identity:
     assert idents["face"].min_margin == 0.0
 
 
+def test_naming_vehicle_keeps_its_plate_settings(tmp_path):
+    """The CLD-125 overlay covers the plate fields too: tuning the
+    vehicle threshold must not silently turn plate OCR off or un-ration
+    the CLD-130 cadence cap."""
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    vehicle:
+      algo: generic
+      applies_to: [car, truck]
+      threshold: 0.9
+""",
+        tmp_path,
+    )
+    vehicle = idents["vehicle"]
+    assert vehicle.threshold == 0.9
+    assert vehicle.plate_ocr is True
+    assert vehicle.plate_ocr_interval_s == 1.0
+
+
+def test_per_camera_plate_floors_load_from_yaml(tmp_path):
+    """The CLD-128 shape, straight from the issue: a camera says what its
+    pixels can carry, everything unstated inherits the identifier."""
+    path = tmp_path / "site.yaml"
+    path.write_text(
+        """
+site_id: s
+cameras:
+  - id: backyard-puerta
+    adapter: file
+    source: x
+    identity:
+      plate_floors: {min_width_px: 30, min_char_confidence: 0.85}
+"""
+    )
+    config = load_config(path)
+    floors = config.identity.plate_floors_for("vehicle", config.cameras[0])
+    assert floors.min_width_px == 30
+    assert floors.min_char_confidence == 0.85
+    assert floors.min_chars == 4
+
+
 def test_omitting_an_identifier_still_removes_it(tmp_path):
     """Merging is per named key. Wholesale replacement got one thing
     right — a config that lists only `face` runs only `face` — and that
