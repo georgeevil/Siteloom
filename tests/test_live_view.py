@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from siteloom.config import CameraConfig, SiteConfig, StorageConfig
 from siteloom.web.app import create_app
-from siteloom.web.live import LiveHub
+from siteloom.web.live import HubStopped, LiveHub
 
 
 @pytest.fixture
@@ -159,3 +159,94 @@ def test_live_routes(config):
 
         assert client.get("/live/nope/stream.mjpeg").status_code == 404
         assert client.get("/live/filecam/snapshot.jpg").status_code == 404
+
+
+# --- releasing viewers on shutdown (CLD-132) --------------------------------
+
+
+class _SilentFeed:
+    """Alive, and never produces a frame — a stalled camera or a reader
+    between reconnects. Real Condition, so `frames()` really parks in it."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.seq = 0
+        self.frame = None
+        self.clients = 0
+        self.last_client = 0.0
+        self.stopping = threading.Event()
+
+    def is_alive(self):
+        return True
+
+    def join(self, timeout=None):
+        pass
+
+
+def _drain(gen):
+    """Consume a frames() generator on a thread; the event fires when it
+    *returns*, which is the whole property under test."""
+    done = threading.Event()
+
+    def run():
+        for _ in gen:
+            pass
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    return done
+
+
+def test_stop_releases_a_viewer_parked_on_a_silent_feed(config, monkeypatch):
+    """A live-but-silent feed traps `frames()` in a loop that yields
+    nothing and returns nothing (CLD-132).
+
+    That is not merely a stuck response. Starlette drives a sync generator
+    from an anyio worker thread and those threads are *not* daemons, so a
+    `next()` that never returns is an interpreter that cannot exit — the
+    process survives Ctrl-C, SIGTERM and uvicorn's force-quit alike. The
+    only thing that can end it is the generator noticing, so `stop()` has
+    to reach a viewer that is producing no frames at all.
+    """
+    hub = LiveHub(config)
+    feed = _SilentFeed()
+    hub._feeds["cam1"] = feed
+    monkeypatch.setattr(hub, "_ensure", lambda camera_id: feed)
+
+    done = _drain(hub.frames("cam1"))
+    assert not done.wait(0.5)  # parked: nothing to yield, nothing wrong
+    # And it is visible as such, because "Waiting for connections to
+    # close" names no connection.
+    assert hub.viewers() == {"cam1": 1}
+
+    hub.stop()
+    assert done.wait(5), "frames() never returned — the process could not exit"
+
+
+def test_a_viewer_does_not_resurrect_a_stopped_feed(config, monkeypatch):
+    """`stop()` joins the readers it stopped. A viewer that woke to a dead
+    feed used to call `_ensure` and start a fresh one — after the join had
+    already gone past, so the hub came back up inside its own shutdown.
+    """
+    hub = LiveHub(config)
+    feed = _SilentFeed()
+    hub._feeds["cam1"] = feed
+    built = []
+
+    def counting_ensure(camera_id):
+        built.append(camera_id)
+        return feed
+
+    monkeypatch.setattr(hub, "_ensure", counting_ensure)
+    done = _drain(hub.frames("cam1"))
+    assert done.wait(0.5) is False
+    hub.stop()
+    assert done.wait(5)
+    assert built == ["cam1"]  # the one at the top of frames(), and no rebuild
+
+
+def test_a_stopped_hub_refuses_to_start_a_reader(config):
+    hub = LiveHub(config)
+    hub.stop()
+    with pytest.raises(HubStopped):
+        next(hub.frames("cam1"))

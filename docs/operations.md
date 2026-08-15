@@ -236,6 +236,26 @@ Give a job **at least a batch's worth of time** to stop. Batch size is
 for Takeout imports, so a 30-second stop timeout is usually generous and a
 5-second one is not.
 
+### If `serve` sits on "Waiting for connections to close"
+
+That is uvicorn's message, and the connections it means are almost always
+**live-view streams**: `/live` holds one open MJPEG response per visible tile,
+for as long as the tab is open. They are responses that never end on their own,
+so `serve` ends them itself the moment a stop is asked for, and says which:
+
+```
+closing 2 live-view stream(s) (backyard-puerta×1, front-yard×1)
+```
+
+If you see the wait linger anyway, note two things before reaching for
+`kill -9`. Pressing Ctrl-C again does **not** force a quit despite what the
+message says — uvicorn checks its force flag in the wait loops and then blocks
+in `wait_closed()`, which on Python 3.12+ waits for the same connections
+(CLD-132). And the wait is bounded regardless: `serve` sets uvicorn's graceful
+deadline to `service.stop_timeout_s` less five seconds, so with the default 30
+it gives up after 25 and still records the run. Closing the `/live` tab ends the
+wait immediately.
+
 ## Running as a service
 
 ```bash

@@ -132,6 +132,10 @@ def _has_new_frame(feed: _Feed, seen: int) -> Callable[[], bool]:
     return lambda: feed.seq != seen
 
 
+class HubStopped(RuntimeError):
+    """Raised instead of starting a reader once the hub is going down."""
+
+
 class LiveHub:
     def __init__(self, config: SiteConfig):
         self.config = config
@@ -139,6 +143,11 @@ class LiveHub:
         self._lock = threading.Lock()
         self._urls: dict[str, str] = {}
         self._resolve_lock = threading.Lock()
+        #: Set once, by `stop()`, and never cleared: a hub that has been
+        #: released belongs to a process that is exiting. `frames()` and
+        #: `snapshot()` both watch it, which is the only thing that can
+        #: end an MJPEG response — see the note on `frames`.
+        self._shutdown = threading.Event()
 
     def cameras(self) -> list[CameraConfig]:
         """Cameras with a live stream to show (files have none)."""
@@ -186,6 +195,11 @@ class LiveHub:
         cam = next((c for c in self.cameras() if c.id == camera_id), None)
         if cam is None:
             raise KeyError(f"no live camera {camera_id!r}")
+        if self._shutdown.is_set():
+            # `stop()` joins the readers it stopped; a viewer that lost the
+            # race and rebuilt one here would resurrect the thread we are
+            # shutting down, after the join had already passed it.
+            raise HubStopped("live hub is shutting down")
         with self._lock:
             feed = self._feeds.get(camera_id)
             if feed is None or not feed.is_alive():
@@ -200,12 +214,38 @@ class LiveHub:
                 del self._feeds[camera_id]
 
     def stop(self) -> None:
+        """Stop every reader **and release every viewer**.
+
+        The flag is set first, before a single feed is touched: `frames()`
+        reads it, so a viewer whose feed dies underneath it returns
+        instead of rebuilding the reader this call is trying to stop.
+
+        Each feed is then notified as well as stopped. Without that, a
+        viewer parked in `cond.wait_for(..., timeout=2.0)` notices on its
+        next timeout; with it, shutdown is immediate — which is the
+        difference between a Ctrl-C that returns the prompt and one that
+        appears to hang.
+        """
+        self._shutdown.set()
         with self._lock:
             feeds = list(self._feeds.values())
         for feed in feeds:
             feed.stopping.set()
+            with feed.cond:
+                feed.cond.notify_all()
         for feed in feeds:
             feed.join(timeout=5)
+
+    def viewers(self) -> dict[str, int]:
+        """Open viewer count per camera — what a shutdown is waiting on.
+
+        uvicorn's "Waiting for connections to close" names no connection,
+        which is unhelpful precisely when it matters. `serve` logs this
+        alongside it so the operator can see that the thing holding the
+        server open is two browser tiles and not the database.
+        """
+        with self._lock:
+            return {cid: f.clients for cid, f in self._feeds.items() if f.clients}
 
     # -- viewers -----------------------------------------------------------
 
@@ -215,13 +255,22 @@ class LiveHub:
         Runs in the serving threadpool for as long as the viewer keeps
         the response open; the finally block is what lets an idle feed
         notice its last viewer left.
+
+        **The `_shutdown` checks are load-bearing, not defensive** (CLD-132).
+        This loop only *yields* when a new frame arrives, so a feed that is
+        alive but silent — a stalled camera, a reader between reconnects —
+        spins here without ever returning from `next()`. Starlette drives a
+        sync generator from an anyio worker thread, and those threads are
+        not daemons: a generator that never returns is an interpreter that
+        cannot exit, no matter how the shutdown was asked for. Checking a
+        flag every ≤2 s is what bounds that.
         """
         feed = self._ensure(camera_id)
         with feed.cond:
             feed.clients += 1
         try:
             seen = 0
-            while True:
+            while not self._shutdown.is_set():
                 with feed.cond:
                     feed.cond.wait_for(_has_new_frame(feed, seen), timeout=2.0)
                     frame, seq = feed.frame, feed.seq
@@ -230,8 +279,9 @@ class LiveHub:
                     seen = seq
                     yield frame
                 elif not alive:
-                    # Lost a race with idle-stop or hub shutdown; rebuild
-                    # (or bail out if the hub is going down for good).
+                    if self._shutdown.is_set():
+                        return  # going down for good — do not rebuild
+                    # Lost a race with idle-stop; rebuild onto a fresh feed.
                     with feed.cond:
                         feed.clients -= 1
                         feed.last_client = time.monotonic()
@@ -251,7 +301,7 @@ class LiveHub:
         with feed.cond:
             feed.clients += 1
         try:
-            while time.monotonic() < deadline:
+            while time.monotonic() < deadline and not self._shutdown.is_set():
                 with feed.cond:
                     if feed.frame is not None:
                         return feed.frame

@@ -43,6 +43,20 @@ log = logging.getLogger(__name__)
 #: looking healthy forever.
 SERVE_HEARTBEAT_S = 5.0
 
+#: How often `should_exit` is checked. Separate from the heartbeat
+#: because they answer different questions: the row can go five seconds
+#: stale without anyone minding, but the live-view streams have to be
+#: released the moment a stop is asked for, or uvicorn is already parked
+#: in "Waiting for connections to close" by the time we notice.
+SHUTDOWN_POLL_S = 0.2
+
+#: Subtracted from `service.stop_timeout_s` to size uvicorn's graceful
+#: shutdown deadline. The supervisor SIGKILLs at `stop_timeout_s`; the
+#: reporter still has to record the row and print the resume command
+#: after uvicorn returns, so the graceful wait must end before then or a
+#: clean `systemctl stop` dies mid-write and reads as abandoned.
+GRACEFUL_HEADROOM_S = 5
+
 
 def serve_supervised(
     config: Any,
@@ -69,7 +83,13 @@ def serve_supervised(
         from siteloom.web.app import create_app
 
         app = create_app(config)
-    server = _build_server(app, host=host, port=port, log_level=log_level)
+    server = _build_server(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+        graceful_s=max(1, getattr(config.service, "stop_timeout_s", 30) - GRACEFUL_HEADROOM_S),
+    )
     if run_server is None:
         run_server = _run
     log.info(
@@ -89,7 +109,7 @@ def serve_supervised(
             stop = threading.Event()
             beat = threading.Thread(
                 target=_heartbeat_loop,
-                args=(progress, server, stop),
+                args=(progress, server, stop, app),
                 name="siteloom-serve-heartbeat",
                 daemon=True,
             )
@@ -155,27 +175,74 @@ def _record_stop_intent(progress: Any) -> Iterator[None]:
             signal.signal(signum, handler)
 
 
-def _build_server(app: Any, *, host: str, port: int, log_level: str) -> Any:
+def _build_server(
+    app: Any, *, host: str, port: int, log_level: str, graceful_s: int
+) -> Any:
     """A uvicorn Server, not `uvicorn.run`.
 
     `uvicorn.run` builds and runs in one call, which leaves nothing to
     hold — and `should_exit` on the server object is the only way a
     cancel arriving from another terminal can end this process without a
     signal.
+
+    `timeout_graceful_shutdown` is set rather than left at uvicorn's
+    default of None, which means *no deadline at all* (CLD-132). The
+    default is only safe for a server whose responses end by themselves,
+    and `/live/{camera}/stream.mjpeg` is a response that by design never
+    does: one open tile made Ctrl-C hang forever. Repeated Ctrl-C is not
+    the escape hatch it advertises either — uvicorn honours `force_exit`
+    in both of its wait loops and then falls into an unguarded
+    `await server.wait_closed()`, which since Python 3.12 waits for those
+    same connections. This timeout wraps the whole of that, so it is the
+    only bound that actually holds.
     """
     import uvicorn
 
     return uvicorn.Server(
-        uvicorn.Config(app, host=host, port=port, log_level=log_level.lower())
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level=log_level.lower(),
+            timeout_graceful_shutdown=graceful_s,
+        )
     )
+
+
+def _release_streams(app: Any) -> None:
+    """End the responses that have no end of their own.
+
+    Called the moment `should_exit` is observed, which is the whole
+    point: by the time the lifespan shutdown runs, uvicorn has already
+    been waiting on these connections for the full graceful timeout.
+    Logging what is being released answers the operator's fair question
+    about uvicorn's "Waiting for connections to close" — *which*
+    connections — that the message itself never does.
+    """
+    hub = getattr(getattr(app, "state", None), "live_hub", None)
+    if hub is None:
+        return
+    try:
+        watching = hub.viewers()
+        if watching:
+            log.info(
+                "closing %d live-view stream(s) (%s)",
+                sum(watching.values()),
+                ", ".join(f"{cam}×{n}" for cam, n in sorted(watching.items())),
+            )
+        hub.stop()
+    except Exception as exc:  # a stuck stream must not also break the stop
+        log.warning("releasing live-view streams failed: %s", exc)
 
 
 def _run(server: Any) -> None:
     server.run()
 
 
-def _heartbeat_loop(progress: Any, server: Any, stop: threading.Event) -> None:
-    """Keep the row warm, and relay a cancel into uvicorn's shutdown.
+def _heartbeat_loop(
+    progress: Any, server: Any, stop: threading.Event, app: Any = None
+) -> None:
+    """Keep the row warm, relay a cancel, and release the endless responses.
 
     `siteloom jobs cancel` on a `serve` row calls `request_stop`, which
     sets the same flag a first Ctrl-C would. Nothing else is watching it
@@ -183,15 +250,31 @@ def _heartbeat_loop(progress: Any, server: Any, stop: threading.Event) -> None:
     otherwise `cancel` would report success against a server that keeps
     serving, which is the failure mode `test_jobs_control.py` exists to
     prevent.
+
+    It is also the only thing in the process watching `should_exit` at a
+    useful cadence, which is why releasing the live-view streams belongs
+    here rather than in a lifespan hook (CLD-132): the hook runs after
+    uvicorn has finished waiting for those exact connections.
+
+    The loop therefore ticks at `SHUTDOWN_POLL_S` and heartbeats on the
+    slower `SERVE_HEARTBEAT_S` schedule — a five-second-stale row bothers
+    nobody, five seconds of an unnecessary shutdown wait does.
     """
+    import time
+
     from siteloom.service import notify
 
     announced = False
-    while not stop.wait(SERVE_HEARTBEAT_S):
-        try:
-            progress.heartbeat()
-        except Exception as exc:  # never let telemetry take the server down
-            log.debug("serve heartbeat failed: %s", exc)
+    released = False
+    interval = min(SHUTDOWN_POLL_S, SERVE_HEARTBEAT_S)
+    last_beat = time.monotonic()
+    while not stop.wait(interval):
+        if time.monotonic() - last_beat >= SERVE_HEARTBEAT_S:
+            last_beat = time.monotonic()
+            try:
+                progress.heartbeat()
+            except Exception as exc:  # never let telemetry take the server down
+                log.debug("serve heartbeat failed: %s", exc)
         # READY=1 only once the sockets are actually bound. Under
         # Type=notify this is what `systemctl start` is waiting on, so
         # sending it early would be a lie with consequences; under
@@ -203,3 +286,6 @@ def _heartbeat_loop(progress: Any, server: Any, stop: threading.Event) -> None:
             log.info("stop requested — shutting the server down")
             notify.stopping()
             server.should_exit = True
+        if not released and getattr(server, "should_exit", False):
+            released = True
+            _release_streams(app)

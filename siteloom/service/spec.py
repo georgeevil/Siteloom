@@ -26,6 +26,10 @@ UNITS = ("serve", "run", "frigate")
 #: batches; `serve` only has to close connections. docs/operations.md
 #: makes the same argument in prose: a batch's worth of time, so 30 s is
 #: generous for a request and 5 s is not enough for an index batch.
+#: "Only has to close connections" is not free, though — `serve` sizes
+#: uvicorn's graceful-shutdown deadline off this value (`serve.py`), so
+#: lowering it shortens the window a `/live` stream has to be released
+#: in, and the two must stay ordered: graceful deadline < SIGKILL.
 STOP_TIMEOUT_FLOOR_S = {"serve": 0, "run": 60, "frigate": 60}
 
 #: 128 + SIGINT. Every interruptible command exits this when it was

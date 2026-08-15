@@ -280,6 +280,134 @@ def test_cancel_from_another_terminal_stops_the_server(config, Session, monkeypa
     assert row.status == "interrupted"
 
 
+# --- ending the responses that have no end (CLD-132) ------------------------
+
+
+class DrainingServer(FakeServer):
+    """uvicorn between `should_exit` and the end of `run()`.
+
+    That window — "Waiting for connections to close" — is the whole point:
+    it is where the live-view streams have to be released, because it is
+    where uvicorn is blocked *on those streams*. FakeServer returns from
+    run() the instant should_exit flips, which is the one thing real
+    uvicorn does not do.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.draining = threading.Event()
+
+    def run(self):
+        self.ran = True
+        self.started = True
+        self.running.set()
+        while not self.should_exit:
+            self.draining.wait(0.01)
+        self.draining.wait(10)
+
+
+class _FakeHub:
+    def __init__(self):
+        self.stopped = threading.Event()
+
+    def viewers(self):
+        return {"cam1": 2}
+
+    def stop(self):
+        self.stopped.set()
+
+
+class _FakeApp:
+    def __init__(self, hub):
+        self.state = type("state", (), {"live_hub": hub})()
+
+
+def test_live_streams_are_released_while_uvicorn_is_still_waiting(
+    config, Session, monkeypatch
+):
+    """`app.router.on_shutdown` cannot do this job (CLD-132).
+
+    uvicorn's shutdown waits for open connections *first* and runs the
+    lifespan shutdown afterwards, so a hook registered there fires only
+    once every stream has already ended — and an MJPEG response is one
+    that never ends on its own. One open `/live` tile was enough to make
+    Ctrl-C hang forever. So the release has to happen off `should_exit`,
+    from the one thread in this process that watches it.
+    """
+    hub = _FakeHub()
+    server = DrainingServer()
+    _server_factory(server, monkeypatch)
+    monkeypatch.setattr(serve_mod, "SHUTDOWN_POLL_S", 0.02)
+
+    thread = threading.Thread(
+        target=lambda: serve_mod.serve_supervised(
+            config,
+            host="127.0.0.1",
+            port=8000,
+            app=_FakeApp(hub),
+            run_server=lambda s: server.run(),
+            session_factory=Session,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    assert server.running.wait(5)
+
+    # What uvicorn's own SIGINT handler does, and nothing else.
+    server.should_exit = True
+    assert hub.stopped.wait(5), "streams still open while uvicorn waits on them"
+
+    server.draining.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_a_missing_hub_is_not_an_error(config, Session, monkeypatch):
+    """Not every host of this app has a live hub (tests, embedders), and a
+    shutdown is the worst moment to raise."""
+    server = FakeServer()
+    _server_factory(server, monkeypatch)
+    serve_mod._release_streams(object())
+    serve_mod._release_streams(None)
+
+
+def test_the_graceful_wait_is_bounded_and_beats_the_supervisor(
+    config, Session, monkeypatch
+):
+    """uvicorn's `timeout_graceful_shutdown` defaults to None — no
+    deadline at all — which is only safe if every response ends by
+    itself. It must also land *under* the supervisor's SIGKILL deadline
+    (`service.stop_timeout_s`), because the reporter still has to record
+    the row after uvicorn returns; a stop killed mid-write reads as
+    abandoned rather than interrupted.
+    """
+    seen = {}
+    server = FakeServer()
+
+    def build(app, **kw):
+        seen.update(kw)
+        return server
+
+    monkeypatch.setattr(serve_mod, "_build_server", build)
+    config.service.stop_timeout_s = 30
+    _serve(config, Session, server)
+
+    assert seen["graceful_s"] == 30 - serve_mod.GRACEFUL_HEADROOM_S
+    assert seen["graceful_s"] < config.service.stop_timeout_s
+
+
+def test_the_deadline_reaches_uvicorn(config):
+    """The derivation above is worthless if it stops at our own boundary."""
+
+    async def app(scope, receive, send):  # pragma: no cover - never called
+        pass
+
+    server = serve_mod._build_server(
+        app, host="127.0.0.1", port=8000, log_level="info", graceful_s=7
+    )
+    assert server.config.timeout_graceful_shutdown == 7
+
+
 def test_signals_false_keeps_the_row_and_the_registry(Session):
     """`signals=False` is a third switch, not a shade of `bar` or
     `enabled`: it gives up signal ownership and nothing else."""
