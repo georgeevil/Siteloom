@@ -480,6 +480,47 @@ def test_an_interrupted_rebuild_holding_duplicates_completes_and_repairs(tmp_pat
     assert _index(engine) is not None
 
 
+def test_an_index_whose_column_is_missing_is_skipped_not_fatal(tmp_path):
+    """Creating the declared indexes is a new startup step, and it must
+    not be the step that stops a degraded database from booting.
+
+    `_ensure_columns` declines a NOT NULL column with no default ("needs
+    a real migration") and leaves the database working-but-degraded. A
+    `CREATE INDEX` naming that absent column fails outright, which would
+    take `serve` and `run` down entirely — the same reason `doctor`'s
+    missing-column checks WARN rather than FAIL: never block the boot
+    that would heal it.
+    """
+    db = tmp_path / "degraded.db"
+    con = sqlite3.connect(db)
+    # `identities` as it would be if class_name (NOT NULL, no default,
+    # indexed) had never been added.
+    con.execute(
+        """CREATE TABLE identities (
+             id INTEGER PRIMARY KEY,
+             identifier_key VARCHAR NOT NULL,
+             label VARCHAR,
+             plate VARCHAR,
+             first_seen DATETIME,
+             last_seen DATETIME,
+             appearance_count INTEGER,
+             vector_count INTEGER,
+             best_crop_path VARCHAR)"""
+    )
+    con.commit()
+    con.close()
+
+    engine = make_engine(f"sqlite:///{db}")
+    init_db(engine)  # must not raise
+
+    inspector = inspect(engine)
+    names = {i["name"] for i in inspector.get_indexes("identities")}
+    assert "ix_identities_class_name" not in names  # skipped, not attempted
+    assert "ix_identities_label" in names  # the rest still arrive
+    # ... and the pass carried on to the table this issue is about.
+    assert _index(engine) is not None
+
+
 # -- 8-10. what the index does and does not forbid -------------------------
 
 
