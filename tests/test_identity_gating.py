@@ -30,7 +30,7 @@ from __future__ import annotations
 import pytest
 
 from siteloom.config import IdentityConfig
-from siteloom.identity.resolver import IdentityResolver
+from siteloom.identity.resolver import _EVENT_BUDGET_MEMORY, IdentityResolver
 from siteloom.identity.vectors import VectorStore
 from siteloom.store import EventIdentity, Identity, get_session, init_db, make_engine
 
@@ -276,7 +276,11 @@ def test_a_mint_from_quarantine_cannot_found_a_gallery_from_one_visit(
 
     minted = _resolve(resolver, session, QUERY, **kw)
     assert minted.is_new
-    assert minted.identity.vector_count <= 3
+    # Exactly the cap: five sightings were waiting and three were kept.
+    # "At most" would also be satisfied by a promotion loop that stored
+    # nothing, which is the opposite failure — an identity founded with
+    # an empty gallery is invisible to matching.
+    assert minted.identity.vector_count == 3
     # Every sighting still counts as an appearance — they happened.
     assert minted.identity.appearance_count == 6
 
@@ -284,6 +288,38 @@ def test_a_mint_from_quarantine_cannot_found_a_gallery_from_one_visit(
     for _ in range(3):
         _resolve(resolver, session, QUERY, **kw)
     assert minted.identity.vector_count == stored  # the visit's budget is spent
+
+
+def test_the_budget_memory_is_bounded_and_forgets_conservatively(vectors, session):
+    """The budgets live in memory, so the dict that holds them has to be
+    bounded — a process running for weeks would otherwise keep one entry
+    per (event, identity) it ever saw.
+
+    Eviction is oldest-first because that is the entry least likely to
+    matter: an event that far back receives no further frames. What it
+    costs when the guess is wrong is exactly one more budget — a visit
+    seen again after its counter was dropped starts a fresh one rather
+    than an unlimited one, and `max_vectors_per_identity` still caps the
+    total. That is the same conservative degradation a restart produces.
+    """
+    resolver = _resolver(vectors, learn_max_per_event=3)
+    identity = _mint(resolver, session, QUERY)
+    founding = identity.vector_count
+
+    for _ in range(6):
+        _resolve(resolver, session, QUERY, quality=0.9, event_id=71)
+    assert identity.vector_count - founding == 3  # this visit is spent
+
+    # Enough other visits go by to push it out of the window.
+    for event_id in range(1000, 1000 + _EVENT_BUDGET_MEMORY):
+        resolver._note_learned("person", event_id, identity.id)
+    assert len(resolver._event_learned) == _EVENT_BUDGET_MEMORY  # bounded
+    assert ("person", 71, identity.id) not in resolver._event_learned  # oldest out
+
+    for _ in range(6):
+        _resolve(resolver, session, QUERY, quality=0.9, event_id=71)
+    assert identity.vector_count - founding == 6  # one fresh budget, not six
+    assert len(resolver._event_learned) == _EVENT_BUDGET_MEMORY
 
 
 # -- 9. a verdict stops further learning ----------------------------------
