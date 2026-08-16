@@ -432,6 +432,10 @@ class IngestService:
                 max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
                 camera_id=cam.id,
                 quality=det["confidence"],
+                # Names the visit this frame belongs to, which is what
+                # bounds per-event learning and what makes a `wrong`
+                # verdict stop further accretion mid-event (CLD-139).
+                event_id=event.id,
             )
             if resolution.identity is None:
                 # Quarantined (awaiting consistent sightings) or ambiguous

@@ -293,6 +293,7 @@ class FrigateConsumer:
                 # Frigate serves its best snapshot for the event; its own
                 # score is the closest thing to detection quality here.
                 quality=event.best_confidence or None,
+                event_id=event.id,
             )
             if resolution.identity is None:
                 # Quarantined or ambiguous (CLD-41) — no link, no publish.

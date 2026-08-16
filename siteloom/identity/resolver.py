@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from siteloom.config import IdentifierConfig, IdentityConfig
 from siteloom.identity.vectors import VectorStore
-from siteloom.store.models import Identity
+from siteloom.store.models import EventIdentity, Identity
 
 
 def _pending_collection(identifier_key: str) -> str:
@@ -250,6 +250,17 @@ class IdentityResolver:
         which is also what keeps the DB read at the end rare: once an
         event's budget is spent, every later frame of that visit is
         refused before the query.
+
+        The verdict gate is the one that reads the database. A `wrong`
+        verdict does not *edit* the gallery — that stays the rule
+        (`app.py`: a verdict must not touch the vector store, and
+        removing what an event already taught is unlink/reassign's job
+        via `delete_by_crops`) — it stops adding to it, which is a
+        different act and belongs to the writer rather than the judge.
+        The operator's verdict is committed by the web process, so ingest
+        sees it at its next transaction boundary: the gate is best-effort
+        within one commit batch, which is the right granularity for a
+        per-frame decision.
         """
         if identity.vector_count >= max_vectors:
             return False
@@ -281,7 +292,28 @@ class IdentityResolver:
             >= ident_cfg.learn_max_per_event
         ):
             return False
+        if event_id is not None and self._repudiated(session, event_id, identity.id):
+            return False
         return True
+
+    def _repudiated(self, session: Session, event_id: int, identity_id: int) -> bool:
+        """Has an operator called this (event, identity) claim wrong?
+
+        Unlinked rows count, deliberately. After CLD-36 a later frame
+        never revives an unlinked claim — it makes a fresh row — so
+        keying on the active claim alone would miss the strongest
+        repudiation there is: wrong, and detached.
+        """
+        return (
+            session.query(EventIdentity.id)
+            .filter(
+                EventIdentity.event_id == event_id,
+                EventIdentity.identity_id == identity_id,
+                EventIdentity.verdict == "wrong",
+            )
+            .first()
+            is not None
+        )
 
     def _promotion_cap(
         self, ident_cfg: IdentifierConfig | None, max_vectors: int
