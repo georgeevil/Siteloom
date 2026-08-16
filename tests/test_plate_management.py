@@ -542,6 +542,84 @@ def test_applying_declines_when_the_event_cannot_say_whose_plate_it_is(plate_env
     assert _identity(plate_env, plate_env.ids.neighbour).plate is None
 
 
+def test_applying_declines_a_plate_another_identity_already_holds(plate_env):
+    """The apply path goes through the same duplicate check as the edit
+    field, and deliberately without `confirm`: the button carries no way
+    to say "yes, both vehicles really do wear this plate", so it must
+    refuse rather than decide.
+
+    This is the conflict the button would otherwise create silently, and
+    the one a refactor "making the button always work" would reintroduce
+    while every other test kept passing.
+    """
+    with plate_env.Session() as session:
+        session.get(Identity, plate_env.ids.neighbour).plate = TRUTH
+        session.commit()
+
+    refused = _apply(plate_env, plate_env.ids.reads.confirmed)
+
+    assert refused.status_code == 409
+    assert TRUTH in refused.json()["detail"]
+    # Nothing written on either side, and the read is still there to
+    # apply from the identity page, which can take a confirmation.
+    assert _identity(plate_env, plate_env.ids.junk).plate == JUNK
+    assert _identity(plate_env, plate_env.ids.neighbour).plate == TRUTH
+
+
+def test_a_merge_carries_the_lock_onto_the_survivor(plate_env):
+    """CLD-134's failure through a different door.
+
+    Merging folds the source's plate into the target — but a *cleared*
+    source has no plate to carry, only the operator's decision that it
+    should not have one. Dropping `plate_source` on the way loses exactly
+    that, and the survivor inherits the source's vectors, so the very next
+    sighting re-learns the junk plate onto the merged identity and the
+    correction is undone by an unrelated action.
+    """
+    assert _post_plate(plate_env, plate_env.ids.junk, plate="").status_code == 303
+    vectors = get_shared_store(plate_env.config.identity.vector_db_path)
+    vectors.add("vehicle", VEHICLE_VECTOR, plate_env.ids.junk)
+
+    r = plate_env.client.post(
+        f"/identities/{plate_env.ids.junk}/merge",
+        data={"target_id": plate_env.ids.neighbour},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    survivor = _identity(plate_env, plate_env.ids.neighbour)
+    assert survivor.plate is None
+    assert survivor.plate_source == PLATE_SOURCE_OPERATOR  # the lock moved
+
+    # And it still means what it meant: the source's gallery came across,
+    # so this sighting matches the survivor and must not teach it the
+    # plate an operator had just removed.
+    with plate_env.Session() as session:
+        res = _resolve(plate_env, session, plate=JUNK)
+        session.commit()
+
+    assert res.identity is not None and res.identity.id == plate_env.ids.neighbour
+    assert res.learned_plate is False
+    assert _identity(plate_env, plate_env.ids.neighbour).plate is None
+
+
+def test_a_merge_carries_the_plate_and_its_provenance_together(plate_env):
+    """The ordinary half of the same rule: a plate that moves arrives
+    with the answer to "who said so", rather than reading as unknown
+    provenance on the survivor."""
+    assert _post_plate(plate_env, plate_env.ids.junk, plate=TRUTH).status_code == 303
+
+    plate_env.client.post(
+        f"/identities/{plate_env.ids.junk}/merge",
+        data={"target_id": plate_env.ids.neighbour},
+        follow_redirects=False,
+    )
+
+    survivor = _identity(plate_env, plate_env.ids.neighbour)
+    assert survivor.plate == TRUTH
+    assert survivor.plate_source == PLATE_SOURCE_OPERATOR
+
+
 def test_applying_declines_a_read_nobody_judged(plate_env):
     """The button applies a value an operator stands behind. An unjudged
     read is the OCR's opinion, which is what put `111111` on an identity

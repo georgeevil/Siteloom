@@ -1732,48 +1732,70 @@ def test_an_unjudged_read_is_not_offered_either(tmp_path):
 
 
 def test_the_apply_targets_lookup_does_not_grow_with_the_page(tmp_path):
-    """These lists run to hundreds of reads of one parked car, so the
-    eligibility lookup is one pass over the page's events — a per-row
-    query would make the screen slowest exactly where it is most useful."""
+    """The eligibility lookup is one pass over the page's events, and the
+    page has two ways to get big.
+
+    Hundreds of reads of one parked car is the case the docstring names.
+    But an ordinary `/plates` page is the other shape — forty reads of
+    forty different vehicles — and a lookup that is constant in reads can
+    still be linear in *events*, which is where a per-group identity fetch
+    hides. Both dimensions are measured, because a fixture built only on
+    the first one cannot fail the second way.
+    """
     from sqlalchemy import event as sa_event
 
     from siteloom.store import EventIdentity, Identity
     from siteloom.web.plates_routes import _apply_targets
 
-    client, Session = seeded_client(
-        tmp_path,
-        [
-            {"class_name": "car", "raw_text": f"TYB{i:03d}", "text": f"TYB{i:03d}",
-             "accepted": True, "verdict": "confirmed"}
-            for i in range(50)
-        ],
-    )
+    client, Session = seeded_client(tmp_path, [])
     with Session() as session:
-        event_id = session.query(Event).one().id
-        identity = Identity(
-            identifier_key="vehicle",
-            class_name="car",
-            label="the parked car",
-            first_seen=TS,
-            last_seen=TS,
-        )
-        session.add(identity)
-        session.flush()
-        session.add(
-            EventIdentity(
-                event_id=event_id,
-                identity_id=identity.id,
-                identifier_key="vehicle",
-                similarity=0.9,
+        # 12 events, each its own vehicle, each read twice — so "one
+        # event, many reads" and "many events" are both reachable from
+        # one corpus.
+        for e in range(12):
+            event = Event(
+                camera_id="cam1", class_name="car", first_seen=TS, last_seen=TS
             )
-        )
+            identity = Identity(
+                identifier_key="vehicle",
+                class_name="car",
+                label=f"vehicle {e}",
+                first_seen=TS,
+                last_seen=TS,
+            )
+            session.add_all([event, identity])
+            session.flush()
+            session.add(
+                EventIdentity(
+                    event_id=event.id,
+                    identity_id=identity.id,
+                    identifier_key="vehicle",
+                    similarity=0.9,
+                )
+            )
+            for r in range(2):
+                session.add(
+                    PlateRead(
+                        event_id=event.id,
+                        camera_id="cam1",
+                        class_name="car",
+                        identifier_key="vehicle",
+                        at=TS + timedelta(seconds=e * 10 + r),
+                        raw_text=f"TYB{e:03d}",
+                        text=f"TYB{e:03d}",
+                        accepted=True,
+                        verdict="confirmed",
+                    )
+                )
         session.commit()
 
-    def _cost(limit):
-        # A fresh session each time: a warm identity map would hide a
-        # per-row fetch behind the first call.
+    def _cost(read_ids):
+        """Statements issued by one `_apply_targets` call over these reads."""
+        # A fresh session each time, and the reads loaded before the
+        # listener goes on: a warm identity map would answer a per-group
+        # fetch from memory and hide it.
         with Session() as session:
-            reads = session.query(PlateRead).limit(limit).all()
+            rows = session.query(PlateRead).filter(PlateRead.id.in_(read_ids)).all()
             statements: list[str] = []
 
             def record(conn, cursor, statement, params, context, many):
@@ -1782,12 +1804,22 @@ def test_the_apply_targets_lookup_does_not_grow_with_the_page(tmp_path):
             bind = session.get_bind()
             sa_event.listen(bind, "before_cursor_execute", record)
             try:
-                targets = _apply_targets(session, reads)
+                targets = _apply_targets(session, rows)
             finally:
                 sa_event.remove(bind, "before_cursor_execute", record)
-            assert len(targets) == limit  # every read really was eligible
+            assert len(targets) == len(rows)  # every read really was eligible
             return len(statements)
 
-    one, fifty = _cost(1), _cost(50)
-    assert one == fifty
-    assert fifty <= 2  # the claims, and the identity they point at
+    with Session() as session:
+        by_event: dict[int, list[int]] = {}
+        for read in session.query(PlateRead).order_by(PlateRead.id).all():
+            by_event.setdefault(read.event_id, []).append(read.id)
+    events = list(by_event)
+
+    single = _cost(by_event[events[0]][:1])
+    one_event = _cost(by_event[events[0]])  # same event, more reads
+    many_events = _cost([by_event[e][0] for e in events])  # 12 events
+
+    assert one_event == single  # constant in reads of one vehicle...
+    assert many_events == single  # ... and in the number of vehicles
+    assert single <= 2  # the claims, and the identities they point at
