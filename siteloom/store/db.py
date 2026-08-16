@@ -5,7 +5,8 @@ import logging
 from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from siteloom.store.models import Base
+from siteloom.store.claims import repair_duplicate_claims
+from siteloom.store.models import ACTIVE_CLAIM_INDEX, Base
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,12 @@ def init_db(engine: Engine) -> None:
     # below is a migration, not a repair pass (see its docstring).
     if ("annotations", "verified_by") in added:
         _backfill_verified_by(engine)
+    # Order is load-bearing: the unique index cannot be created while
+    # duplicate active claims exist (the CREATE fails outright), and
+    # unlinked_at must already exist — _ensure_columns above — for the
+    # repair to know which rows are still claims.
+    _repair_duplicate_claims(engine)
+    _ensure_indexes(engine)
 
 
 def _relax_event_identity_nullability(engine: Engine) -> None:
@@ -125,6 +132,11 @@ def _finish_event_identity_rebuild(engine: Engine, inspector) -> None:
         for index in table.indexes:
             conn.execute(text(f'DROP INDEX IF EXISTS "{index.name}"'))
         table.create(conn, checkfirst=True)
+        # create() makes the declared indexes too, including the unique
+        # one — and the rows about to be copied are exactly the ones that
+        # may still hold duplicate active claims, so it would reject the
+        # copy. It is created by _ensure_indexes, after the repair pass.
+        conn.execute(text(f'DROP INDEX IF EXISTS "{ACTIVE_CLAIM_INDEX}"'))
         # INSERT OR IGNORE keys on the primary key, so re-running after a
         # partial copy never duplicates a row.
         conn.execute(
@@ -135,8 +147,12 @@ def _finish_event_identity_rebuild(engine: Engine, inspector) -> None:
         )
         conn.execute(text("DROP TABLE event_identities_old"))
         # Dropping _old also dropped the indexes that had followed the
-        # rename; (re)create the ones the model declares.
+        # rename; (re)create the ones the model declares — except the
+        # unique claim index, for the reason above: the copied rows have
+        # not been through the repair pass yet.
         for index in table.indexes:
+            if index.name == ACTIVE_CLAIM_INDEX:
+                continue
             index.create(conn, checkfirst=True)
 
 
@@ -180,6 +196,71 @@ def _ensure_columns(engine: Engine) -> set[tuple[str, str]]:
                 conn.execute(text(ddl))
                 added.add((table.name, column.name))
     return added
+
+
+def _ensure_indexes(engine: Engine) -> set[str]:
+    """Create indexes the models declare but an existing database lacks.
+
+    The counterpart of `_ensure_columns` for the other half of what
+    create_all() skips: it creates indexes only for the tables it creates,
+    so an index added to a model never reaches a database made before it
+    existed. Returns the names it created.
+    """
+    created: set[str] = set()
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in tables:
+                continue  # create_all made it, indexes and all
+            existing = {i["name"] for i in inspector.get_indexes(table.name)}
+            columns = {c["name"] for c in inspector.get_columns(table.name)}
+            for index in table.indexes:
+                if index.name in existing:
+                    continue
+                missing = {c.name for c in index.columns} - columns
+                if missing:
+                    # _ensure_columns declines a NOT NULL column with no
+                    # default ("needs a real migration"), and CREATE
+                    # INDEX naming a column that is not there fails
+                    # init_db outright — turning a database that booted
+                    # degraded into one that cannot start. Same reason
+                    # doctor's missing-column checks WARN rather than
+                    # FAIL: never block the boot that would heal it.
+                    log.warning(
+                        "skipping index %s: %s.%s missing",
+                        index.name,
+                        table.name,
+                        ", ".join(sorted(missing)),
+                    )
+                    continue
+                log.info("migrating: creating index %s", index.name)
+                index.create(conn, checkfirst=True)
+                if index.name:
+                    created.add(index.name)
+    return created
+
+
+def _repair_duplicate_claims(engine: Engine) -> int:
+    """Collapse duplicate active identity claims, once, before the index.
+
+    Gated on the index being absent: once ACTIVE_CLAIM_INDEX exists a
+    duplicate pair is unrepresentable, so the group-by behind this is
+    pure startup cost. That keeps steady-state boots free while still
+    repairing on the one boot that migrates — and it is why the gate
+    reads the index list rather than a version marker, which a database
+    restored from before the index would carry a lie in.
+    """
+    inspector = inspect(engine)
+    if "event_identities" not in inspector.get_table_names():
+        return 0
+    if ACTIVE_CLAIM_INDEX in {i["name"] for i in inspector.get_indexes("event_identities")}:
+        return 0
+    with Session(engine) as session:
+        folded = repair_duplicate_claims(session)
+    if folded:
+        log.info("migrating: collapsed %d duplicate identity claims", folded)
+    return folded
 
 
 def _backfill_verified_by(engine: Engine) -> int:

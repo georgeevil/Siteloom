@@ -266,6 +266,69 @@ def test_save_snapshot_refuses_resolved_escape(consumer, tmp_path):
     assert not (tmp_path / "escape").exists()
 
 
+# -- one standing claim per pairing (CLD-133) ------------------------------
+
+
+def test_an_update_folds_into_a_claim_another_writer_made(consumer):
+    """The consumer is one of several writers of this pairing — an
+    operator can attach the same identity from the console while Frigate
+    is still sending updates for the event. A later `update` must land on
+    the claim that stands instead of stacking a second one (which the
+    index now refuses outright)."""
+    consumer.handle_message(frigate_msg(kind="new"))
+    consumer.cfg.update_interval_s = 0.0
+    with consumer.Session() as session:
+        link = session.query(EventIdentity).one()
+        session.delete(link)
+        session.flush()
+        # The claim the other writer committed first, with its own
+        # provenance and evidence.
+        session.add(
+            EventIdentity(
+                event_id=link.event_id,
+                identity_id=link.identity_id,
+                identifier_key="person",
+                similarity=0.0,
+                hit_count=5,
+                matched_by="human",
+                verdict="confirmed",
+            )
+        )
+        session.commit()
+
+    assert consumer.handle_message(frigate_msg(kind="update", score=0.92)) is True
+    assert consumer.handle_message(frigate_msg(kind="update", score=0.93)) is True
+
+    with consumer.Session() as session:
+        claims = session.query(EventIdentity).all()
+        assert len(claims) == 1
+        assert claims[0].hit_count == 7  # the other writer's 5, plus two frames
+        assert claims[0].verdict == "confirmed"  # a review is not erased
+        assert claims[0].matched_by == "human"
+
+
+def test_an_update_does_not_revive_a_claim_an_operator_unlinked(consumer):
+    """The other half of CLD-36 under the index: a repudiated claim stays
+    repudiated, so the update records its evidence on a fresh row — and
+    the event still ends with exactly one standing claim."""
+    consumer.handle_message(frigate_msg(kind="new"))
+    consumer.cfg.update_interval_s = 0.0
+    with consumer.Session() as session:
+        link = session.query(EventIdentity).one()
+        link.unlinked_at = link.event.first_seen
+        link.verdict = "wrong"
+        session.commit()
+        unlinked_id = link.id
+
+    assert consumer.handle_message(frigate_msg(kind="update", score=0.92)) is True
+
+    with consumer.Session() as session:
+        assert session.get(EventIdentity, unlinked_id).unlinked_at is not None
+        live = [row for row in session.query(EventIdentity).all() if row.is_active]
+        assert len(live) == 1
+        assert live[0].id != unlinked_id
+
+
 def test_legitimate_message_still_processes(consumer):
     # Positive control: a real Frigate payload (dotted id and all) passes
     # every gate and runs the pipeline end-to-end.

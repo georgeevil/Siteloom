@@ -47,6 +47,7 @@ from siteloom.store import (
     init_db,
     make_engine,
 )
+from siteloom.store import claims
 from siteloom.store.models import significance_clause, status_clause, unmatched_clause
 
 log = logging.getLogger(__name__)
@@ -1470,30 +1471,46 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         then, and the identity's vector count is left as it was.
         """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        link = (
-            session.query(EventIdentity)
-            .filter_by(event_id=event.id, identity_id=identity.id)
-            .order_by(EventIdentity.id.desc())
-            .first()
-        )
-        if link is None:
-            link = EventIdentity(
-                event_id=event.id,
-                identity_id=identity.id,
-                identifier_key=identity.identifier_key,
-                similarity=0.0,
-                matched_by="human",
-            )
-            session.add(link)
-            new_claim = True
-        else:
-            # Re-attaching a previously unlinked claim revives that row
-            # rather than stacking a second one: the operator changed
-            # their mind about this pairing, which is one decision, not
-            # two. Re-affirming a claim that already stands is not a new
+        # The standing claim first, and only then the newest unlinked one.
+        # Taking the newest row in *any* state — as this did — revives a
+        # repudiation that a live claim already supersedes, which is a
+        # second active row for the pair (CLD-133).
+        link = claims.active_claim(session, event.id, identity.id)
+        if link is not None:
+            # Re-affirming a claim that already stands is not a new
             # sighting at all — counting it again, or enrolling the same
             # crop a second time, would let a stuck refresh inflate both.
-            new_claim = link.unlinked_at is not None
+            new_claim = False
+        else:
+            unlinked = (
+                session.query(EventIdentity)
+                .filter_by(event_id=event.id, identity_id=identity.id)
+                .filter(EventIdentity.unlinked_at.is_not(None))
+                .order_by(EventIdentity.id.desc())
+                .first()
+            )
+            if unlinked is not None:
+                # Re-attaching a previously unlinked claim revives that
+                # row rather than stacking a second one: the operator
+                # changed their mind about this pairing, which is one
+                # decision, not two.
+                link, new_claim = claims.revive_claim(session, unlinked)
+            else:
+                link, new_claim = claims.insert_claim(
+                    session,
+                    EventIdentity(
+                        event_id=event.id,
+                        identity_id=identity.id,
+                        identifier_key=identity.identifier_key,
+                        similarity=0.0,
+                        matched_by="human",
+                    ),
+                    # A double-submit that loses the race leaves
+                    # appearance_count alone (new_claim is False), so the
+                    # winner must not gain a frame either — the two move
+                    # together or the counter stops meaning anything.
+                    count_sighting=False,
+                )
         link.unlinked_at = None
         link.verdict = "confirmed"
         link.verdict_at = now

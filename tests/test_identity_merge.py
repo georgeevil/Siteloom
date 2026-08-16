@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from siteloom.config import CameraConfig, IdentityConfig, SiteConfig, StorageConfig
 from siteloom.identity import VectorStore, get_shared_store
@@ -158,6 +159,17 @@ def test_embedded_qdrant_rejects_a_second_client_on_the_same_path(tmp_path):
 
 
 def test_merge_moves_vectors_links_and_stats(merge_env):
+    """`appearance_count` is summed, deliberately (CLD-133 spec §0(c)).
+
+    The column counts *identified frames*, not visits: the resolver
+    increments it once per resolved frame, and the invariant that keeps
+    it honest is `appearance_count ≈ Σ hit_count` over the identity's
+    links. Because the collision fold below *sums* hit_count, adding the
+    two counters keeps that invariant exact. Recomputing it from the
+    surviving rows would report the number of links where the system
+    means the number of frames, and would diverge from every other
+    writer of the column.
+    """
     r = merge_env.client.post(
         f"/identities/{merge_env.source_id}/merge",
         data={"target_id": merge_env.target_id},
@@ -257,3 +269,204 @@ def test_merge_guards(merge_env):
         ).status_code
         == 404
     )
+
+
+# -- colliding claims (CLD-133) -------------------------------------------
+#
+# Merge used to re-point the source's links with a blind bulk UPDATE. When
+# an event already carried a claim on the target, that stacked a second
+# active row for one (event, identity) pair instead of collapsing them —
+# event 30 rendering four claims for two identities is what filed the
+# issue. The links now go through the same fold ingest uses.
+
+
+def _event(session, track_id: int) -> int:
+    event = Event(
+        camera_id="cam1",
+        track_id=track_id,
+        class_name="car",
+        first_seen=datetime(2026, 8, 6, 15, 0, 0),
+        last_seen=datetime(2026, 8, 6, 15, 0, 30),
+        detection_count=1,
+    )
+    session.add(event)
+    session.flush()
+    return event.id
+
+
+def _claims_on(session, event_id: int, identity_id: int):
+    return session.scalars(
+        select(EventIdentity)
+        .where(
+            EventIdentity.event_id == event_id,
+            EventIdentity.identity_id == identity_id,
+            EventIdentity.unlinked_at.is_(None),
+        )
+        .order_by(EventIdentity.id)
+    ).all()
+
+
+def _merge(env):
+    r = env.client.post(
+        f"/identities/{env.source_id}/merge",
+        data={"target_id": env.target_id},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    return r
+
+
+def test_merge_folds_a_claim_the_event_already_carries_on_the_target(merge_env):
+    """The headline acceptance criterion: two identities claiming one
+    event leave one claim behind, carrying the evidence of both.
+
+    Stacking them instead showed the operator the same identity twice on
+    one event, double-counted it in every accuracy query that reads these
+    rows, and made "how many claims does this event have" unanswerable.
+    """
+    with merge_env.Session() as session:
+        source_link = session.get(EventIdentity, 1)
+        source_link.hit_count = 16
+        source_link.similarity = 0.9
+        source_link.matched_by = "plate"
+        source_link.learned_plate = True
+        source_link.verdict = "confirmed"
+        source_link.verdict_at = datetime(2026, 8, 6, 20, 0, 0)
+        session.add(
+            EventIdentity(
+                event_id=1,
+                identity_id=merge_env.target_id,
+                identifier_key="vehicle",
+                similarity=0.5,
+                hit_count=35,
+                matched_by="visual",
+                verdict="wrong",
+                verdict_at=datetime(2026, 8, 6, 18, 0, 0),
+            )
+        )
+        session.commit()
+
+    _merge(merge_env)
+
+    with merge_env.Session() as session:
+        claims = _claims_on(session, 1, merge_env.target_id)
+        assert len(claims) == 1
+        kept = claims[0]
+        assert kept.hit_count == 16 + 35  # evidence adds up
+        assert kept.similarity == 0.9  # the best frame either row saw
+        assert kept.matched_by == "plate"  # a plate read outranks visual
+        assert kept.learned_plate is True
+        # A human verdict is never erased, and an identification outranks
+        # a repudiation of the same pairing.
+        assert kept.verdict == "confirmed"
+        assert kept.verdict_at == datetime(2026, 8, 6, 20, 0, 0)
+        assert session.get(EventIdentity, 1) is None  # folded in, not stacked
+        # ... and the counter stays in step with Σ hit_count (§0(c)).
+        assert session.get(Identity, merge_env.target_id).appearance_count == 35 + 16
+
+
+def test_merge_carries_repudiated_claims_across_without_folding_them(merge_env):
+    """An unlinked row is the record of a claim that was wrong, and there
+    may be several for one pairing (CLD-36) — so they follow the merge
+    untouched rather than collapsing into the live claim.
+
+    They must move, not be left behind: deleting the source identity
+    would null their identity_id, turning "this was claimed and it was
+    wrong" into "nothing was claimed", which is a different fact.
+    """
+    with merge_env.Session() as session:
+        session.add_all(
+            [
+                EventIdentity(
+                    event_id=1,
+                    identity_id=merge_env.target_id,
+                    identifier_key="vehicle",
+                    similarity=0.6,
+                    hit_count=3,
+                ),
+                EventIdentity(
+                    event_id=1,
+                    identity_id=merge_env.source_id,
+                    identifier_key="vehicle",
+                    similarity=0.71,
+                    hit_count=2,
+                    matched_by="visual",
+                    verdict="wrong",
+                    verdict_at=datetime(2026, 8, 6, 17, 0, 0),
+                    unlinked_at=datetime(2026, 8, 6, 17, 0, 0),
+                ),
+            ]
+        )
+        session.commit()
+
+    _merge(merge_env)
+
+    with merge_env.Session() as session:
+        repudiated = session.scalars(
+            select(EventIdentity).where(EventIdentity.unlinked_at.is_not(None))
+        ).all()
+        assert len(repudiated) == 1
+        assert repudiated[0].identity_id == merge_env.target_id  # moved, not nulled
+        assert repudiated[0].verdict == "wrong"  # and still a negative
+        assert repudiated[0].similarity == 0.71  # untouched by the fold
+        assert len(_claims_on(session, 1, merge_env.target_id)) == 1
+
+
+def test_merge_folds_every_colliding_event_and_moves_the_rest(merge_env):
+    """Three events, three shapes: two where both identities claimed the
+    event, one where only the source did. The loop must fold the first
+    two and move the third, leaving one standing claim per event."""
+    with merge_env.Session() as session:
+        session.add(
+            EventIdentity(
+                event_id=1,
+                identity_id=merge_env.target_id,
+                identifier_key="vehicle",
+                similarity=0.4,
+                hit_count=2,
+            )
+        )
+        colliding = _event(session, track_id=8)
+        source_only = _event(session, track_id=9)
+        session.add_all(
+            [
+                EventIdentity(
+                    event_id=colliding,
+                    identity_id=merge_env.source_id,
+                    identifier_key="vehicle",
+                    similarity=0.8,
+                    hit_count=5,
+                ),
+                EventIdentity(
+                    event_id=colliding,
+                    identity_id=merge_env.target_id,
+                    identifier_key="vehicle",
+                    similarity=0.6,
+                    hit_count=7,
+                ),
+                EventIdentity(
+                    event_id=source_only,
+                    identity_id=merge_env.source_id,
+                    identifier_key="vehicle",
+                    similarity=0.75,
+                    hit_count=4,
+                ),
+            ]
+        )
+        session.commit()
+
+    _merge(merge_env)  # a 500 here is the IntegrityError the index raises
+
+    with merge_env.Session() as session:
+        claims = session.scalars(
+            select(EventIdentity)
+            .where(EventIdentity.unlinked_at.is_(None))
+            .order_by(EventIdentity.event_id)
+        ).all()
+        assert len(claims) == 3
+        assert {c.identity_id for c in claims} == {merge_env.target_id}
+        by_event = {c.event_id: c for c in claims}
+        assert by_event[1].hit_count == 1 + 2
+        assert by_event[colliding].hit_count == 5 + 7
+        assert by_event[colliding].similarity == 0.8
+        assert by_event[source_only].hit_count == 4  # moved, not folded

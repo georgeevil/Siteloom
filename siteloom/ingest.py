@@ -39,6 +39,7 @@ from siteloom.store import (
     init_db,
     make_engine,
 )
+from siteloom.store.claims import active_claim, fold_claim, link_claim
 
 log = logging.getLogger(__name__)
 
@@ -483,37 +484,18 @@ class IngestService:
             # An unlinked claim is one an operator repudiated (CLD-36);
             # a later frame matching the same identity must not revive it
             # by incrementing its hit count. It makes a fresh claim
-            # instead, leaving the correction intact for review.
-            link = (
-                session.query(EventIdentity)
-                .filter_by(event_id=event.id, identity_id=resolution.identity.id)
-                .filter(EventIdentity.unlinked_at.is_(None))
-                .first()
+            # instead, leaving the correction intact for review. A racing
+            # writer that claimed the pair first is folded into, not
+            # collided with (CLD-133).
+            _link, first_link = link_claim(
+                session,
+                event_id=event.id,
+                identity_id=resolution.identity.id,
+                identifier_key=emb["identifier"],
+                similarity=resolution.similarity,
+                matched_by=resolution.matched_by,
+                learned_plate=resolution.learned_plate,
             )
-            first_link = link is None
-            if link is None:
-                session.add(
-                    EventIdentity(
-                        event_id=event.id,
-                        identity_id=resolution.identity.id,
-                        identifier_key=emb["identifier"],
-                        similarity=resolution.similarity,
-                        matched_by=resolution.matched_by,
-                        learned_plate=resolution.learned_plate,
-                    )
-                )
-            else:
-                link.hit_count += 1
-                link.similarity = max(link.similarity, resolution.similarity)
-                # Record the strongest evidence seen across frames: plate
-                # outranks visual, and a link whose first frame *created*
-                # the identity (no match, so None) picks up the first
-                # re-match's mode.
-                if resolution.matched_by == "plate":
-                    link.matched_by = "plate"
-                elif link.matched_by is None:
-                    link.matched_by = resolution.matched_by
-                link.learned_plate = link.learned_plate or resolution.learned_plate
 
             # Publish once per event+identity pairing, not per frame — a
             # 30-second visit is one match, not sixty notifications.
@@ -708,27 +690,13 @@ class IngestService:
                 # a closed record of a repudiated claim, and merging it
                 # into a live one would resurrect what an operator
                 # detached.
-                kept = (
-                    session.query(EventIdentity)
-                    .filter_by(event_id=target.id, identity_id=link.identity_id)
-                    .filter(EventIdentity.unlinked_at.is_(None))
-                    .first()
-                )
+                kept = active_claim(session, target.id, link.identity_id)
             if kept is None:
                 link.event_id = target.id
                 continue
-            kept.hit_count += link.hit_count
-            kept.similarity = max(kept.similarity, link.similarity)
-            if link.matched_by == "plate":
-                kept.matched_by = "plate"
-            elif kept.matched_by is None:
-                kept.matched_by = link.matched_by
-            kept.learned_plate = kept.learned_plate or link.learned_plate
-            # Human review survives a merge (the Annotation philosophy);
-            # the target's own verdict, if any, outranks the fragment's.
-            if kept.verdict is None:
-                kept.verdict = link.verdict
-                kept.verdict_at = link.verdict_at
+            # Human review survives a merge (the Annotation philosophy) —
+            # fold_claim keeps the stronger of the two verdicts.
+            fold_claim(kept, link)
             session.delete(link)
         target.first_seen = min(target.first_seen, source.first_seen)
         target.last_seen = max(target.last_seen, source.last_seen)

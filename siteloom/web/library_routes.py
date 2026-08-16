@@ -1794,10 +1794,12 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
     @app.post("/identities/{identity_id}/merge")
     def merge_identity(identity_id: int, target_id: int = Form(...)):
         """Fold this identity into another: vectors are re-pointed, links
-        moved, stats summed, and the now-empty source row deleted."""
+        moved — folding where the event already carries a claim on the
+        target — stats summed, and the now-empty source row deleted."""
         if identity_id == target_id:
             raise HTTPException(400, "cannot merge an identity into itself")
         from siteloom.store import EventIdentity
+        from siteloom.store.claims import active_claim, fold_claim
         from siteloom.web.identity_ops import shared_store
 
         with Session() as session:
@@ -1816,16 +1818,42 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             moved = vectors.reassign_identity(
                 source.identifier_key, source.id, target.id
             )
-            session.execute(
-                EventIdentity.__table__.update()
-                .where(EventIdentity.identity_id == source.id)
-                .values(identity_id=target.id)
-            )
+            # Merging is exactly what an operator does after the resolver
+            # split one subject across buckets that appeared on the *same*
+            # events, so a collision on the target is the normal case, not
+            # the corner one — a blind re-point stacked duplicates there
+            # (CLD-133).
+            for row in session.scalars(
+                select(EventIdentity).where(EventIdentity.identity_id == source.id)
+            ).all():
+                if row.unlinked_at is not None:
+                    # Repudiated claims follow the merge untouched. They
+                    # must move, not be left behind: deleting the source
+                    # identity would null their identity_id, turning "this
+                    # was claimed and it was wrong" into a recorded miss —
+                    # a different fact.
+                    row.identity_id = target.id
+                    continue
+                # Autoflushes, so a row moved earlier in this loop is
+                # visible here: two source claims on one event fold
+                # together rather than colliding.
+                keeper = active_claim(session, row.event_id, target.id)
+                if keeper is None:
+                    row.identity_id = target.id
+                    continue
+                fold_claim(keeper, row)
+                session.delete(row)
+            # Flush the deletes before `session.delete(source)` below, or
+            # the ORM nulls the FK on rows it is about to remove.
+            session.flush()
             session.execute(
                 Annotation.__table__.update()
                 .where(Annotation.identity_id == source.id)
                 .values(identity_id=target.id)
             )
+            # Summed, not recomputed: the counter is per identified frame
+            # (identity/resolver.py), so it tracks Σ hit_count over the
+            # links — which the fold above preserves.
             target.appearance_count += source.appearance_count
             target.vector_count += moved
             target.first_seen = min(target.first_seen, source.first_seen)

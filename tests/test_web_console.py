@@ -417,6 +417,14 @@ def test_threshold_preview_counts_both_directions(tmp_path):
                 identifier_key="face", class_name="person", first_seen=TS, last_seen=TS
             )
         )
+        # The other identifier's history belongs to its own identity: an
+        # Identity row has one identifier_key, and one identity holds at
+        # most one standing claim per event (CLD-133).
+        s.add(
+            Identity(
+                identifier_key="vehicle", class_name="car", first_seen=TS, last_seen=TS
+            )
+        )
         s.flush()
         for i, (similarity, matched_by) in enumerate(
             [
@@ -449,7 +457,7 @@ def test_threshold_preview_counts_both_directions(tmp_path):
             s.add(
                 EventIdentity(
                     event_id=event.id,
-                    identity_id=1,
+                    identity_id=2,
                     identifier_key="vehicle",
                     similarity=0.99,
                     matched_by="visual",

@@ -234,11 +234,23 @@ def test_cleared_without_a_verdict_is_counted(session):
 
 
 def test_camera_breakdown_counts_visits_not_links(session):
-    """Three links to one identity on one event is still one visit."""
-    identity = add_identity(session)
+    """Three claims on one event are still one visit.
+
+    A car pulls up and someone gets out: the vehicle, the person and the
+    face identifiers can each claim that event. One identity cannot hold
+    two standing claims on it (CLD-133) — the several claims are several
+    identities, and the camera breakdown counts events, not rows.
+    """
     event = add_event(session, camera="front")
-    for _ in range(3):
-        link(session, event, identity, similarity=0.5, matched_by="visual")
+    for key, cls in (("face", "person"), ("person", "person"), ("vehicle", "car")):
+        link(
+            session,
+            event,
+            add_identity(session, key=key, cls=cls),
+            key=key,
+            similarity=0.5,
+            matched_by="visual",
+        )
     add_event(session, camera="front")  # unmatched
     add_event(session, camera="back")
     session.commit()
