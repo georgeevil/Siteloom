@@ -568,3 +568,46 @@ def test_ingest_does_not_revive_a_claim_the_operator_unlinked(
         fresh = [r for r in rows if r.id != link_id]
         assert len(fresh) == 1
         assert fresh[0].unlinked_at is None and fresh[0].hit_count == 1
+
+
+def test_a_wrong_verdict_stops_the_gallery_growing_mid_visit(sample_video, tmp_path):
+    """A wrong match used to keep teaching for the rest of the visit
+    (CLD-139): every later frame of the same event added another vector
+    to the gallery an operator had just called wrong, so the mistake
+    recruited its own reinforcements.
+
+    What stops is learning, and only learning — the event goes on, the
+    claim goes on counting its sightings, and the operator's own verdict
+    stays where they put it.
+    """
+    from datetime import datetime, timedelta
+
+    service = _identity_service(sample_video, tmp_path, [])
+    cam = service.config.cameras[0]
+    # The per-event cap would halt growth on its own after 3, so switch it
+    # off: the verdict has to be the thing that stops this.
+    service.config.identity.identifiers["person"].learn_max_per_event = 0
+    base = datetime(2026, 8, 7, 10, 0, 0)
+    for i in range(4):  # past min_detections, so identity resolution runs
+        service._store_detections(cam, base + timedelta(seconds=i), [_det(track_id=1)])
+
+    with service.Session() as session:
+        identity = session.query(Identity).one()
+        link = session.query(EventIdentity).one()
+        assert identity.vector_count > 1  # it really was accreting
+        vectors_at_verdict, hits_at_verdict = identity.vector_count, link.hit_count
+        link.verdict = "wrong"
+        link.verdict_at = base
+        session.commit()
+
+    # The subject is still in frame, still matching the same identity.
+    for i in range(4, 9):
+        service._store_detections(cam, base + timedelta(seconds=i), [_det(track_id=1)])
+
+    with service.Session() as session:
+        identity = session.query(Identity).one()
+        assert identity.vector_count == vectors_at_verdict  # gallery frozen
+        link = session.query(EventIdentity).one()
+        assert link.hit_count > hits_at_verdict  # the claim still counts frames
+        assert link.verdict == "wrong"  # and the judgment is untouched
+        assert session.query(Event).count() == 1  # one visit throughout

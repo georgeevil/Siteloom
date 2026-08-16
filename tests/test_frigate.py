@@ -266,6 +266,35 @@ def test_save_snapshot_refuses_resolved_escape(consumer, tmp_path):
     assert not (tmp_path / "escape").exists()
 
 
+def test_a_wrong_verdict_stops_the_consumer_learning(consumer):
+    """The consumer resolves identities on the same terms ingest does, so
+    it owes the same gate: once an operator calls a claim wrong, later
+    `update` messages for that event must stop teaching the gallery
+    (CLD-139). Requires the event id to reach the resolver — the gate is
+    per (event, identity), and a consumer that does not pass it cannot be
+    told to stop.
+    """
+    consumer.handle_message(frigate_msg(kind="new"))
+    consumer.cfg.update_interval_s = 0.0
+    consumer.handle_message(frigate_msg(kind="update", score=0.92))
+
+    with consumer.Session() as session:
+        identity = session.query(Identity).one()
+        # Positive control: without a verdict, an update accretes.
+        assert identity.vector_count == 2
+        link = session.query(EventIdentity).one()
+        link.verdict = "wrong"
+        session.commit()
+
+    consumer.handle_message(frigate_msg(kind="update", score=0.93))
+
+    with consumer.Session() as session:
+        assert session.query(Identity).one().vector_count == 2  # frozen
+        link = session.query(EventIdentity).one()
+        assert link.hit_count == 3  # the sighting is still recorded
+        assert link.verdict == "wrong"
+
+
 # -- one standing claim per pairing (CLD-133) ------------------------------
 
 
