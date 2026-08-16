@@ -20,6 +20,85 @@
   {% if identity.label %}<span class="muted" style="align-self:center; font-size:0.8rem;">clear the field to mark unknown again</span>{% endif %}
 </form>
 
+{# Plate management (CLD-134). Self-contained and anchored here on
+   purpose: the cover strip below, and the sightings table further down,
+   are where queued work lands — keeping this block between the label
+   form and the merge/split details leaves those regions untouched.
+
+   `shown_plate` is asked once and used everywhere below: the plate this
+   viewer may see. A block that redacted its badge and then printed the
+   same string into the edit field would be defence in depth applied to
+   half a screen. #}
+{% set shown_plate = identity_plate(identity) %}
+{% if plate_ocr or shown_plate %}
+<div style="margin:0.8rem 0; padding:0.6rem 0.8rem; border:1px solid var(--line); border-radius:6px;">
+  <div style="font-size:0.85rem;">
+    <strong>Plate</strong>
+    {% if shown_plate %}
+      <span class="badge plate">{{ shown_plate }}</span>
+    {% else %}
+      <span class="muted">none recorded</span>
+    {% endif %}
+    <span class="muted" style="font-size:0.78rem;">
+      {% if not shown_plate %}
+        {% if identity.plate_source == 'operator' %}
+          · cleared by an operator, and not re-learned automatically
+        {% endif %}
+      {% elif identity.plate_source == 'mint' %}
+        · read from a plate when this vehicle was first seen
+      {% elif identity.plate_source == 'learned' %}
+        · learned from a later match
+      {% elif identity.plate_source == 'operator' %}
+        · set by an operator
+      {% else %}
+        · recorded before provenance was tracked
+      {% endif %}
+    </span>
+  </div>
+
+  <form class="filters" method="post" action="/identities/{{ identity.id }}/plate" style="margin-top:0.5rem;">
+    <input type="text" name="plate" placeholder="Plate number…" value="{{ shown_plate or '' }}" style="min-width:160px;">
+    <button type="submit">{% if shown_plate %}Save{% else %}Set{% endif %}</button>
+    <label class="muted" style="align-self:center; font-size:0.78rem;">
+      <input type="checkbox" name="confirm" value="1"> allow a plate another identity already has
+    </label>
+    <span class="muted" style="align-self:center; font-size:0.75rem;">
+      empty the field to clear it — punctuation and spacing are stripped, so tyb-506 is stored as TYB506
+    </span>
+  </form>
+
+  {% if not shown_plate and identity.plate_source == 'operator' %}
+  <form class="filters" method="post" action="/identities/{{ identity.id }}/plate" style="margin-top:0.3rem;">
+    <input type="hidden" name="plate" value="">
+    <input type="hidden" name="relearn" value="1">
+    <button type="submit">Allow automatic learning again</button>
+    <span class="muted" style="align-self:center; font-size:0.75rem;">
+      the next read on a matching sighting may fill this in by itself
+    </span>
+  </form>
+  {% endif %}
+
+  {% if shown_plate %}
+  <form class="filters" method="post" action="/identities/{{ identity.id }}/plate/move" style="margin-top:0.3rem;">
+    <span class="muted" style="align-self:center; font-size:0.8rem;">Wrong vehicle? Move it to</span>
+    <select name="target_id" required>
+      <option value="">choose identity…</option>
+      {% for other in merge_candidates %}
+        <option value="{{ other.id }}">{{ identity_name(other) }}{% if identity_plate(other) %} — has {{ identity_plate(other) }}{% endif %}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Move</button>
+    <label class="muted" style="align-self:center; font-size:0.78rem;">
+      <input type="checkbox" name="confirm" value="1"> replace the target's own plate
+    </label>
+    <span class="muted" style="align-self:center; font-size:0.75rem;">
+      this identity keeps its sightings and loses the plate; neither side re-learns it
+    </span>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if identity.best_crop_path %}
 <div class="strip"><img src="/media/{{ identity.best_crop_path }}" alt=""></div>
 {% endif %}

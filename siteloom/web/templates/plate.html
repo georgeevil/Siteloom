@@ -194,6 +194,15 @@
         <button class="vbtn" type="submit">Fix</button>
       </form>
       {% endif %}
+      {% if apply_targets.get(r.id) %}
+      {# Offered only where the read's event claims exactly one vehicle
+         of this identifier — with two, writing to either is a guess
+         (CLD-134). #}
+      <form class="fix" method="post" action="/plates/{{ r.id }}/apply-identity">
+        <input type="hidden" name="back" value="{{ back }}">
+        <button class="vbtn" type="submit">Set as {{ identity_name(apply_targets[r.id]) }}'s plate</button>
+      </form>
+      {% endif %}
     </div>
     <div class="mono">{{ r.class_name or '—' }}<br>{{ r.camera_id or '' }}</div>
     <div class="mono">

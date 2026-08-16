@@ -32,6 +32,7 @@ from siteloom.store import (
     OperationRun,
     TrainingRun,
 )
+from siteloom.store.models import PLATE_SOURCE_OPERATOR
 from siteloom.web import paging, params
 
 
@@ -1859,7 +1860,20 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             target.first_seen = min(target.first_seen, source.first_seen)
             target.last_seen = max(target.last_seen, source.last_seen)
             target.label = target.label or source.label
-            target.plate = target.plate or source.plate
+            # The plate travels with its provenance, and an operator lock
+            # travels even when there is no plate to carry it (CLD-134).
+            # A cleared-and-locked source folded into an unlocked target
+            # would hand the junk plate straight back to the resolver on
+            # the survivor — the same failure this issue fixed, through
+            # another door.
+            if not target.plate and source.plate:
+                target.plate = source.plate
+                target.plate_source = source.plate_source
+            elif not target.plate and PLATE_SOURCE_OPERATOR in (
+                target.plate_source,
+                source.plate_source,
+            ):
+                target.plate_source = PLATE_SOURCE_OPERATOR
             target.best_crop_path = target.best_crop_path or source.best_crop_path
             session.delete(source)
             session.commit()
