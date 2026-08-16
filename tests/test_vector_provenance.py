@@ -216,6 +216,12 @@ def test_a_promoted_pending_sighting_keeps_its_crop(tmp_path):
                         threshold=0.8,
                         min_sightings=2,
                     )
+                    # Both frames below sit above learn_min_quality and
+                    # below immediate_quality (CLD-139): poor enough to
+                    # go through the pending pool, good enough to be
+                    # worth storing. What is under test is the crop
+                    # provenance of what gets stored, not which frames
+                    # the learn gates admit.
                 }
             ),
             vectors,
@@ -231,7 +237,7 @@ def test_a_promoted_pending_sighting_keeps_its_crop(tmp_path):
                 timestamp=datetime(2026, 8, 7, 9, 0, 0),
                 crop_path="/media/crops/first.jpg",
                 camera_id="cam1",
-                quality=0.5,
+                quality=0.7,
             )
             assert first.pending and first.identity is None
             second = resolver.resolve(
@@ -243,7 +249,7 @@ def test_a_promoted_pending_sighting_keeps_its_crop(tmp_path):
                 timestamp=datetime(2026, 8, 7, 9, 0, 30),
                 crop_path="/media/crops/second.jpg",
                 camera_id="cam1",
-                quality=0.5,
+                quality=0.7,
             )
             session.commit()
             identity_id = second.identity.id

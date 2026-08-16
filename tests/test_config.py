@@ -327,6 +327,65 @@ def test_a_config_naming_nothing_keeps_every_built_in(tmp_path):
     assert idents["vehicle"].min_sightings == 1  # deliberate, PRD §6.4
 
 
+def test_naming_an_identifier_keeps_the_learning_gates_too(tmp_path):
+    """The learn gates (CLD-139) join the same merge, and for the same
+    reason: they are the fields a site will never restate, and losing
+    them silently restores the ungated accretion they exist to stop."""
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    person:
+      algo: generic
+      applies_to: [person]
+      threshold: 0.75
+""",
+        tmp_path,
+    )
+    person = idents["person"]
+    assert person.threshold == 0.75
+    assert person.learn_min_quality == 0.6
+    assert person.learn_max_per_event == 3
+
+
+def test_switching_one_learning_gate_off_keeps_the_others(tmp_path):
+    """The documented rollback: `learn_max_per_event: 0` restores
+    pre-CLD-139 accretion for that identifier without a redeploy — and
+    must not take the margin, the sightings or the quality floor with
+    it."""
+    idents = _identifiers(
+        """
+site_id: s
+identity:
+  identifiers:
+    person:
+      algo: generic
+      applies_to: [person]
+      learn_max_per_event: 0
+""",
+        tmp_path,
+    )
+    person = idents["person"]
+    assert person.learn_max_per_event == 0  # asked for, and honoured
+    assert person.learn_min_quality == 0.6
+    assert person.min_margin == 0.02
+    assert person.min_sightings == 2
+
+
+def test_an_auto_added_class_is_gated_by_the_field_defaults(tmp_path):
+    """A class nobody configured gets the conservative values rather than
+    nothing: adding a class to `detection.classes` is meant to be the
+    only step, so its identifier cannot arrive with learning wide open."""
+    from siteloom.config import IdentityConfig
+    from siteloom.identity.registry import IdentifierRegistry
+
+    registry = IdentifierRegistry(IdentityConfig(auto_add_classes=True))
+    _, deer = registry.identifiers_for("deer")[0]
+    assert deer.learn_min_quality == 0.6
+    assert deer.learn_max_per_event == 3
+
+
 def test_saved_config_round_trips_its_gates(tmp_path):
     """The console writes a full dump, so a saved file states every
     field — the merge must be a no-op over it, not a re-defaulting."""

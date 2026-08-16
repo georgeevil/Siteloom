@@ -194,6 +194,51 @@ def test_a_zero_margin_is_reported_for_any_class():
     assert "no margin" in check.detail
 
 
+def test_the_learning_gates_are_printed_with_the_others(tmp_path):
+    """Same argument as the margin: the values in force are printed
+    because the file they came from may not mention them, and the whole
+    point of the CLD-139 knobs is that an operator can turn them off."""
+    check = run_checks(SiteConfig(site_id="t"), [health.check_identity_gating])
+    assert check.checks[0].status == OK
+    assert "learn ≥0.60 ×3/event" in check.checks[0].detail
+
+
+def test_learning_switched_off_entirely_is_reported():
+    """Both knobs at 0 is the pre-CLD-139 behaviour — every matching
+    frame accretes, so one visit can fill a gallery and a wrong match
+    recruits more wrong vectors. Worth saying out loud, exactly as
+    `min_margin: 0` is."""
+    check = _gating_report(
+        vehicle=dict(
+            algo="generic",
+            applies_to=["car"],
+            min_margin=0.02,
+            min_sightings=1,
+            learn_min_quality=0,
+            learn_max_per_event=0,
+        )
+    )
+    assert check.status == WARN
+    assert "learning ungated" in check.detail
+    assert "learn_min_quality" in check.remedy and "learn_max_per_event" in check.remedy
+
+
+def test_one_learning_gate_off_is_a_choice_not_a_complaint():
+    """A site may want an unlimited count above a strict floor, or the
+    reverse. Only losing both is the ungated case."""
+    for knobs in ({"learn_min_quality": 0}, {"learn_max_per_event": 0}):
+        check = _gating_report(
+            vehicle=dict(
+                algo="generic",
+                applies_to=["car"],
+                min_margin=0.02,
+                min_sightings=1,
+                **knobs,
+            )
+        )
+        assert check.status == OK
+
+
 def test_process_alive_on_self_and_on_the_departed():
     assert health.process_alive(os.getpid())
     assert not health.process_alive(_dead_pid())
