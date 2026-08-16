@@ -47,6 +47,7 @@ from siteloom.store.claims import (
     link_claim,
     record_sighting,
     repair_duplicate_claims,
+    revive_claim,
 )
 from siteloom.store.models import ACTIVE_CLAIM_INDEX
 
@@ -656,6 +657,189 @@ def test_two_sessions_both_linking_a_pair_yield_one_active_claim(claims_db):
         rows = _active_rows(session, claims_db.event, claims_db.identity)
         assert len(rows) == 1
         assert rows[0].hit_count == 2
+
+
+def test_insert_claim_refuses_a_miss_row(claims_db):
+    """A miss is "nothing was claimed" — the opposite of a claim, and not
+    this module's business (`set_missed_identity` writes those directly).
+
+    The guard is what keeps the recovery path sound: it re-queries with
+    `active_claim`, which matches a NULL identity_id by `IS NULL`, so a
+    miss-row insert that failed for some unrelated reason would fold its
+    observation into whatever unrelated miss the event already carried.
+    """
+    with claims_db.Session() as session:
+        session.add(
+            EventIdentity(
+                event_id=claims_db.event,
+                identity_id=None,
+                identifier_key="face",
+                verdict="missed",
+            )
+        )
+        session.commit()
+
+        with pytest.raises(ValueError):
+            insert_claim(
+                session,
+                EventIdentity(
+                    event_id=claims_db.event,
+                    identity_id=None,
+                    identifier_key="vehicle",
+                    similarity=0.42,
+                    matched_by="visual",
+                ),
+            )
+
+        # Refused before the savepoint: nothing written, and the miss the
+        # event already carried is not touched.
+        misses = session.scalars(
+            select(EventIdentity).where(EventIdentity.identity_id.is_(None))
+        ).all()
+        assert len(misses) == 1
+        assert misses[0].identifier_key == "face"
+        assert misses[0].hit_count == 1
+        assert misses[0].similarity == 0.0
+
+
+def test_a_lost_race_can_absorb_evidence_without_counting_a_frame(claims_db):
+    """`hit_count` means "frames that evidenced this claim", and the
+    manual attach path has no frame to contribute — its row is discarded
+    and its `appearance_count` increment withheld, so counting one on the
+    winner would put Σ hit_count ahead of appearance_count (spec §0(c)).
+
+    What the loser *does* carry is evidence, and that is absorbed either
+    way: a winner with no match mode picks up the human attach's.
+    """
+    with claims_db.Session() as session:
+        winner, created = insert_claim(
+            session,
+            EventIdentity(
+                event_id=claims_db.event,
+                identity_id=claims_db.identity,
+                identifier_key="vehicle",
+                similarity=0.0,
+                matched_by=None,
+                hit_count=8,
+            ),
+        )
+        session.commit()
+        assert created is True
+
+    with claims_db.Session() as loser:
+        survivor, created = insert_claim(
+            loser,
+            EventIdentity(
+                event_id=claims_db.event,
+                identity_id=claims_db.identity,
+                identifier_key="vehicle",
+                similarity=0.9,
+                matched_by="human",
+                learned_plate=True,
+            ),
+            count_sighting=False,
+        )
+        loser.commit()
+
+    assert created is False
+    assert survivor.id == winner.id
+    assert survivor.hit_count == 8  # no frame happened
+    assert survivor.similarity == 0.9  # but the evidence is not lost
+    assert survivor.matched_by == "human"
+    assert survivor.learned_plate is True
+
+
+def test_the_per_frame_writers_still_count_their_frame(claims_db):
+    """The counter policy is per caller, not a new default: ingest and
+    the Frigate consumer really did see a frame, and `link_claim`'s race
+    path must keep saying so."""
+    with claims_db.Session() as first:
+        link_claim(
+            first,
+            event_id=claims_db.event,
+            identity_id=claims_db.identity,
+            identifier_key="vehicle",
+            similarity=0.5,
+            matched_by="visual",
+        )
+        first.commit()
+
+    with claims_db.Session() as second:
+        row = EventIdentity(
+            event_id=claims_db.event,
+            identity_id=claims_db.identity,
+            identifier_key="vehicle",
+            similarity=0.6,
+            matched_by="visual",
+        )
+        survivor, created = insert_claim(second, row)  # default counts
+        second.commit()
+
+    assert created is False
+    assert survivor.hit_count == 2
+
+
+def test_reviving_a_repudiated_claim_yields_to_a_racing_writer(claims_db):
+    """The other side of the race: an operator re-attaching a claim they
+    had unlinked, while another writer claims the same pairing.
+
+    The revive is an UPDATE that clears `unlinked_at`, so it collides
+    with the index exactly as an INSERT would. Losing must leave the
+    repudiation *as it was* — restoring an operator's correction is the
+    one thing this path must not lose — and hand back the claim that now
+    stands, so the caller re-affirms it rather than stacking a second.
+    """
+    with claims_db.Session() as setup:
+        repudiated = EventIdentity(
+            event_id=claims_db.event,
+            identity_id=claims_db.identity,
+            identifier_key="vehicle",
+            similarity=0.83,
+            matched_by="visual",
+            verdict="wrong",
+            unlinked_at=TS,
+        )
+        setup.add(repudiated)
+        setup.commit()
+        repudiated_id = repudiated.id
+
+    reviver = claims_db.Session()
+    racer = claims_db.Session()
+    try:
+        row = reviver.get(EventIdentity, repudiated_id)
+        assert active_claim(reviver, claims_db.event, claims_db.identity) is None
+
+        winner_row, created = insert_claim(
+            racer,
+            EventIdentity(
+                event_id=claims_db.event,
+                identity_id=claims_db.identity,
+                identifier_key="vehicle",
+                similarity=0.6,
+                matched_by="visual",
+            ),
+        )
+        racer.commit()
+        assert created is True
+
+        survivor, revived = revive_claim(reviver, row)
+
+        assert revived is False
+        assert survivor.id == winner_row.id
+        assert survivor.hit_count == 1  # a revive is not a new sighting
+        assert row.unlinked_at == TS  # the correction is left standing
+        reviver.commit()
+    finally:
+        reviver.close()
+        racer.close()
+
+    with claims_db.Session() as session:
+        live = _active_rows(session, claims_db.event, claims_db.identity)
+        assert len(live) == 1
+        assert live[0].id == winner_row.id
+        still_repudiated = session.get(EventIdentity, repudiated_id)
+        assert still_repudiated.unlinked_at == TS
+        assert still_repudiated.verdict == "wrong"
 
 
 def test_link_claim_increments_a_standing_claim_and_never_revives_a_repudiated_one(

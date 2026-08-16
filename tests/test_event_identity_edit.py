@@ -843,3 +843,63 @@ def test_attach_folds_into_a_claim_another_writer_just_made(edit_env):
         target = session.get(Identity, edit_env.ids.other)
         assert target.appearance_count == 2  # the visit is counted once
         assert target.vector_count == 0  # and this crop is not enrolled again
+
+
+def test_an_attach_that_loses_the_race_leaves_the_survivor_uncounted(
+    edit_env, monkeypatch
+):
+    """The race the previous test cannot reach through the client: the
+    request looks, finds nothing, and only then does the other writer
+    commit. The insert now collides and folds into their row.
+
+    `hit_count` counts frames that evidenced the claim, and a manual
+    attach contributes none — its own row is discarded and its
+    `appearance_count` increment withheld — so the surviving row must not
+    gain one either. The two counters move together or Σ hit_count stops
+    matching appearance_count, which is the invariant the merge fold is
+    argued from.
+    """
+    from siteloom.store import claims
+
+    real_active_claim = claims.active_claim
+    raced = []
+
+    def race_then_miss(session, event_id, identity_id):
+        if raced:
+            return real_active_claim(session, event_id, identity_id)
+        raced.append(True)
+        # The other request commits its claim — and its bookkeeping —
+        # after our lookup read, which is what makes this a race.
+        with edit_env.Session() as other:
+            other.add(
+                EventIdentity(
+                    event_id=edit_env.ids.event,
+                    identity_id=edit_env.ids.other,
+                    identifier_key="vehicle",
+                    similarity=0.0,
+                    hit_count=8,
+                    matched_by=None,
+                    verdict="confirmed",
+                )
+            )
+            other.get(Identity, edit_env.ids.other).appearance_count = 2
+            other.commit()
+        return None
+
+    monkeypatch.setattr(claims, "active_claim", race_then_miss)
+
+    r = edit_env.client.post(
+        f"/events/{edit_env.ids.event}/identity",
+        data={"identity_id": edit_env.ids.other, "enroll": "1"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303  # the collision is folded, not a 500
+
+    with edit_env.Session() as session:
+        live = _active_links(session, edit_env.ids.event, edit_env.ids.other)
+        assert len(live) == 1
+        assert live[0].hit_count == 8  # no frame was invented
+        assert live[0].matched_by == "human"  # the evidence still arrived
+        target = session.get(Identity, edit_env.ids.other)
+        assert target.appearance_count == 2  # counted by the winner, once
+        assert target.vector_count == 0
