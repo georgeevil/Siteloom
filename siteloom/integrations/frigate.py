@@ -39,7 +39,8 @@ from siteloom.config import SiteConfig
 from siteloom.dispatch import Job, JobDispatcher
 from siteloom.integrations.mqtt import MqttPublisher, identity_payload
 from siteloom.integrations.webhooks import WebhookNotifier, classify_resolution
-from siteloom.store import Camera, Event, EventIdentity
+from siteloom.store import Camera, Event
+from siteloom.store.claims import link_claim
 
 log = logging.getLogger(__name__)
 
@@ -297,35 +298,18 @@ class FrigateConsumer:
                 # Quarantined or ambiguous (CLD-41) — no link, no publish.
                 continue
             # Skip claims an operator unlinked (CLD-36): a later `update`
-            # message must not revive a correction by incrementing it.
-            link = session.scalar(
-                select(EventIdentity)
-                .filter_by(event_id=event.id, identity_id=resolution.identity.id)
-                .filter(EventIdentity.unlinked_at.is_(None))
+            # message must not revive a correction by incrementing it. A
+            # claim another writer made first is folded into (CLD-133) —
+            # ingest and this consumer share every event and identity.
+            link_claim(
+                session,
+                event_id=event.id,
+                identity_id=resolution.identity.id,
+                identifier_key=emb["identifier"],
+                similarity=resolution.similarity,
+                matched_by=resolution.matched_by,
+                learned_plate=resolution.learned_plate,
             )
-            if link is None:
-                session.add(
-                    EventIdentity(
-                        event_id=event.id,
-                        identity_id=resolution.identity.id,
-                        identifier_key=emb["identifier"],
-                        similarity=resolution.similarity,
-                        matched_by=resolution.matched_by,
-                        learned_plate=resolution.learned_plate,
-                    )
-                )
-            else:
-                link.hit_count += 1
-                link.similarity = max(link.similarity, resolution.similarity)
-                # Record the strongest evidence seen across frames: plate
-                # outranks visual, and a link whose first frame *created*
-                # the identity (no match, so None) picks up the first
-                # re-match's mode.
-                if resolution.matched_by == "plate":
-                    link.matched_by = "plate"
-                elif link.matched_by is None:
-                    link.matched_by = resolution.matched_by
-                link.learned_plate = link.learned_plate or resolution.learned_plate
             session.commit()
             self.stats.identities += 1
 

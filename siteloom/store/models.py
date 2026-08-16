@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -26,6 +27,7 @@ from sqlalchemy import (
     not_,
     or_,
     select,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -239,6 +241,12 @@ class Identity(Base):
         return self.label or f"unknown-{self.identifier_key}-{self.id}"
 
 
+#: Name of the partial unique index on EventIdentity. Shared with
+#: store/db.py, which must create it *after* the duplicate-claim repair
+#: pass and must not create it during the table rebuild.
+ACTIVE_CLAIM_INDEX = "uq_event_identities_active_claim"
+
+
 class EventIdentity(Base):
     """One identity claim (or recorded miss) on an event.
 
@@ -259,7 +267,11 @@ class EventIdentity(Base):
     longer a claim, so `Event.active_identities` and the SQL clauses
     below skip it. Nulling identity_id instead would have collided with
     the miss shape above: a miss is "nothing was claimed", which is a
-    different fact from "this was claimed and it was wrong".
+    different fact from "this was claimed and it was wrong". Only one
+    such standing claim per (event, identity) may exist, and
+    `ACTIVE_CLAIM_INDEX` below enforces it — partially, over
+    `unlinked_at IS NULL`, because the other two shapes are legitimately
+    repeatable (CLD-133).
 
     `Event.missed_identity` is maintained as a denormalized mirror of
     "this event has missed rows" so one-table accuracy queries and the
@@ -303,6 +315,27 @@ class EventIdentity(Base):
 
     event: Mapped[Event] = relationship(back_populates="identities")
     identity: Mapped[Identity | None] = relationship(back_populates="events")
+
+    __table_args__ = (
+        # One standing claim per (event, identity) — the constraint that
+        # makes CLD-133's stacked duplicates unrepresentable rather than
+        # merely discouraged. Partial, because the other two shapes in
+        # this table are legitimately repeatable: an operator may
+        # repudiate the same pairing more than once, and those unlinked
+        # rows are evidence, not garbage (CLD-36); and NULL identity_id
+        # miss rows are distinct under a unique index by SQL's NULL
+        # semantics, so several identifiers can each record a miss on one
+        # event. Both dialect kwargs are set: SQLite runs it today,
+        # Postgres spells the same partial index differently.
+        Index(
+            ACTIVE_CLAIM_INDEX,
+            "event_id",
+            "identity_id",
+            unique=True,
+            sqlite_where=text("unlinked_at IS NULL"),
+            postgresql_where=text("unlinked_at IS NULL"),
+        ),
+    )
 
     @property
     def is_miss(self) -> bool:
