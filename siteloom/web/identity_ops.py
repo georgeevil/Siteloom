@@ -24,7 +24,9 @@ import logging
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from siteloom.identity.plates import normalize_plate
 from siteloom.store import Detection, Event, Identity
+from siteloom.store.models import PLATE_SOURCE_OPERATOR
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +192,59 @@ def revert_learned_plate(session, link, event_id: int) -> None:
             identity.id,
         )
         identity.plate = None
+
+
+def set_identity_plate(
+    session, identity, plate: str | None, *, confirm: bool = False
+) -> str | None:
+    """Write, overwrite or clear an identity's plate on operator authority.
+
+    The one path that may overwrite a non-empty `Identity.plate`: the
+    resolver is write-once by design (a plate match beats visual
+    similarity outright, PRD §6.4, so a plate that changed itself would
+    move every future sighting of that number), and an operator saying
+    what the plate is outranks any OCR read.
+
+    Input is normalized, never stored verbatim. `Identity.plate` is
+    compared against `normalize_plate`'d OCR output, so a typed
+    "TYB-506" kept as typed would never match a future read — the edit
+    would look like it worked and quietly do nothing.
+
+    Returns the normalized plate, or None for a clear. Raises 400 on
+    input that normalizes to nothing (the rule `plate_correct` already
+    applies to a correction) and 409 when another identity of the same
+    identifier already carries the plate, unless `confirm`: two
+    identities sharing one plate makes the plate-first lookup pick
+    between them arbitrarily, and the console should not be the thing
+    that manufactures that.
+
+    Rows only — plates are never embedded, so nothing here touches the
+    vector store.
+    """
+    if not plate or not plate.strip():
+        identity.plate = None
+        identity.plate_source = PLATE_SOURCE_OPERATOR
+        return None
+    normalized = normalize_plate(plate)
+    if not normalized:
+        raise HTTPException(400, f"{plate!r} normalizes to nothing")
+    if not confirm:
+        clash = session.scalar(
+            select(Identity).where(
+                Identity.identifier_key == identity.identifier_key,
+                Identity.plate == normalized,
+                Identity.id != identity.id,
+            )
+        )
+        if clash is not None:
+            raise HTTPException(
+                409,
+                f"{normalized} is already on {clash.display_name} "
+                f"(identity {clash.id}) — confirm to give it to both",
+            )
+    identity.plate = normalized
+    identity.plate_source = PLATE_SOURCE_OPERATOR
+    return normalized
 
 
 def unlink_claim(session, vectors, event, link, *, when) -> int:

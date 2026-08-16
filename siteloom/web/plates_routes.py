@@ -44,6 +44,7 @@ be chosen without first seeing the distribution it has to cut.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -53,8 +54,14 @@ from sqlalchemy import case, false, func, or_, select, tuple_
 
 from siteloom import localtime
 from siteloom.identity.plates import normalize_plate
-from siteloom.store import PLATE_VERDICTS, Identity, PlateRead, PlateWatch
-from siteloom.web import nav, paging
+from siteloom.store import (
+    PLATE_VERDICTS,
+    EventIdentity,
+    Identity,
+    PlateRead,
+    PlateWatch,
+)
+from siteloom.web import identity_ops, nav, paging
 
 log = logging.getLogger(__name__)
 
@@ -405,6 +412,57 @@ def _paged_reads(session, clauses: list, after: str | None):
     return paging.take(list(fetched), PLATES_PAGE, lambda r: (r.at, r.id))
 
 
+def _apply_targets(session, reads) -> dict[int, Identity]:
+    """The identity each read could be applied to, where that is unambiguous.
+
+    A read is appliable when an operator stands behind its value —
+    `corrected_text`, or a `confirmed` verdict — and its event carries
+    **exactly one** active claim of the read's own identifier. Keying on
+    `read.identifier_key` rather than a config lookup of "which
+    identifiers do plates" keeps the rule exact and config-free.
+
+    Two claims is not a corner case: an event with a vehicle claimed on
+    two identities is precisely where guessing would write the plate onto
+    the wrong one, so the button is withheld and the identity page's edit
+    field stays the unambiguous path. Zero is the event that was never
+    linked at all.
+
+    One query for the whole page, not one per row — these lists run to
+    hundreds of reads of one parked car.
+    """
+    wanted = {
+        read.event_id: read.identifier_key
+        for read in reads
+        if read.identifier_key and (read.corrected_text or read.verdict == "confirmed")
+    }
+    if not wanted:
+        return {}
+    claims: dict[tuple[int, str], list[EventIdentity]] = defaultdict(list)
+    rows = session.scalars(
+        select(EventIdentity).where(
+            EventIdentity.event_id.in_(wanted),
+            EventIdentity.unlinked_at.is_(None),
+            EventIdentity.identity_id.is_not(None),
+            EventIdentity.identifier_key.in_(set(wanted.values())),
+        )
+    ).all()
+    for row in rows:
+        claims[(row.event_id, row.identifier_key)].append(row)
+    identities = {
+        key: session.get(Identity, group[0].identity_id)
+        for key, group in claims.items()
+        if len(group) == 1
+    }
+    targets = {}
+    for read in reads:
+        if read.event_id not in wanted or wanted[read.event_id] != read.identifier_key:
+            continue
+        target = identities.get((read.event_id, read.identifier_key))
+        if target is not None:
+            targets[read.id] = target
+    return targets
+
+
 def _upsert_watch(session, plate: str, label: str, note: str) -> None:
     """Create the watch, or overwrite why it is watched — the form the
     operator just submitted is the current intent."""
@@ -629,7 +687,7 @@ def search_clause(q: str):
     )
 
 
-def register(app, templates, Session, config) -> None:
+def register(app, templates, Session, config) -> None:  # noqa: C901 — route table
     from siteloom.web.app import _more, _with_cursor
 
     nav.add("/plates", "Plate reads", "PR", after="/stats")
@@ -676,6 +734,9 @@ def register(app, templates, Session, config) -> None:
                 slice_ = _paged_reads(session, clauses, after)
                 rows = slice_.rows
                 groups = []
+            # Inside the session, and one query for the page: the rows
+            # detach when this block exits (CLD-134).
+            apply_targets = _apply_targets(session, rows)
             watch_rows, watched_plates = _watch_rows(session)
 
         plate_identifiers = [
@@ -700,6 +761,7 @@ def register(app, templates, Session, config) -> None:
             "plates.html",
             {
                 "site_name": config.site_name or config.site_id,
+                "apply_targets": apply_targets,
                 "reads": rows,
                 "groups": groups,
                 "filters": filters,
@@ -790,6 +852,7 @@ def register(app, templates, Session, config) -> None:
                 .order_by(Identity.id)
             ).all()
             slice_ = _paged_reads(session, [belongs], after)
+            apply_targets = _apply_targets(session, slice_.rows)
             # Detached rows are fine for the template (scalars only), but
             # the identity link needs display_name, computed while bound.
             identity_cards = [
@@ -809,6 +872,7 @@ def register(app, templates, Session, config) -> None:
             "plate.html",
             {
                 "site_name": config.site_name or config.site_id,
+                "apply_targets": apply_targets,
                 "plate": canonical,
                 "reads": slice_.rows,
                 "total": total,
@@ -842,9 +906,10 @@ def register(app, templates, Session, config) -> None:
 
         A wrong verdict is recorded, never deleted — the negatives-are-
         data philosophy again — and it deliberately changes nothing in the
-        identity store. `Identity.plate` is write-once and a plate match
-        beats visual similarity; unwinding that from here would be a
-        second, larger decision made by accident.
+        identity store. A plate match beats visual similarity, so moving
+        one as a side effect of judging would be a second, larger
+        decision made by accident. Writing a read onto its vehicle is the
+        separate, explicit act next door (`plate_apply_identity`).
         """
         choice = verdict.strip() or None
         if choice is not None and choice not in PLATE_VERDICTS:
@@ -902,10 +967,11 @@ def register(app, templates, Session, config) -> None:
         Correcting is judging: the verdict follows from whether the
         correction agrees with what the OCR read, so a typed correction
         never coexists with a "confirmed" verdict on a misread. Like the
-        verdict itself it changes nothing in the identity store —
-        `Identity.plate` is write-once, and unwinding a plate match is a
-        larger decision than judging a read. An empty submission clears
-        the correction and leaves the verdict standing.
+        verdict itself it changes nothing in the identity store: knowing
+        what a plate says and deciding which vehicle carries it are two
+        acts, and the second one is `plate_apply_identity`, which this
+        correction makes available. An empty submission clears the
+        correction and leaves the verdict standing.
         """
         normalized = normalize_plate(text)
         if text.strip() and not normalized:
@@ -921,6 +987,74 @@ def register(app, templates, Session, config) -> None:
                 read.corrected_text = normalized
                 read.verdict = "confirmed" if normalized == read.text else "wrong"
                 read.verdict_at = _now()
+            session.commit()
+        return _plates_redirect(back)
+
+    @app.post("/plates/{read_id}/apply-identity")
+    def plate_apply_identity(
+        read_id: int,
+        back: str = Form("/plates"),
+    ):
+        """Write this read's plate onto the vehicle its event claims (CLD-134).
+
+        The deliberate second act after judging. Confirming a read says
+        the OCR was right; this says the identity should carry it — and
+        keeping them apart is what lets an operator work the queue
+        without every keystroke reaching into the identity store.
+
+        Refused unless the read's event carries exactly one active claim
+        of the read's identifier: with two, writing to either would be a
+        guess, and a plate match beats visual similarity outright
+        (PRD §6.4), so the guess would move every future sighting of that
+        number. The identity page's edit field is the unambiguous path.
+
+        The same write as that field, through `set_identity_plate`, so
+        the plate is normalized once and the result is operator-owned —
+        including against the resolver re-learning over it.
+        """
+        with Session() as session:
+            read = session.get(PlateRead, read_id)
+            if read is None:
+                raise HTTPException(404)
+            value = read.corrected_text or read.text
+            if not value or not (read.corrected_text or read.verdict == "confirmed"):
+                raise HTTPException(
+                    400,
+                    "only a corrected or confirmed read can be applied — "
+                    "judge it first",
+                )
+            claims = session.scalars(
+                select(EventIdentity).where(
+                    EventIdentity.event_id == read.event_id,
+                    EventIdentity.unlinked_at.is_(None),
+                    EventIdentity.identity_id.is_not(None),
+                    EventIdentity.identifier_key == read.identifier_key,
+                )
+            ).all()
+            if not claims:
+                raise HTTPException(
+                    400,
+                    f"event {read.event_id} has no vehicle claim to apply this "
+                    "read to — link one on the event page first",
+                )
+            if len(claims) > 1:
+                names = ", ".join(
+                    f"{i.display_name} (identity {i.id})"
+                    for i in (session.get(Identity, c.identity_id) for c in claims)
+                    if i is not None
+                )
+                raise HTTPException(
+                    400,
+                    f"event {read.event_id} claims {len(claims)} vehicles ({names}) "
+                    "— set the plate on the right one from its identity page",
+                )
+            identity = session.get(Identity, claims[0].identity_id)
+            # Not confirm=True: this button has no confirm checkbox, and
+            # silently giving two identities one plate is the state the
+            # duplicate check exists to keep the console from creating.
+            # The 409 names the other identity, which is where the
+            # operator has to decide anyway.
+            identity_ops.set_identity_plate(session, identity, value)
             session.commit()
         return _plates_redirect(back)
 

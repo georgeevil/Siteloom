@@ -48,7 +48,12 @@ from siteloom.store import (
     make_engine,
 )
 from siteloom.store import claims
-from siteloom.store.models import significance_clause, status_clause, unmatched_clause
+from siteloom.store.models import (
+    PLATE_SOURCE_OPERATOR,
+    significance_clause,
+    status_clause,
+    unmatched_clause,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1354,8 +1359,124 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "links": links,
                 "annotations": annotations,
                 "merge_candidates": merge_candidates,
+                # Whether this identifier does plates at all. The section
+                # also renders without it when a plate is already set — a
+                # plate learned under an older config has to stay
+                # removable (CLD-134).
+                "plate_ocr": bool(
+                    getattr(
+                        config.identity.identifiers.get(identity.identifier_key),
+                        "plate_ocr",
+                        False,
+                    )
+                ),
             },
         )
+
+    def _plate_identity(session, identity_id: int) -> Identity:
+        identity = session.get(Identity, identity_id)
+        if identity is None:
+            raise HTTPException(404)
+        return identity
+
+    @app.post("/identities/{identity_id}/plate")
+    def set_identity_plate(
+        identity_id: int,
+        plate: str = Form(""),
+        confirm: str = Form(""),
+        relearn: str = Form(""),
+    ):
+        """Set, overwrite or clear this identity's plate (CLD-134).
+
+        The resolver is write-once: it fills an empty plate and never
+        touches a full one, which left a junk plate — `111111` on a
+        vehicle whose real plate is TYB506 — unfixable from the console
+        even after the claim that taught it was marked wrong. An operator
+        outranks OCR, so this is the one path that may overwrite.
+
+        Clearing is deliberately available even when the identifier no
+        longer does plates: a plate learned under an older config must
+        still be removable, which is the whole complaint. Setting one is
+        not — a face identity has no plate, and letting the console write
+        one would put a value where nothing reads it.
+
+        A clear is remembered as an operator act (`plate_source`), which
+        is what makes it stick: an empty plate is exactly the condition
+        the resolver's learn path fires on, so without that mark the next
+        sighting re-learns the junk and the correction undoes itself.
+        `relearn` is the opposite request — hand this vehicle back to
+        automatic learning — and so clears the mark instead of setting
+        it.
+        """
+        with Session() as session:
+            identity = _plate_identity(session, identity_id)
+            wants_plate = bool(plate and plate.strip())
+            if wants_plate:
+                ident_cfg = config.identity.identifiers.get(identity.identifier_key)
+                if ident_cfg is None or not ident_cfg.plate_ocr:
+                    raise HTTPException(
+                        400,
+                        f"{identity.identifier_key!r} identities do not carry "
+                        "plates — only clearing one is allowed",
+                    )
+            identity_ops.set_identity_plate(
+                session, identity, plate, confirm=bool(confirm)
+            )
+            if not wants_plate and relearn:
+                # Not "an operator set this to nothing" but "stop treating
+                # my last answer as final" — the only way back to
+                # automatic learning once a clear has locked it.
+                identity.plate_source = None
+            session.commit()
+        return RedirectResponse(f"/identities/{identity_id}", status_code=303)
+
+    @app.post("/identities/{identity_id}/plate/move")
+    def move_identity_plate(
+        identity_id: int,
+        target_id: int = Form(...),
+        confirm: str = Form(""),
+    ):
+        """Move a plate from one identity to another (CLD-134).
+
+        The correction for a plate learned onto the wrong vehicle, which
+        is two edits everywhere else: clearing it here and typing it
+        there, with a window in between where the plate belongs to
+        nobody and the two halves can be left half-done.
+
+        Both ends end up operator-owned, the source included. The
+        operator has just said this plate is not that vehicle's, so
+        letting the resolver re-learn the same string onto it would be
+        the same mistake by another route.
+        """
+        with Session() as session:
+            identity = _plate_identity(session, identity_id)
+            if target_id == identity_id:
+                raise HTTPException(400, "cannot move a plate to the same identity")
+            target = session.get(Identity, target_id)
+            if target is None:
+                raise HTTPException(404)
+            if target.identifier_key != identity.identifier_key:
+                # Same rule, and the same reason, as merge_identity's: a
+                # vehicle plate on a face identity is nonsense the store
+                # should not hold.
+                raise HTTPException(
+                    400, "identities from different identifiers cannot swap plates"
+                )
+            if not identity.plate:
+                raise HTTPException(400, "this identity has no plate to move")
+            if target.plate and target.plate != identity.plate and not confirm:
+                raise HTTPException(
+                    409,
+                    f"{target.display_name} already carries {target.plate} — "
+                    f"confirm to replace it with {identity.plate}",
+                )
+            target.plate = identity.plate
+            target.plate_source = PLATE_SOURCE_OPERATOR
+            identity.plate = None
+            identity.plate_source = PLATE_SOURCE_OPERATOR
+            session.commit()
+        # The operator's attention has moved with the plate.
+        return RedirectResponse(f"/identities/{target_id}", status_code=303)
 
     @app.post("/events/{event_id}/identity/{link_id}/verdict")
     def set_identity_verdict(

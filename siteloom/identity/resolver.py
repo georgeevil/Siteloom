@@ -40,7 +40,13 @@ from sqlalchemy.orm import Session
 
 from siteloom.config import IdentifierConfig, IdentityConfig
 from siteloom.identity.vectors import VectorStore
-from siteloom.store.models import EventIdentity, Identity
+from siteloom.store.models import (
+    PLATE_SOURCE_LEARNED,
+    PLATE_SOURCE_MINT,
+    PLATE_SOURCE_OPERATOR,
+    EventIdentity,
+    Identity,
+)
 
 
 def _pending_collection(identifier_key: str) -> str:
@@ -174,6 +180,7 @@ class IdentityResolver:
                 identifier_key=identifier_key,
                 class_name=class_name,
                 plate=plate,
+                plate_source=PLATE_SOURCE_MINT if plate else None,
                 first_seen=promoted_first_seen,
                 last_seen=timestamp,
             )
@@ -208,9 +215,20 @@ class IdentityResolver:
         # Update stats + evidence.
         identity.last_seen = max(identity.last_seen, timestamp)
         identity.appearance_count += 1
-        learned_plate = bool(plate and not identity.plate and not is_new)
-        if plate and not identity.plate:
+        # An operator-set plate — including one an operator *cleared* — is
+        # not territory the resolver may take back. An empty plate is what
+        # the learn below fires on, so without this guard a cleared junk
+        # plate is re-learned by the next sighting and the correction
+        # undoes itself (CLD-134).
+        learned_plate = bool(
+            plate
+            and not identity.plate
+            and not is_new
+            and identity.plate_source != PLATE_SOURCE_OPERATOR
+        )
+        if learned_plate:
             identity.plate = plate  # visual match just learned its plate
+            identity.plate_source = PLATE_SOURCE_LEARNED
         if crop_path and not identity.best_crop_path:
             identity.best_crop_path = crop_path
         if arr is not None and self._may_learn(

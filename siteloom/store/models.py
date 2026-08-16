@@ -207,6 +207,15 @@ class Detection(Base):
     event: Mapped[Event] = relationship(back_populates="detections")
 
 
+#: Values `Identity.plate_source` takes. NULL is a fourth, real state —
+#: a plate recorded before provenance was tracked — and every reader has
+#: to render it as unknown rather than as any of these.
+PLATE_SOURCE_MINT = "mint"  # read when the identity was first seen
+PLATE_SOURCE_LEARNED = "learned"  # a later visual match learned it
+PLATE_SOURCE_OPERATOR = "operator"  # set, or deliberately cleared, by a person
+PLATE_SOURCES = (PLATE_SOURCE_MINT, PLATE_SOURCE_LEARNED, PLATE_SOURCE_OPERATOR)
+
+
 class Identity(Base):
     """One recognized individual thing: a face, a person's appearance, a
     vehicle. `identifier_key` names which identification algorithm owns it
@@ -227,6 +236,13 @@ class Identity(Base):
     # Vehicle identities can also be matched by plate (PRD §6.4): plate OR
     # visual signature write to this same record, whichever is available.
     plate: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Where `plate` came from (CLD-134). NULL on rows written before this
+    # was tracked — unknown provenance, not "never set", the same answer
+    # CLD-84 gave for vectors that predate their marker. "operator" is
+    # load-bearing rather than informational: it is what stops the
+    # resolver re-learning a plate an operator just cleared, since an
+    # empty plate is precisely the condition the learn path fires on.
+    plate_source: Mapped[str | None] = mapped_column(String, nullable=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime)
     last_seen: Mapped[datetime] = mapped_column(DateTime, index=True)
     appearance_count: Mapped[int] = mapped_column(Integer, default=0)
