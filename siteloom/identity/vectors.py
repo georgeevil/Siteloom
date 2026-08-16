@@ -61,10 +61,26 @@ SOURCE_MANUAL = "manual"  # an operator correction in the console (CLD-36)
 SOURCE_API = "api"  # the CompreFace-compatible enrollment endpoint
 
 
+#: Raw-point window for identity candidate search. Wide enough that a
+#: healthy gallery (max_vectors_per_identity defaults to 20) rarely
+#: monopolises it, cheap enough to run per identified frame: flat search
+#: cost is ~1 ms at 1k points, ~3 ms at 5k, and barely moves with limit.
+CANDIDATE_POINTS = 32
+
+
 @dataclass
 class Hit:
     identity_id: int
     score: float  # cosine similarity, higher = closer
+
+
+def _ranked_hits(best: dict[int, float]) -> list[Hit]:
+    return [
+        Hit(identity_id=identity_id, score=score)
+        for identity_id, score in sorted(
+            best.items(), key=lambda kv: kv[1], reverse=True
+        )
+    ]
 
 
 @dataclass
@@ -145,6 +161,74 @@ class VectorStore:
             Hit(identity_id=int(p.payload["identity_id"]), score=float(p.score))
             for p in res.points
         ]
+
+    @_locked
+    def search_identities(
+        self,
+        collection: str,
+        vector: np.ndarray,
+        *,
+        limit: int = CANDIDATE_POINTS,
+        min_identities: int = 2,
+    ) -> list[Hit]:
+        """Best score per *identity*, ranked — with the runner-up guaranteed.
+
+        The contest the resolver runs is between individuals, not between
+        raw vectors, and the guarantee it needs is that if two identities
+        have any vector in this collection, it sees two. A flat top-k does
+        not provide that: one identity holding k near-duplicates fills the
+        window, `ranked` collapses to length 1, and `min_margin` — the
+        check that exists precisely for a crowded neighbourhood — is
+        skipped where it matters most (CLD-139).
+
+        Two passes, because the exact answer is 20x the price of the
+        common one (measured: 12 ms vs 1 ms at 1k points, 62 ms vs 3 ms at
+        5k):
+
+        1. Flat search at `limit`, grouped in Python. If **fewer than
+           `limit` points came back, this window is the whole
+           collection** — there is no hidden identity, and the grouping is
+           exhaustive by construction. That is the ordinary case and it is
+           one search.
+        2. Only when the window came back *saturated* AND collapsed to
+           fewer than `min_identities` — the pathological case, one
+           gallery monopolising the window — re-ask with Qdrant's grouped
+           search, which groups server-side over the whole collection and
+           is unaffected by gallery size (verified against a 2000-vector
+           gallery).
+
+        Returns one Hit per identity, best score first. No fallback path
+        if grouped search is unavailable: the pinned client supports it in
+        both local and server mode, and a silent degradation here would
+        restore exactly the bug being fixed.
+        """
+        if not self._client.collection_exists(collection):
+            return []
+        res = self._client.query_points(
+            collection_name=collection,
+            query=vector.astype(np.float32).tolist(),
+            limit=limit,
+        )
+        best: dict[int, float] = {}
+        for point in res.points:  # sorted by score desc
+            best.setdefault(int(point.payload["identity_id"]), float(point.score))
+        if len(res.points) < limit or len(best) >= min_identities:
+            return _ranked_hits(best)
+
+        groups = self._client.query_points_groups(
+            collection_name=collection,
+            query=vector.astype(np.float32).tolist(),
+            group_by="identity_id",
+            limit=min_identities,
+            group_size=1,
+        )
+        return _ranked_hits(
+            {
+                int(point.payload["identity_id"]): float(point.score)
+                for group in groups.groups
+                for point in group.hits[:1]
+            }
+        )
 
     @_locked
     def best_match(self, collection: str, vector: np.ndarray) -> Hit | None:

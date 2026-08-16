@@ -228,17 +228,21 @@ class IdentityResolver:
     ) -> tuple[Identity | None, float, bool]:
         """Best identity by score, guarded by the margin + recency rules.
 
-        Returns (identity, best score, ambiguous). Scores are aggregated
-        per *identity* (max over its hits in the top-k) so the contest is
-        between individuals, not between raw vectors from one gallery.
+        Returns (identity, best score, ambiguous). Aggregation per
+        *identity* (max over that identity's hits) happens in the store,
+        which is also where the guarantee this method depends on lives:
+        if two identities have vectors here, `ranked` has two entries.
+        That is structural rather than a matter of asking for a bigger
+        window — no flat top-k is large enough when one gallery can hold
+        every slot, which is how the margin check came to be skipped in
+        exactly the crowded neighbourhood it exists for (CLD-139).
         """
         eff_threshold = self._threshold(identifier_key, ident_cfg, threshold)
         margin = ident_cfg.min_margin if ident_cfg else 0.0
-        hits = self.vectors.search(identifier_key, arr, limit=10)
-        best: dict[int, float] = {}
-        for hit in hits:  # hits arrive sorted by score desc
-            best.setdefault(hit.identity_id, hit.score)
-        ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        ranked = [
+            (hit.identity_id, hit.score)
+            for hit in self.vectors.search_identities(identifier_key, arr)
+        ]
         if not ranked or ranked[0][1] < eff_threshold:
             return None, ranked[0][1] if ranked else 0.0, False
         top_id, top_score = ranked[0]
