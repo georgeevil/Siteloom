@@ -790,6 +790,43 @@ def test_a_lost_race_can_absorb_evidence_without_counting_a_frame(claims_db):
     assert survivor.learned_plate is True
 
 
+def test_a_lost_race_tolerates_a_row_that_never_set_its_similarity(claims_db):
+    """Column defaults are applied by the INSERT, not by the constructor,
+    so a row that lost the race can still be carrying None where the
+    recovery's `max()` and OR expect values. A caller that omits the
+    score gets a fold, not a TypeError."""
+    with claims_db.Session() as session:
+        insert_claim(
+            session,
+            EventIdentity(
+                event_id=claims_db.event,
+                identity_id=claims_db.identity,
+                identifier_key="vehicle",
+                similarity=0.7,
+                matched_by="visual",
+            ),
+        )
+        session.commit()
+
+    with claims_db.Session() as loser:
+        survivor, created = insert_claim(
+            loser,
+            # No similarity, no learned_plate: what the INSERT would have
+            # filled in.
+            EventIdentity(
+                event_id=claims_db.event,
+                identity_id=claims_db.identity,
+                identifier_key="vehicle",
+                matched_by="visual",
+            ),
+        )
+        loser.commit()
+
+    assert created is False
+    assert survivor.similarity == 0.7
+    assert survivor.learned_plate is False
+
+
 def test_the_per_frame_writers_still_count_their_frame(claims_db):
     """The counter policy is per caller, not a new default: ingest and
     the Frigate consumer really did see a frame, and `link_claim`'s race
