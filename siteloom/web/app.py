@@ -1407,6 +1407,13 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         `relearn` is the opposite request — hand this vehicle back to
         automatic learning — and so clears the mark instead of setting
         it.
+
+        Clearing an identity that never had a plate is therefore not the
+        no-op it looks like: it locks that vehicle out of automatic plate
+        learning, deliberately, because "never put a plate on this thing"
+        is a thing an operator may well mean. It says so on the page
+        afterwards, and the relearn button appears in exactly that state,
+        so the lock is visible and one click from being undone.
         """
         with Session() as session:
             identity = _plate_identity(session, identity_id)

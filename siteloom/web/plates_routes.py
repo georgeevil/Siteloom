@@ -427,11 +427,15 @@ def _apply_targets(session, reads) -> dict[int, Identity]:
     field stays the unambiguous path. Zero is the event that was never
     linked at all.
 
-    One query for the whole page, not one per row — these lists run to
-    hundreds of reads of one parked car.
+    Two queries for the whole page — the claims, then the identities they
+    name — never one per row: these lists run to hundreds of reads of one
+    parked car, and a default page spans as many events as it has rows.
     """
+    # Keyed by the pair, not by the event: one event can carry reads of
+    # two identifiers, and keying on the event alone would let the later
+    # one shadow the earlier and withhold its button.
     wanted = {
-        read.event_id: read.identifier_key
+        (read.event_id, read.identifier_key)
         for read in reads
         if read.identifier_key and (read.corrected_text or read.verdict == "confirmed")
     }
@@ -440,24 +444,33 @@ def _apply_targets(session, reads) -> dict[int, Identity]:
     claims: dict[tuple[int, str], list[EventIdentity]] = defaultdict(list)
     rows = session.scalars(
         select(EventIdentity).where(
-            EventIdentity.event_id.in_(wanted),
+            EventIdentity.event_id.in_({event_id for event_id, _ in wanted}),
             EventIdentity.unlinked_at.is_(None),
             EventIdentity.identity_id.is_not(None),
-            EventIdentity.identifier_key.in_(set(wanted.values())),
+            EventIdentity.identifier_key.in_({key for _, key in wanted}),
         )
     ).all()
     for row in rows:
         claims[(row.event_id, row.identifier_key)].append(row)
-    identities = {
-        key: session.get(Identity, group[0].identity_id)
+    sole = {
+        key: group[0].identity_id
         for key, group in claims.items()
-        if len(group) == 1
+        if key in wanted and len(group) == 1
+    }
+    if not sole:
+        return {}
+    identities = {
+        identity.id: identity
+        for identity in session.scalars(
+            select(Identity).where(Identity.id.in_(set(sole.values())))
+        ).all()
     }
     targets = {}
     for read in reads:
-        if read.event_id not in wanted or wanted[read.event_id] != read.identifier_key:
+        identity_id = sole.get((read.event_id, read.identifier_key))
+        if identity_id is None:
             continue
-        target = identities.get((read.event_id, read.identifier_key))
+        target = identities.get(identity_id)
         if target is not None:
             targets[read.id] = target
     return targets
