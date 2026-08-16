@@ -22,13 +22,16 @@ Matching policy per identifier (CLD-41 hardened):
    vector-space magnet. A plate, or detection quality at or above
    `immediate_quality`, mints immediately.
 
-On every resolution that yields an identity, the embedding is added to
-its collection (capped) so matches keep improving as the identity
-accumulates views.
+On a resolution that yields an identity the embedding may be added to
+its collection, so matches keep improving as the identity accumulates
+views — but accretion is gated (CLD-139, `_may_learn`). It used to be
+unconditional, which is how one visit could fill a gallery and one wrong
+match could become a permanent attractor.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -42,6 +45,12 @@ from siteloom.store.models import Identity
 
 def _pending_collection(identifier_key: str) -> str:
     return f"{identifier_key}-pending"
+
+
+#: How many (identifier, event, identity) learning budgets to remember.
+#: Evicting the oldest is harmless: an event that has fallen this far
+#: back receives no further frames.
+_EVENT_BUDGET_MEMORY = 4096
 
 
 @dataclass
@@ -74,6 +83,23 @@ class IdentityResolver:
         # soft tie-break, and losing it on restart degrades to the
         # conservative no-match, never to a wrong match.
         self._recent: dict[str, dict[int, dict[str, datetime]]] = {}
+        # Per-event learning budgets (CLD-139): how many vectors one
+        # event has contributed to one identity, keyed (identifier,
+        # event, identity). In memory rather than a vector payload for
+        # the same reason as `_recent` above, plus two of its own: a
+        # filtered count() costs 6-30 ms per frame, and an `event_id` on
+        # the payload would go stale on every de-fragmentation merge,
+        # which would have to re-point payloads across identifier
+        # collections it cannot enumerate.
+        #
+        # What that costs, plainly. A restart mid-visit grants that visit
+        # a fresh budget — bounded by learn_max_per_event again, and by
+        # max_vectors_per_identity on top. Budgets are per event *as it
+        # exists at learn time*: resolve() runs before the identity-aware
+        # merge, so two fragments of one visit each carry their own
+        # budget. No lock is needed — an event belongs to one camera and
+        # ingest runs one worker thread per camera.
+        self._event_learned: OrderedDict[tuple[str, int, int], int] = OrderedDict()
 
     def resolve(
         self,
@@ -89,6 +115,7 @@ class IdentityResolver:
         max_vectors: int = 20,
         camera_id: str | None = None,
         quality: float | None = None,
+        event_id: int | None = None,
     ) -> Resolution:
         arr = np.asarray(vector, dtype=np.float32) if vector is not None else None
         ident_cfg = self.cfg.identifiers.get(identifier_key)
@@ -158,7 +185,14 @@ class IdentityResolver:
             # Each carries the crop it was made from through quarantine,
             # so a promoted vector is as traceable as a directly matched
             # one (CLD-84).
-            for vec, payload in promoted[: max(0, max_vectors - 1)]:
+            # The quarantined sightings are one visit's frames by
+            # construction (the pool is TTL'd on stream time), so without
+            # the per-event cap a mint could found a gallery with 19
+            # vectors from a single visit — the flooding CLD-139 is about,
+            # on the mint path. The budget is seeded with what was stored,
+            # so later frames of the same event add nothing further.
+            founding = promoted[: self._promotion_cap(ident_cfg, max_vectors)]
+            for vec, payload in founding:
                 self.vectors.add(
                     identifier_key,
                     vec,
@@ -166,6 +200,9 @@ class IdentityResolver:
                     crop_path=payload.get("crop_path"),
                 )
                 identity.vector_count += 1
+            self._note_learned(identifier_key, event_id, identity.id, len(founding))
+            # Counts sightings, not vectors: every promoted sighting
+            # really happened, whether or not its vector was kept.
             identity.appearance_count += len(promoted)
 
         # Update stats + evidence.
@@ -176,7 +213,9 @@ class IdentityResolver:
             identity.plate = plate  # visual match just learned its plate
         if crop_path and not identity.best_crop_path:
             identity.best_crop_path = crop_path
-        if arr is not None and identity.vector_count < max_vectors:
+        if arr is not None and self._may_learn(
+            session, ident_cfg, identifier_key, identity, event_id, quality, max_vectors
+        ):
             # `crop_path` is this vector's provenance (CLD-84): the live
             # population has no Annotation row, so the crop file is the
             # only thing that can name it later — which is what lets an
@@ -184,6 +223,7 @@ class IdentityResolver:
             # event taught an identity.
             self.vectors.add(identifier_key, arr, identity.id, crop_path=crop_path)
             identity.vector_count += 1
+            self._note_learned(identifier_key, event_id, identity.id)
         self._note_seen(identifier_key, identity.id, camera_id, timestamp)
 
         return Resolution(
@@ -193,6 +233,83 @@ class IdentityResolver:
             learned_plate=learned_plate,
             matched_by=matched_by,
         )
+
+    def _may_learn(
+        self,
+        session: Session,
+        ident_cfg: IdentifierConfig | None,
+        identifier_key: str,
+        identity: Identity,
+        event_id: int | None,
+        quality: float | None,
+        max_vectors: int,
+    ) -> bool:
+        """Whether this frame's embedding is worth storing (CLD-139).
+
+        Ordered by cost and by how fatal the answer is, cheapest first —
+        which is also what keeps the DB read at the end rare: once an
+        event's budget is spent, every later frame of that visit is
+        refused before the query.
+        """
+        if identity.vector_count >= max_vectors:
+            return False
+        if identity.vector_count == 0:
+            # Load-bearing and not obvious: an identity with no vectors
+            # is invisible to matching, so gating its *first* vector
+            # turns a quality problem into identity churn — the next
+            # frame fails to match and mints another identity, and so on.
+            # For `vehicle` (min_sightings 1, by design for the plate
+            # flow) the founding frame is the only vector there will be
+            # until a second sighting. The founding crop has already
+            # passed CLD-41's own gates; accretion starts at the second
+            # vector, and so does this floor.
+            return True
+        if ident_cfg is None:
+            return True
+        if (
+            ident_cfg.learn_min_quality > 0
+            and quality is not None
+            and quality < ident_cfg.learn_min_quality
+        ):
+            # Absent is absent, not zero: a frame that reports no quality
+            # at all passes, the same rule the plate floors follow.
+            return False
+        if (
+            ident_cfg.learn_max_per_event > 0
+            and event_id is not None
+            and self._event_learned.get((identifier_key, event_id, identity.id), 0)
+            >= ident_cfg.learn_max_per_event
+        ):
+            return False
+        return True
+
+    def _promotion_cap(
+        self, ident_cfg: IdentifierConfig | None, max_vectors: int
+    ) -> int:
+        """How many promoted sightings may found a gallery.
+
+        `max_vectors - 1` leaves room for the frame that triggered the
+        mint; the per-event cap, when it is on, is the tighter bound.
+        """
+        cap = max(0, max_vectors - 1)
+        if ident_cfg is not None and ident_cfg.learn_max_per_event > 0:
+            cap = min(cap, ident_cfg.learn_max_per_event)
+        return cap
+
+    def _note_learned(
+        self,
+        identifier_key: str,
+        event_id: int | None,
+        identity_id: int,
+        count: int = 1,
+    ) -> None:
+        if event_id is None or count <= 0:
+            return
+        key = (identifier_key, event_id, identity_id)
+        self._event_learned[key] = self._event_learned.get(key, 0) + count
+        self._event_learned.move_to_end(key)
+        while len(self._event_learned) > _EVENT_BUDGET_MEMORY:
+            self._event_learned.popitem(last=False)
 
     def _threshold(
         self,

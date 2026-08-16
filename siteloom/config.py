@@ -337,6 +337,35 @@ class IdentifierConfig(BaseModel):
     # mint an identity immediately, bypassing min_sightings. A plate
     # always bypasses — plates are exact evidence.
     immediate_quality: float = 0.85
+    # Learning gates (CLD-139). CLD-41's gates guard *minting*; these
+    # guard accretion, which was unconditional: every matching frame
+    # added its embedding, so one 30-frame visit could fill a gallery
+    # and one wrong match became a permanent attractor that recruited
+    # more wrong vectors on every later visit.
+    #
+    #   learn_min_quality   detection confidence at or below which a
+    #                       frame is matched but never *stored*. The
+    #                       only quality signal the resolver receives
+    #                       today is the detector's own confidence in
+    #                       the parent box — it says "this is a person",
+    #                       not "this crop is legible" — so this is a
+    #                       floor on the signal available, not the ideal
+    #                       one (sharpness/size, the way the plate
+    #                       floors do it, is the follow-up). A frame
+    #                       that reports no quality at all passes:
+    #                       absent is absent, not zero, exactly as for
+    #                       the plate floors above.
+    #   learn_max_per_event how many vectors one event may contribute to
+    #                       one identity. The cap that makes a single
+    #                       visit unable to flood a gallery; the
+    #                       per-identity cap (max_vectors_per_identity)
+    #                       still applies on top, and the lower of the
+    #                       two wins.
+    #
+    # 0 switches either gate off, restoring the pre-CLD-139 behaviour
+    # without a redeploy — which is this change's rollback lever.
+    learn_min_quality: float = 0.6
+    learn_max_per_event: int = 3
 
 
 def _default_identifiers() -> dict[str, IdentifierConfig]:
@@ -347,12 +376,22 @@ def _default_identifiers() -> dict[str, IdentifierConfig]:
         # instead of guessed. Vehicles keep min_sightings=1 — they are
         # fewer, their visual threshold is already strict, and the
         # plate-learning flow (PRD §6.4) expects first-sighting rows.
+        #
+        # The learn gates (CLD-139) are equal across all three on
+        # purpose: `quality` is the YOLO confidence of the one parent
+        # box, so face and person receive the *identical* number for the
+        # same crop. The per-identifier knob exists so a site can tighten
+        # one doorway, not because the signal differs. Stated here rather
+        # than inherited from the field defaults so `doctor` and a reader
+        # of this file see the values in force.
         "face": IdentifierConfig(
             algo="face",
             applies_to=["person"],
             threshold=0.36,
             min_margin=0.05,
             min_sightings=2,
+            learn_min_quality=0.6,
+            learn_max_per_event=3,
         ),
         "person": IdentifierConfig(
             algo="generic",
@@ -360,6 +399,8 @@ def _default_identifiers() -> dict[str, IdentifierConfig]:
             threshold=0.80,
             min_margin=0.02,
             min_sightings=2,
+            learn_min_quality=0.6,
+            learn_max_per_event=3,
         ),
         "vehicle": IdentifierConfig(
             algo="generic",
@@ -367,6 +408,8 @@ def _default_identifiers() -> dict[str, IdentifierConfig]:
             threshold=0.82,
             min_margin=0.02,
             plate_ocr=True,
+            learn_min_quality=0.6,
+            learn_max_per_event=3,
         ),
     }
 

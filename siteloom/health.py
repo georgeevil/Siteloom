@@ -441,12 +441,19 @@ def check_identity_gating(report: Report, config) -> None:
     not restate — so their effective values are reported here rather than
     left to be inferred from a file that does not mention them.
 
-    Two rules, and the asymmetry is deliberate. `min_margin: 0` is never
-    intentional: it means ambiguity resolves to a guess for *any* class.
-    `min_sightings: 1` is intentional for vehicles (few, strict
+    Three rules, and the asymmetry is deliberate. `min_margin: 0` is
+    never intentional: it means ambiguity resolves to a guess for *any*
+    class. `min_sightings: 1` is intentional for vehicles (few, strict
     threshold, and the plate-learning flow expects first-sighting rows),
     so it is only worth reporting where the churn actually comes from —
-    identifiers that apply to people.
+    identifiers that apply to people. Both learn gates at 0 (CLD-139) is
+    the pre-gating accretion behaviour and worth saying out loud, while
+    one of them at 0 is a real choice: a site may want an unlimited count
+    above a strict floor, or the reverse.
+
+    The learn floor is on *detection* confidence because that is the only
+    quality signal the resolver is given — it says "this is a person",
+    not "this crop is legible".
     """
     ungated: list[str] = []
     for key, ident in config.identity.identifiers.items():
@@ -455,6 +462,8 @@ def check_identity_gating(report: Report, config) -> None:
             reasons.append("no margin")
         if ident.min_sightings <= 1 and "person" in ident.applies_to:
             reasons.append("mints on one sighting")
+        if ident.learn_min_quality <= 0 and ident.learn_max_per_event <= 0:
+            reasons.append("learning ungated")
         if reasons:
             ungated.append(f"{key} ({', '.join(reasons)})")
 
@@ -465,6 +474,8 @@ def check_identity_gating(report: Report, config) -> None:
             ", ".join(
                 f"{key} margin {ident.min_margin:g}/{ident.min_sightings} sighting"
                 + ("s" if ident.min_sightings != 1 else "")
+                + f", learn ≥{ident.learn_min_quality:.2f} "
+                + f"×{ident.learn_max_per_event}/event"
                 for key, ident in config.identity.identifiers.items()
             )
             or "no identifiers configured",
@@ -474,7 +485,8 @@ def check_identity_gating(report: Report, config) -> None:
         "identity gating",
         WARN,
         "gates off for " + ", ".join(ungated) + " — ambiguous matches resolve to a guess",
-        "set min_margin (0.05 face, 0.02 generic) and min_sightings: 2 "
+        "set min_margin (0.05 face, 0.02 generic), min_sightings: 2, and "
+        "learn_min_quality/learn_max_per_event (0.6/3) "
         "on identity.identifiers in the site config",
     )
 
