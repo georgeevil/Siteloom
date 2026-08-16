@@ -354,7 +354,12 @@ class IdentifierConfig(BaseModel):
     #                       floors do it, is the follow-up). A frame
     #                       that reports no quality at all passes:
     #                       absent is absent, not zero, exactly as for
-    #                       the plate floors above.
+    #                       the plate floors above. It applies from an
+    #                       identity's *second* vector: the pending pool
+    #                       does not carry a sighting's quality, and a
+    #                       floored promotion could found an empty
+    #                       gallery — invisible to matching, so the next
+    #                       frame mints yet another identity.
     #   learn_max_per_event how many vectors one event may contribute to
     #                       one identity. The cap that makes a single
     #                       visit unable to flood a gallery; the

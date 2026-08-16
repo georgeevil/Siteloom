@@ -215,6 +215,10 @@ class VectorStore:
         if len(res.points) < limit or len(best) >= min_identities:
             return _ranked_hits(best)
 
+        # Verified working against embedded Qdrant, which needs no index
+        # to group on a payload field. A remote server (V1 multi-site)
+        # may want a payload index on identity_id for this to stay cheap
+        # — nothing to do today, and the same call either way.
         groups = self._client.query_points_groups(
             collection_name=collection,
             query=vector.astype(np.float32).tolist(),

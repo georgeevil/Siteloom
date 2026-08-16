@@ -246,10 +246,15 @@ class IdentityResolver:
     ) -> bool:
         """Whether this frame's embedding is worth storing (CLD-139).
 
-        Ordered by cost and by how fatal the answer is, cheapest first —
-        which is also what keeps the DB read at the end rare: once an
-        event's budget is spent, every later frame of that visit is
-        refused before the query.
+        Ordered by cost and by how fatal the answer is, cheapest first.
+        That bounds the DB read at the end only while the *budget* is
+        what refuses: once an event has taught its three vectors, every
+        later frame of that visit turns back before the query. It does
+        not bound it when the verdict gate is the one refusing — nothing
+        is stored, so the budget never advances, and the indexed read
+        runs once per frame for the rest of the visit. That is the
+        intended trade (a repudiated claim is rare, and the read is an
+        indexed lookup), not an oversight.
 
         The verdict gate is the one that reads the database. A `wrong`
         verdict does not *edit* the gallery — that stays the rule
@@ -322,6 +327,13 @@ class IdentityResolver:
 
         `max_vectors - 1` leaves room for the frame that triggered the
         mint; the per-event cap, when it is on, is the tighter bound.
+
+        Only a count, never the quality floor: the pending pool does not
+        carry a sighting's quality, and a floored promotion could keep
+        nothing at all — founding an empty gallery, which is invisible to
+        matching and mints another identity on the next frame. That is
+        the churn `_may_learn`'s first-vector exemption exists to
+        prevent, so the floor starts at the second vector on both paths.
         """
         cap = max(0, max_vectors - 1)
         if ident_cfg is not None and ident_cfg.learn_max_per_event > 0:
