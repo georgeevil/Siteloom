@@ -287,3 +287,64 @@ def test_rebuild_does_not_run_twice(tmp_path):
     assert (
         inspect(engine).get_columns("event_identities")[0]["name"] == "id"
     )
+
+
+def test_a_database_without_plate_source_gains_it_as_unknown(tmp_path):
+    """`Identity.plate_source` (CLD-134) is nullable with no default, so
+    it is exactly the additive case the column pass covers — no migration
+    code, and every existing plate arrives as *unknown provenance*.
+
+    NULL is the honest answer there, and a real fourth state rather than
+    a missing one: the database cannot say whether a plate predating the
+    column was read at mint, learned later, or typed by someone. It is
+    also the safe one — only "operator" locks a plate against re-learning,
+    so a migrated row keeps behaving exactly as it did.
+    """
+    config = SiteConfig(
+        site_id="t",
+        site_name="T",
+        cameras=[CameraConfig(id="cam1", adapter="file", source="x")],
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/legacy.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    engine = make_engine(config.storage.db_url)
+    init_db(engine)
+    Session = get_session(engine)
+    with Session() as s:
+        s.add(
+            Identity(
+                identifier_key="vehicle",
+                class_name="car",
+                label="the gray van",
+                plate="KJ4471",
+                first_seen=TS,
+                last_seen=TS,
+            )
+        )
+        s.commit()
+        identity_id = s.query(Identity).one().id
+
+    # Roll the schema back to before the column existed, rather than
+    # hand-listing every other column of a table three issues are adding
+    # to.
+    con = sqlite3.connect(tmp_path / "legacy.db")
+    con.execute("ALTER TABLE identities DROP COLUMN plate_source")
+    con.commit()
+    con.close()
+    assert "plate_source" not in {
+        c["name"] for c in inspect(engine).get_columns("identities")
+    }
+
+    init_db(engine)
+
+    assert "plate_source" in {
+        c["name"] for c in inspect(engine).get_columns("identities")
+    }
+    with Session() as s:
+        identity = s.get(Identity, identity_id)
+        assert identity.plate == "KJ4471"  # the plate itself survives
+        assert identity.plate_source is None
+
+    page = TestClient(create_app(config)).get(f"/identities/{identity_id}").text
+    assert "recorded before provenance was tracked" in page

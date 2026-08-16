@@ -1656,3 +1656,138 @@ def test_the_timeframe_is_a_living_window(tmp_path):
     assert "AB1234" in client.get("/plates?last=3w").text
     # A hand-mangled absolute bound is a 400, never silently "no filter".
     assert client.get("/plates?since=notatime").status_code == 400
+
+
+# --------------------------------------------------------------------------
+# Applying a read to the vehicle that made it (CLD-134)
+# --------------------------------------------------------------------------
+
+
+def _page_with_claims(tmp_path, claim_count, verdict="confirmed"):
+    """One confirmed read, on an event carrying `claim_count` vehicle
+    claims — the three shapes the button has to distinguish."""
+    from siteloom.store import EventIdentity, Identity
+
+    tmp_path.mkdir(parents=True, exist_ok=True)  # callers pass sub-paths
+    client, Session = seeded_client(
+        tmp_path,
+        [{"class_name": "car", "raw_text": "TYB506", "text": "TYB506",
+          "accepted": True, "verdict": verdict}],
+    )
+    with Session() as session:
+        event_id = session.query(Event).one().id
+        read_id = session.query(PlateRead).one().id
+        for i in range(claim_count):
+            identity = Identity(
+                identifier_key="vehicle",
+                class_name="car",
+                label=f"Vehicle {i}",
+                first_seen=TS,
+                last_seen=TS,
+            )
+            session.add(identity)
+            session.flush()
+            session.add(
+                EventIdentity(
+                    event_id=event_id,
+                    identity_id=identity.id,
+                    identifier_key="vehicle",
+                    similarity=0.9,
+                )
+            )
+        session.commit()
+    return client, read_id
+
+
+def test_the_apply_button_appears_only_where_the_target_is_unambiguous(tmp_path):
+    """The button carries a decision, so it is offered only where the
+    decision is already made: exactly one active vehicle claim on the
+    read's event. With none there is nothing to apply it to, and with two
+    the page cannot say which vehicle the plate belongs to — offering it
+    would make the console guess, which is what put a junk plate on an
+    identity in the first place."""
+    client, read_id = _page_with_claims(tmp_path, 1)
+    page = client.get("/plates?view=reads&status=all").text
+    assert f"/plates/{read_id}/apply-identity" in page
+    assert "Vehicle 0" in page  # named, so the operator sees the target
+
+    client, read_id = _page_with_claims(tmp_path / "none", 0)
+    assert f"/plates/{read_id}/apply-identity" not in (
+        client.get("/plates?view=reads&status=all").text
+    )
+
+    client, read_id = _page_with_claims(tmp_path / "two", 2)
+    assert f"/plates/{read_id}/apply-identity" not in (
+        client.get("/plates?view=reads&status=all").text
+    )
+
+
+def test_an_unjudged_read_is_not_offered_either(tmp_path):
+    """The value applied is one an operator stands behind. An unjudged
+    read is still only the OCR's opinion."""
+    client, read_id = _page_with_claims(tmp_path, 1, verdict=None)
+    assert f"/plates/{read_id}/apply-identity" not in (
+        client.get("/plates?view=reads&status=all").text
+    )
+
+
+def test_the_apply_targets_lookup_does_not_grow_with_the_page(tmp_path):
+    """These lists run to hundreds of reads of one parked car, so the
+    eligibility lookup is one pass over the page's events — a per-row
+    query would make the screen slowest exactly where it is most useful."""
+    from sqlalchemy import event as sa_event
+
+    from siteloom.store import EventIdentity, Identity
+    from siteloom.web.plates_routes import _apply_targets
+
+    client, Session = seeded_client(
+        tmp_path,
+        [
+            {"class_name": "car", "raw_text": f"TYB{i:03d}", "text": f"TYB{i:03d}",
+             "accepted": True, "verdict": "confirmed"}
+            for i in range(50)
+        ],
+    )
+    with Session() as session:
+        event_id = session.query(Event).one().id
+        identity = Identity(
+            identifier_key="vehicle",
+            class_name="car",
+            label="the parked car",
+            first_seen=TS,
+            last_seen=TS,
+        )
+        session.add(identity)
+        session.flush()
+        session.add(
+            EventIdentity(
+                event_id=event_id,
+                identity_id=identity.id,
+                identifier_key="vehicle",
+                similarity=0.9,
+            )
+        )
+        session.commit()
+
+    def _cost(limit):
+        # A fresh session each time: a warm identity map would hide a
+        # per-row fetch behind the first call.
+        with Session() as session:
+            reads = session.query(PlateRead).limit(limit).all()
+            statements: list[str] = []
+
+            def record(conn, cursor, statement, params, context, many):
+                statements.append(statement)
+
+            bind = session.get_bind()
+            sa_event.listen(bind, "before_cursor_execute", record)
+            try:
+                targets = _apply_targets(session, reads)
+            finally:
+                sa_event.remove(bind, "before_cursor_execute", record)
+            assert len(targets) == limit  # every read really was eligible
+            return len(statements)
+
+    one, fifty = _cost(1), _cost(50)
+    assert one == fifty
+    assert fifty <= 2  # the claims, and the identity they point at
