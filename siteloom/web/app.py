@@ -1505,6 +1505,11 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                         similarity=0.0,
                         matched_by="human",
                     ),
+                    # A double-submit that loses the race leaves
+                    # appearance_count alone (new_claim is False), so the
+                    # winner must not gain a frame either — the two move
+                    # together or the counter stops meaning anything.
+                    count_sighting=False,
                 )
         link.unlinked_at = None
         link.verdict = "confirmed"

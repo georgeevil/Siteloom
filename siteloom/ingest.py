@@ -39,7 +39,7 @@ from siteloom.store import (
     init_db,
     make_engine,
 )
-from siteloom.store.claims import fold_claim, link_claim
+from siteloom.store.claims import active_claim, fold_claim, link_claim
 
 log = logging.getLogger(__name__)
 
@@ -643,12 +643,7 @@ class IngestService:
                 # a closed record of a repudiated claim, and merging it
                 # into a live one would resurrect what an operator
                 # detached.
-                kept = (
-                    session.query(EventIdentity)
-                    .filter_by(event_id=target.id, identity_id=link.identity_id)
-                    .filter(EventIdentity.unlinked_at.is_(None))
-                    .first()
-                )
+                kept = active_claim(session, target.id, link.identity_id)
             if kept is None:
                 link.event_id = target.id
                 continue

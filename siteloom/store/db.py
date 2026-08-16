@@ -214,8 +214,25 @@ def _ensure_indexes(engine: Engine) -> set[str]:
             if table.name not in tables:
                 continue  # create_all made it, indexes and all
             existing = {i["name"] for i in inspector.get_indexes(table.name)}
+            columns = {c["name"] for c in inspector.get_columns(table.name)}
             for index in table.indexes:
                 if index.name in existing:
+                    continue
+                missing = {c.name for c in index.columns} - columns
+                if missing:
+                    # _ensure_columns declines a NOT NULL column with no
+                    # default ("needs a real migration"), and CREATE
+                    # INDEX naming a column that is not there fails
+                    # init_db outright — turning a database that booted
+                    # degraded into one that cannot start. Same reason
+                    # doctor's missing-column checks WARN rather than
+                    # FAIL: never block the boot that would heal it.
+                    log.warning(
+                        "skipping index %s: %s.%s missing",
+                        index.name,
+                        table.name,
+                        ", ".join(sorted(missing)),
+                    )
                     continue
                 log.info("migrating: creating index %s", index.name)
                 index.create(conn, checkfirst=True)

@@ -66,6 +66,25 @@ def fold_claim(keeper: EventIdentity, loser: EventIdentity) -> None:
         keeper.verdict_at = loser.verdict_at
 
 
+def _absorb_evidence(
+    link: EventIdentity,
+    *,
+    similarity: float,
+    matched_by: str | None,
+    learned_plate: bool,
+) -> None:
+    """Take the strongest of one observation and a standing claim.
+
+    Everything `record_sighting` does except count the frame, so the two
+    callers that differ only in whether a frame happened cannot drift
+    apart on the rules that matter.
+    """
+    link.similarity = max(link.similarity, similarity)
+    if _MATCH_RANK.get(matched_by, 0) > _MATCH_RANK.get(link.matched_by, 0):
+        link.matched_by = matched_by
+    link.learned_plate = link.learned_plate or learned_plate
+
+
 def record_sighting(
     link: EventIdentity,
     *,
@@ -75,10 +94,12 @@ def record_sighting(
 ) -> None:
     """Add one more observation of an already-standing claim."""
     link.hit_count += 1
-    link.similarity = max(link.similarity, similarity)
-    if _MATCH_RANK.get(matched_by, 0) > _MATCH_RANK.get(link.matched_by, 0):
-        link.matched_by = matched_by
-    link.learned_plate = link.learned_plate or learned_plate
+    _absorb_evidence(
+        link,
+        similarity=similarity,
+        matched_by=matched_by,
+        learned_plate=learned_plate,
+    )
 
 
 def active_claim(
@@ -93,12 +114,26 @@ def active_claim(
     )
 
 
-def insert_claim(session: Session, row: EventIdentity) -> tuple[EventIdentity, bool]:
+def insert_claim(
+    session: Session, row: EventIdentity, *, count_sighting: bool = True
+) -> tuple[EventIdentity, bool]:
     """Add `row`, or fold it into the claim a racing writer just made.
 
     Returns (surviving_row, created). `created` is False when the insert
     lost the race, which is what keeps the once-per-pairing publish in
     ingest.py honest — the winner publishes, the loser does not.
+
+    `row` must name an identity: the recovery below asks `active_claim`
+    for the pair, and a NULL identity_id matches the event's *miss* rows
+    (SQL NULL semantics), so an insert that failed for some unrelated
+    reason would quietly fold its observation into an unrelated miss.
+    Miss rows are written directly, not through here.
+
+    `count_sighting=False` for a writer whose row is not a frame of
+    evidence — the manual attach, whose caller moves `appearance_count`
+    in step with Σ hit_count and so must not move one without the other.
+    The loser's evidence is absorbed either way; only the frame count is
+    withheld, because no frame happened.
 
     The savepoint is what makes the conflict recoverable: without it the
     failed statement dooms the caller's whole transaction, which for
@@ -106,9 +141,12 @@ def insert_claim(session: Session, row: EventIdentity) -> tuple[EventIdentity, b
     expunged, so callers must use the returned object, never the one
     they passed in.
     """
+    if row.identity_id is None:
+        raise ValueError("insert_claim needs an identity; a miss row is not a claim")
     # Read the observation off the row before the flush: a failed INSERT
-    # need not leave column defaults applied to the instance.
-    similarity = row.similarity
+    # need not leave column defaults applied to the instance — hence the
+    # coercions, which are what keep the recovery's max() and OR total.
+    similarity = row.similarity or 0.0
     matched_by = row.matched_by
     learned_plate = bool(row.learned_plate)
     try:
@@ -122,12 +160,20 @@ def insert_claim(session: Session, row: EventIdentity) -> tuple[EventIdentity, b
         winner = active_claim(session, row.event_id, row.identity_id)
         if winner is None:  # a different constraint failed — not ours
             raise
-        record_sighting(
-            winner,
-            similarity=similarity,
-            matched_by=matched_by,
-            learned_plate=learned_plate,
-        )
+        if count_sighting:
+            record_sighting(
+                winner,
+                similarity=similarity,
+                matched_by=matched_by,
+                learned_plate=learned_plate,
+            )
+        else:
+            _absorb_evidence(
+                winner,
+                similarity=similarity,
+                matched_by=matched_by,
+                learned_plate=learned_plate,
+            )
         return winner, False
 
 
