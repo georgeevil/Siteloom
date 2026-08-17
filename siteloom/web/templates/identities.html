@@ -152,8 +152,9 @@
     <div class="cardgrid" id="identity-cards">
       {% for i in identities %}
       <a class="idcard{% if selected == i.id %} on{% endif %}" href="{{ card_urls[i.id] }}">
-        {% if i.best_crop_path %}
-          <img class="thumb" src="/media/{{ i.best_crop_path }}" alt="" loading="lazy">
+        {% set src = cover_src(i.best_crop_path) %}
+        {% if src %}
+          <img class="thumb" src="{{ src }}" alt="" loading="lazy">
         {% else %}
           <span class="thumb"></span>
         {% endif %}
@@ -191,8 +192,9 @@
   {% set i = rail.identity %}
   <aside class="rail">
     <div class="rail-id">
-      {% if i.best_crop_path %}
-        <img class="thumb" src="/media/{{ i.best_crop_path }}" alt="">
+      {% set src = cover_src(i.best_crop_path) %}
+      {% if src %}
+        <img class="thumb" src="{{ src }}" alt="">
       {% else %}
         <span class="thumb"></span>
       {% endif %}

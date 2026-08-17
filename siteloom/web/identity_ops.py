@@ -30,6 +30,14 @@ from siteloom.store.models import PLATE_SOURCE_OPERATOR
 
 log = logging.getLogger(__name__)
 
+#: How many cover candidates the identity page offers. A strip an
+#: operator scans, not the identity's whole history.
+COVER_CANDIDATES = 24
+
+#: The bound `owns_crop` checks against — every crop the identity could
+#: legitimately wear, rather than the strip the page happened to render.
+COVER_CANDIDATES_MAX = 10_000
+
 def shared_store(config, action: str):
     """The process-wide vector store, or an actionable 503.
 
@@ -131,6 +139,98 @@ def refresh_vector_count(session, vectors, identity: Identity) -> None:
     identity.vector_count = vectors.count_identity(
         identity.identifier_key, identity.id
     )
+
+
+def cover_candidates(session, identity: Identity, *, limit: int = 24) -> list[str]:
+    """Crops that could represent this identity, best first.
+
+    Detection crops from its *active* links, highest detector confidence
+    first — the same ranking `Event.best_crop_path` uses per event,
+    applied across the identity — then the crops of its verified,
+    non-rejected annotations. Only verified ones: an unverified auto
+    annotation is a guess, and the rule that a guess is not training data
+    (training/dataset.py) applies at least as hard to the picture that
+    names someone in every list on the console.
+    """
+    from siteloom.store import Annotation, EventIdentity
+
+    paths = [
+        p
+        for (p,) in session.execute(
+            select(Detection.crop_path)
+            .join(EventIdentity, EventIdentity.event_id == Detection.event_id)
+            .where(
+                EventIdentity.identity_id == identity.id,
+                EventIdentity.unlinked_at.is_(None),
+                Detection.crop_path.is_not(None),
+            )
+            .order_by(Detection.confidence.desc())
+            .limit(limit)
+        )
+    ]
+    if len(paths) < limit:
+        paths += [
+            p
+            for (p,) in session.execute(
+                select(Annotation.crop_path)
+                .where(
+                    Annotation.identity_id == identity.id,
+                    Annotation.verified.is_(True),
+                    Annotation.rejected.is_(False),
+                    Annotation.crop_path.is_not(None),
+                )
+                .order_by(Annotation.id)
+                .limit(limit)
+            )
+        ]
+    # De-duplicate preserving order: one event contributes several crops,
+    # and its own best_crop_path is one of them.
+    return list(dict.fromkeys(paths))[:limit]
+
+
+def owns_crop(session, identity: Identity, crop_path: str) -> bool:
+    """Whether this crop is one this identity may wear.
+
+    The ownership guard for the operator endpoint — the same shape
+    `split_identity` applies to annotation ids ("this endpoint only
+    claims to split the identity in the URL"), and here it is also a
+    containment concern: `best_crop_path` renders as `/media/{path}` on
+    a `view`-level screen, so an unchecked form field would let an
+    operator point one identity's cover at anything the media route will
+    serve.
+
+    Asked over the identity's whole candidate set, not the strip the
+    page happened to show: the limit is presentation, and a form built
+    from a wider page must not be refused for it.
+    """
+    return crop_path in set(cover_candidates(session, identity, limit=COVER_CANDIDATES_MAX))
+
+
+def recompute_cover(session, identity: Identity, *, dropped) -> bool:
+    """Re-derive the cover when the crop that supplied it stops being
+    this identity's.
+
+    `dropped` is the set of crops just taken away; None means recompute
+    unconditionally — the operator asking for "automatic" again. Returns
+    whether the cover changed.
+    """
+    before = identity.best_crop_path
+    if dropped is not None and identity.best_crop_path not in set(dropped):
+        # Unlinking an unrelated event must not churn a cover that is
+        # still valid. One line, and it covers the no-cover case too:
+        # None is never in `dropped`.
+        return False
+    if identity.cover_locked:
+        # The lock protects an operator's choice from *automatic*
+        # recompute; it does not protect it from the operator's own
+        # later, contradicting action. "This event is not this identity"
+        # and "this event's crop represents this identity" cannot both
+        # stand, and the later statement wins.
+        identity.cover_locked = False
+    identity.best_crop_path = next(
+        iter(cover_candidates(session, identity, limit=1)), None
+    )
+    return identity.best_crop_path != before
 
 
 def enroll_event_crop(
@@ -280,4 +380,11 @@ def unlink_claim(session, vectors, event, link, *, when) -> int:
     revert_learned_plate(session, link, event.id)
     identity.appearance_count = max(identity.appearance_count - 1, 0)
     refresh_vector_count(session, vectors, identity)
+    # After the unlink is flushed, so the candidate query cannot see the
+    # link it just detached. Autoflush would do it, but a helper whose
+    # correctness depends on autoflush ordering is one refactor away from
+    # being wrong. The bulk unlink (CLD-103) gets this for free, which is
+    # why the function was extracted in the first place.
+    session.flush()
+    recompute_cover(session, identity, dropped=event_crop_paths(session, event))
     return removed

@@ -57,8 +57,9 @@
     {% if rail.identity_links %}
       {% for link in rail.identity_links %}
       <div class="id-card">
-        {% if link.identity.best_crop_path %}
-          <img src="/media/{{ link.identity.best_crop_path }}" alt="">
+        {% set src = cover_src(link.identity.best_crop_path) %}
+        {% if src %}
+          <img src="{{ src }}" alt="">
         {% else %}
           <div class="ph sq"></div>
         {% endif %}

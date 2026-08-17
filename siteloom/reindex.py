@@ -11,7 +11,10 @@ BackfillClip bookkeeping for the window (so the re-scan re-registers the
 NVR windows). It does
 NOT touch Identity rows or their vectors — identities are the durable
 layer that reindexed events re-match against; pruning them is a
-separate, human decision.
+separate, human decision. The one exception is a dangling cover: an
+identity whose representative crop was one of the deleted files has that
+field cleared, because the row would otherwise point at a picture that
+no longer exists (CLD-137).
 """
 
 from __future__ import annotations
@@ -25,7 +28,14 @@ from pathlib import Path
 from sqlalchemy import select
 
 from siteloom.config import CameraConfig, SiteConfig
-from siteloom.store import BackfillClip, Detection, Event, EventIdentity, PlateRead
+from siteloom.store import (
+    BackfillClip,
+    Detection,
+    Event,
+    EventIdentity,
+    Identity,
+    PlateRead,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +48,8 @@ class PurgeResult:
     plate_reads: int = 0
     clips: int = 0
     crop_files: int = 0
+    #: Identity covers cleared because the crop they pointed at is gone.
+    covers: int = 0
 
 
 @dataclass
@@ -122,6 +134,22 @@ def purge_window(
             for clip in clips:
                 session.delete(clip)
                 result.clips += 1
+            # Identity rows survive this purge, so an identity whose cover
+            # came from a window being removed would keep a path to a file
+            # about to be deleted (CLD-137). Cleared at the source rather
+            # than left for the renderer to hide — the same shape as
+            # clearing rows while leaving media behind, which reset.py
+            # exists to refuse. The render guard still ships: files also
+            # vanish through restores, moved media dirs and manual
+            # deletion.
+            if crop_paths:
+                stale = session.scalars(
+                    select(Identity).filter(Identity.best_crop_path.in_(crop_paths))
+                ).all()
+                for identity in stale:
+                    identity.best_crop_path = None
+                    identity.cover_locked = False
+                    result.covers += 1
             session.commit()
         if media_root is not None:
             for rel in crop_paths:
