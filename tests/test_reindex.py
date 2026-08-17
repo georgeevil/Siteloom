@@ -117,6 +117,55 @@ def test_purge_window_is_scoped_and_removes_crops(env):
         assert s.query(BackfillClip).count() == 0
 
 
+def test_purge_window_clears_a_cover_it_deleted_the_file_for(env):
+    """Identity rows are never purged, but their cover can point into the
+    window that just went (CLD-137). Leaving a row that is known-dangling
+    for the renderer to hide is the same shape as clearing rows while
+    leaving the media behind, which the factory reset exists to refuse —
+    so the purge nulls the covers whose files it is about to delete.
+
+    Event crops cannot reach this state: their rows go in the same pass.
+    """
+    with env.Session() as s:
+        identity = s.query(Identity).one()
+        identity.best_crop_path = "cam1/crop1.jpg"  # the crop about to go
+        identity.cover_locked = True
+        s.commit()
+
+    purge_window(
+        env.Session,
+        ["cam1"],
+        T0 - timedelta(hours=1),
+        T0 + timedelta(hours=1),
+        env.media,
+    )
+
+    assert not env.crop.exists()
+    with env.Session() as s:
+        identity = s.query(Identity).one()  # the identity itself survives
+        assert identity.best_crop_path is None
+        assert identity.cover_locked is False
+
+
+def test_purge_window_leaves_a_cover_it_did_not_delete(env):
+    """The other half: a cover pointing outside the purged window is
+    still a picture of something that exists."""
+    outside = env.media / "cam1" / "kept.jpg"
+    outside.write_bytes(b"\xff\xd8jpg")
+    with env.Session() as s:
+        s.query(Identity).one().best_crop_path = "cam1/kept.jpg"
+        s.commit()
+
+    purge_window(
+        env.Session, ["cam1"], T0 - timedelta(hours=1), T0 + timedelta(hours=1),
+        env.media,
+    )
+
+    with env.Session() as s:
+        assert s.query(Identity).one().best_crop_path == "cam1/kept.jpg"
+    assert outside.exists()
+
+
 def test_purge_window_is_idempotent(env):
     args = (env.Session, ["cam1"], T0 - timedelta(hours=1), T0 + timedelta(hours=1), env.media)
     purge_window(*args)

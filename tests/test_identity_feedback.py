@@ -348,3 +348,47 @@ def test_a_database_without_plate_source_gains_it_as_unknown(tmp_path):
 
     page = TestClient(create_app(config)).get(f"/identities/{identity_id}").text
     assert "recorded before provenance was tracked" in page
+
+
+def test_a_database_without_cover_locked_gains_it_as_false(tmp_path):
+    """`Identity.cover_locked` (CLD-137) is a Boolean with a scalar
+    default, which is the one shape the additive column pass emits a DDL
+    DEFAULT for — so existing rows arrive `False`, not NULL.
+
+    That matters beyond tidiness: the flag is read as "an operator chose
+    this cover", and NULL would be falsy in Python but would make the
+    column's meaning depend on which pass wrote the row. False is the
+    honest value — nobody has chosen a cover on a database that had no
+    way to say so.
+    """
+    db = tmp_path / "legacy.db"
+    engine = make_engine(f"sqlite:///{db}")
+    init_db(engine)
+    Session = get_session(engine)
+    with Session() as s:
+        s.add(
+            Identity(
+                identifier_key="vehicle",
+                class_name="car",
+                best_crop_path="cam1/crop.jpg",
+                first_seen=TS,
+                last_seen=TS,
+            )
+        )
+        s.commit()
+        identity_id = s.query(Identity).one().id
+
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE identities DROP COLUMN cover_locked")
+    con.commit()
+    con.close()
+    assert "cover_locked" not in {
+        c["name"] for c in inspect(engine).get_columns("identities")
+    }
+
+    init_db(engine)
+
+    with Session() as s:
+        identity = s.get(Identity, identity_id)
+        assert identity.cover_locked is False  # backfilled, not NULL
+        assert identity.best_crop_path == "cam1/crop.jpg"  # untouched
