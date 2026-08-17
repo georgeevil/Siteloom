@@ -66,8 +66,9 @@
   <h3 class="sec">Identities · {{ results.identities | length }}</h3>
   {% for i in results.identities %}
   <a class="hit" href="/identities?selected={{ i.id }}">
-    {% if i.best_crop_path %}
-      <img class="thumb" src="/media/{{ i.best_crop_path }}" alt="" loading="lazy">
+    {% set src = cover_src(i.best_crop_path) %}
+    {% if src %}
+      <img class="thumb" src="{{ src }}" alt="" loading="lazy">
     {% else %}<span class="thumb"></span>{% endif %}
     <span>
       <span class="nm{% if not i.label %} unknown{% endif %}">{{ i.display_name }}</span><br>

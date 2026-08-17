@@ -634,6 +634,30 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     # file's directory (CLD-64); resolve() here only settles symlinks and
     # covers a config built in-process, which has no file to anchor to.
     media_root = Path(config.storage.media_dir).expanduser().resolve()
+
+    def cover_src(path: str | None) -> str | None:
+        """`/media/...` for a crop that is actually there, else None.
+
+        Reuses `_media_candidates` — the same resolution and containment
+        the /media route applies — so a cover this says is renderable is
+        one that route will serve, and the two cannot drift into a
+        broken-image icon that only shows up in production.
+
+        Needed because `purge_window` deletes crop FILES for the events
+        it removes while leaving Identity rows standing: the identity
+        keeps a path to a file that is gone. Event crops cannot reach
+        that state — their rows go in the same pass — which is why this
+        guards the identity covers and nothing else.
+        """
+        if not path:
+            return None
+        for candidate in _media_candidates(path, media_root):
+            full = candidate.resolve()
+            if full.is_relative_to(media_root) and full.is_file():
+                return f"/media/{path}"
+        return None
+
+    templates.env.globals["cover_src"] = cover_src
     #: Per-app so a second app in the same process (tests) starts clean.
     auth_gate = auth.AuthGate()
     login_throttle = auth.LoginThrottle()
@@ -1350,6 +1374,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .order_by(Identity.label.is_(None), Identity.label, Identity.id)
                 .limit(200)
             ).all()
+            cover_options = identity_ops.cover_candidates(session, identity)
         return templates.TemplateResponse(
             request,
             "identity.html",
@@ -1359,6 +1384,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "links": links,
                 "annotations": annotations,
                 "merge_candidates": merge_candidates,
+                "cover_options": cover_options,
                 # Whether this identifier does plates at all. The section
                 # also renders without it when a plate is already set — a
                 # plate learned under an older config has to stay
@@ -1790,6 +1816,14 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             identity_ops.revert_learned_plate(session, link, event_id)
             old.appearance_count = max(old.appearance_count - 1, 0)
             identity_ops.refresh_vector_count(session, vectors, old)
+            # The old identity loses this event's crops, so it may lose
+            # its cover with them (CLD-137). Its own line rather than a
+            # call to unlink_claim: reassign duplicates those steps
+            # deliberately, because it moves vectors where unlink deletes
+            # them. Flushed first so the candidate query cannot see the
+            # link just detached.
+            session.flush()
+            identity_ops.recompute_cover(session, old, dropped=crops)
             _attach(session, vectors, event, target, enroll=moved == 0)
             session.commit()
             new_id = target.id
@@ -1969,6 +2003,45 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             if identity is None:
                 raise HTTPException(404)
             identity.label = label.strip() or None
+            session.commit()
+        return RedirectResponse(f"/identities/{identity_id}", status_code=303)
+
+    @app.post("/identities/{identity_id}/cover")
+    def set_identity_cover(identity_id: int, crop_path: str = Form("")):
+        """Choose the crop that represents this identity (CLD-137).
+
+        The cover used to be first-write-wins at every writer, so an
+        identity founded by a wrong match wore that match's face in every
+        list on the console, permanently — unlinking the bad event did
+        not take the picture with it.
+
+        Choosing one locks it, which is what keeps automatic recompute
+        off an operator's decision. An empty submission is the undo: it
+        unlocks and re-derives, deliberately the same shape as CLD-134's
+        `relearn`, so an operator who made a bad choice hands the field
+        back to the system rather than hunting for the crop the system
+        would have picked.
+        """
+        with Session() as session:
+            identity = session.get(Identity, identity_id)
+            if identity is None:
+                raise HTTPException(404)
+            chosen = crop_path.strip()
+            if chosen:
+                if not identity_ops.owns_crop(session, identity, chosen):
+                    # This screen renders the cover as /media/{path}, so
+                    # an unchecked field would point one identity's cover
+                    # at anything that route will serve.
+                    raise HTTPException(
+                        400,
+                        f"{chosen!r} is not a crop of {identity.display_name} — "
+                        "choose one of this identity's own sightings",
+                    )
+                identity.best_crop_path = chosen
+                identity.cover_locked = True
+            else:
+                identity.cover_locked = False
+                identity_ops.recompute_cover(session, identity, dropped=None)
             session.commit()
         return RedirectResponse(f"/identities/{identity_id}", status_code=303)
 

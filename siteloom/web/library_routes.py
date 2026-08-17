@@ -1874,7 +1874,13 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 source.plate_source,
             ):
                 target.plate_source = PLATE_SOURCE_OPERATOR
-            target.best_crop_path = target.best_crop_path or source.best_crop_path
+            # The target keeps its own cover; only an empty one adopts the
+            # source's — and then it adopts the lock with it (CLD-137).
+            # Otherwise a merge silently downgrades an operator's choice
+            # to automatic, and the next recompute clobbers it.
+            if not target.best_crop_path and source.best_crop_path:
+                target.best_crop_path = source.best_crop_path
+                target.cover_locked = source.cover_locked
             session.delete(source)
             session.commit()
         return RedirectResponse(f"/identities/{target_id}", status_code=303)
@@ -2006,6 +2012,12 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
             if source.best_crop_path and source.best_crop_path in moved_paths:
                 # The source handed its face to the new identity; pick it
                 # a new thumbnail from what it kept.
+                #
+                # A lock does not survive that: the operator has just said
+                # this crop is someone else, which contradicts having
+                # chosen it as this identity's cover, and the later
+                # statement wins (CLD-137).
+                source.cover_locked = False
                 fresh.best_crop_path = source.best_crop_path
                 remaining = session.scalars(
                     select(Annotation)

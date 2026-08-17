@@ -99,9 +99,55 @@
 </div>
 {% endif %}
 
-{% if identity.best_crop_path %}
-<div class="strip"><img src="/media/{{ identity.best_crop_path }}" alt=""></div>
-{% endif %}
+{# Cover photo (CLD-137). In place of the bare strip that used to be
+   here, and deliberately not a per-row button in the sightings table
+   below: CLD-136 adds columns to those rows and CLD-140 adds checkboxes
+   to them, and picking a face out of several is a strip of pictures
+   rather than a table of events to read. #}
+{% set cover = cover_src(identity.best_crop_path) %}
+<div style="margin:0.8rem 0;">
+  <div style="font-size:0.85rem;">
+    <strong>Cover photo</strong>
+    {% if identity.cover_locked %}
+      <span class="muted" style="font-size:0.78rem;">· chosen by an operator, so it is not re-picked automatically</span>
+    {% elif identity.best_crop_path %}
+      <span class="muted" style="font-size:0.78rem;">· picked automatically from this identity's sightings</span>
+    {% endif %}
+  </div>
+  {% if cover %}
+  <div class="strip"><img src="{{ cover }}" alt=""></div>
+  {% elif identity.best_crop_path %}
+  <p class="muted" style="font-size:0.8rem;">The chosen crop is no longer on disk — pick another below.</p>
+  {% else %}
+  <p class="muted" style="font-size:0.8rem;">No cover yet.</p>
+  {% endif %}
+  {% if identity.cover_locked %}
+  <form class="filters" method="post" action="/identities/{{ identity.id }}/cover" style="margin-top:0.3rem;">
+    <input type="hidden" name="crop_path" value="">
+    <button type="submit">Back to automatic</button>
+    <span class="muted" style="align-self:center; font-size:0.75rem;">
+      hands the choice back to the system, which picks the clearest sighting
+    </span>
+  </form>
+  {% endif %}
+  {% if cover_options %}
+  <details style="margin-top:0.4rem;">
+    <summary style="cursor:pointer; font-size:0.85rem;">Choose a different cover</summary>
+    <div class="strip" style="margin-top:0.4rem;">
+      {% for path in cover_options %}
+        {% set src = cover_src(path) %}
+        {% if src %}
+        <form method="post" action="/identities/{{ identity.id }}/cover" style="display:inline-block; text-align:center; margin:0 0.3rem 0.3rem 0;">
+          <img src="{{ src }}" alt="" style="height:80px; display:block;">
+          <input type="hidden" name="crop_path" value="{{ path }}">
+          <button type="submit" style="font-size:0.75rem;">Use this</button>
+        </form>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+</div>
 
 <details style="margin:0.8rem 0;">
   <summary style="cursor:pointer; font-size:0.85rem;">Merge or split this identity</summary>

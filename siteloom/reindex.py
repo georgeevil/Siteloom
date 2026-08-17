@@ -11,7 +11,10 @@ BackfillClip bookkeeping for the window (so the re-scan re-registers the
 NVR windows). It does
 NOT touch Identity rows or their vectors — identities are the durable
 layer that reindexed events re-match against; pruning them is a
-separate, human decision.
+separate, human decision. The one exception is a dangling cover: an
+identity whose representative crop was one of the deleted files has that
+field cleared, because the row would otherwise point at a picture that
+no longer exists (CLD-137).
 """
 
 from __future__ import annotations
@@ -25,7 +28,14 @@ from pathlib import Path
 from sqlalchemy import select
 
 from siteloom.config import CameraConfig, SiteConfig
-from siteloom.store import BackfillClip, Detection, Event, EventIdentity, PlateRead
+from siteloom.store import (
+    BackfillClip,
+    Detection,
+    Event,
+    EventIdentity,
+    Identity,
+    PlateRead,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +48,10 @@ class PurgeResult:
     plate_reads: int = 0
     clips: int = 0
     crop_files: int = 0
+    #: Identity covers touched because the crop they pointed at is gone —
+    #: counted whether the cover was re-derived from surviving crops or
+    #: left empty because none remained.
+    covers: int = 0
 
 
 @dataclass
@@ -122,6 +136,42 @@ def purge_window(
             for clip in clips:
                 session.delete(clip)
                 result.clips += 1
+            # Identity rows survive this purge, so an identity whose cover
+            # came from a window being removed would keep a path to a file
+            # about to be deleted (CLD-137). Cleared at the source rather
+            # than left for the renderer to hide — the same shape as
+            # clearing rows while leaving media behind, which reset.py
+            # exists to refuse. The render guard still ships: files also
+            # vanish through restores, moved media dirs and manual
+            # deletion.
+            if crop_paths:
+                # Imported here, not at module scope: identity_ops is web
+                # code and this is a core module — the same reason the
+                # backfill import below is function-local.
+                from siteloom.web.identity_ops import recompute_cover
+
+                # Filtered in Python rather than an IN over crop_paths:
+                # identities number dozens where a window's crops number
+                # thousands, so this is the smaller query on any backend —
+                # and an unbounded bind list would hit Postgres's 65,535
+                # parameters per statement on the backend the store is
+                # explicitly ready for.
+                covered = session.scalars(
+                    select(Identity).filter(Identity.best_crop_path.is_not(None))
+                ).all()
+                for identity in covered:
+                    if identity.best_crop_path not in crop_paths:
+                        continue
+                    # Re-derived, not merely cleared: no other trigger
+                    # fires for this identity, so stopping here would
+                    # strip the cover off one that still has perfectly
+                    # good crops. The events, detections and links above
+                    # are already deleted and the query autoflushed them,
+                    # so only survivors are candidates. recompute_cover
+                    # clears the lock itself — an operator's choice
+                    # cannot outlive the file it named.
+                    recompute_cover(session, identity, dropped=None)
+                    result.covers += 1
             session.commit()
         if media_root is not None:
             for rel in crop_paths:

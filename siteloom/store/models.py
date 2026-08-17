@@ -248,7 +248,21 @@ class Identity(Base):
     appearance_count: Mapped[int] = mapped_column(Integer, default=0)
     # How many embeddings this identity has in the vector store (capped).
     vector_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The representative crop. Despite sharing a name with
+    # `Event.best_crop_path`, the two have never meant the same thing:
+    # the event field is best-confidence-wins, maintained per frame
+    # (ingest.py), while this one was first-write-wins at every writer —
+    # which is how an identity ended up wearing the face of the wrong
+    # match that founded it (CLD-137). It is now "the current cover":
+    # re-derived when the event that supplied it stops being this
+    # identity's, or chosen outright by an operator.
     best_crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # An operator picked the cover above, so recompute leaves it alone.
+    # One bit rather than a `cover_source` triple: "auto-picked at mint"
+    # and "auto-picked by recompute" are a distinction no screen makes
+    # and no operator can act on (contrast `plate_source`, where all
+    # three values change what you do about a wrong plate — CLD-134).
+    cover_locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     events: Mapped[list["EventIdentity"]] = relationship(back_populates="identity")
 

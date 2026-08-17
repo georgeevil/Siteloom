@@ -137,8 +137,9 @@
 
 {% for identity in identities %}
 <a class="pd-identity" href="/identities/{{ identity.id }}">
-  {% if identity.best_crop_path %}
-  <img src="/media/{{ identity.best_crop_path }}" alt="best crop of {{ identity.name }}">
+  {% set src = cover_src(identity.best_crop_path) %}
+  {% if src %}
+  <img src="{{ src }}" alt="best crop of {{ identity.name }}">
   {% endif %}
   <span>
     <span class="who">{{ identity.name }}</span><br>
