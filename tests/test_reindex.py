@@ -144,7 +144,7 @@ def test_purge_window_repicks_a_cover_from_what_survives(env):
         s.add(EventIdentity(event_id=survivor.id, identity_id=identity.id))
         s.commit()
 
-    purge_window(
+    result = purge_window(
         env.Session,
         ["cam1"],
         T0 - timedelta(hours=1),
@@ -152,6 +152,9 @@ def test_purge_window_repicks_a_cover_from_what_survives(env):
         env.media,
     )
 
+    # Reported, not silent: a cover the purge moved is a change an
+    # operator may want to know about.
+    assert result.covers == 1
     with env.Session() as s:
         identity = s.query(Identity).one()
         assert identity.best_crop_path == kept  # re-derived, not emptied
@@ -175,7 +178,7 @@ def test_purge_window_clears_a_cover_with_nothing_left_to_pick(env):
         identity.cover_locked = True
         s.commit()
 
-    purge_window(
+    result = purge_window(
         env.Session,
         ["cam1"],
         T0 - timedelta(hours=1),
@@ -184,6 +187,7 @@ def test_purge_window_clears_a_cover_with_nothing_left_to_pick(env):
     )
 
     assert not env.crop.exists()
+    assert result.covers == 1  # counted whether or not one could be re-picked
     with env.Session() as s:
         identity = s.query(Identity).one()  # the identity itself survives
         assert identity.best_crop_path is None
