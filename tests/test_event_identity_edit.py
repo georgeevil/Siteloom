@@ -350,18 +350,21 @@ def test_attach_rejects_a_nonexistent_target_and_identifier(edit_env):
     ).status_code == 404
 
 
-def test_the_rail_offers_the_correction_actions(edit_env):
+@pytest.mark.parametrize("surface", ["/rail", ""])
+def test_the_rail_offers_the_correction_actions(edit_env, surface):
     """The endpoints are only half the feature — CLD-36 was filed because
-    the rail had verdict buttons and nothing else."""
+    the rail had verdict buttons and nothing else. Both surfaces owe the
+    same actions: an operator on the full page is correcting the same
+    claim as one on the rail."""
     event, link = edit_env.ids.event, edit_env.ids.link
-    rail = edit_env.client.get(f"/events/{event}/rail").text
-    assert f'action="/events/{event}/identity"' in rail  # attach
-    assert f'action="/events/{event}/identity/{link}/unlink"' in rail
-    assert f'action="/events/{event}/identity/{link}/reassign"' in rail
-    assert "Bo Truck" in rail  # the picker lists candidates
+    page = edit_env.client.get(f"/events/{event}{surface}").text
+    assert f'action="/events/{event}/identity"' in page  # attach
+    assert f'action="/events/{event}/identity/{link}/unlink"' in page
+    assert f'action="/events/{event}/identity/{link}/reassign"' in page
+    assert "Bo Truck" in page  # the picker lists candidates
     # Reassigning to the identity already linked is not a correction, so
     # the picker for this claim leaves it out.
-    reassign_form = rail.split(f"/identity/{link}/reassign")[1].split("</form>")[0]
+    reassign_form = page.split(f"/identity/{link}/reassign")[1].split("</form>")[0]
     assert "Bo Truck" in reassign_form
     assert "Aleks Corolla" not in reassign_form
 
@@ -581,16 +584,25 @@ def test_cross_kind_association_is_refused(edit_env):
     assert "does not apply" in r.json()["detail"]
 
 
-def test_the_picker_offers_only_compatible_identities(edit_env):
+@pytest.mark.parametrize("surface", ["/rail", ""])
+def test_the_picker_offers_only_compatible_identities(edit_env, surface):
     """The offer side of the same rule: a person identity is not listed
-    on a car event's rail, and neither is the face identifier — the form
-    must not offer what the POST refuses."""
+    on a car event, and neither is the face identifier — the form must
+    not offer what the POST refuses.
+
+    Parametrized over both surfaces because testing only the rail is the
+    gap this bug shipped through (CLD-135). The rail filtered its picker
+    and was held to it here; the full page built its own picker and was
+    held to nothing, so `/events/{id}` offered every identity in the
+    store and the operator learned about it by having the POST refuse
+    the choice it had just been offered.
+    """
     _person_identity(edit_env, "person", "Dana")
-    rail = edit_env.client.get(f"/events/{edit_env.ids.event}/rail").text
-    assert "Bo Truck" in rail
-    assert "Dana" not in rail
-    assert '<option value="vehicle">' in rail
-    assert '<option value="face">' not in rail
+    page = edit_env.client.get(f"/events/{edit_env.ids.event}{surface}").text
+    assert "Bo Truck" in page
+    assert "Dana" not in page
+    assert '<option value="vehicle">' in page
+    assert '<option value="face">' not in page
 
 
 def test_reassign_across_compatible_identifiers_never_moves_the_vector(edit_env):
@@ -903,3 +915,237 @@ def test_an_attach_that_loses_the_race_leaves_the_survivor_uncounted(
         target = session.get(Identity, edit_env.ids.other)
         assert target.appearance_count == 2  # counted by the winner, once
         assert target.vector_count == 0
+
+
+# -- the pickers on the full page (CLD-135) --------------------------------
+#
+# `/events/{id}` grew its own copies of the rail's pickers, unfiltered,
+# and its missed form had no attribution at all. What follows holds the
+# page to the rail's rules, and holds the miss form to being a record of
+# *which* identifier failed rather than a bare flag.
+
+
+def _event_of_class(env, class_name: str, track_id: int) -> int:
+    with env.Session() as session:
+        event = Event(
+            camera_id="cam1",
+            track_id=track_id,
+            class_name=class_name,
+            first_seen=datetime(2026, 8, 7, 15, 0, 0),
+            last_seen=datetime(2026, 8, 7, 15, 0, 30),
+            detection_count=1,
+            best_crop_path=env.crop_paths["red"],
+            best_confidence=0.9,
+        )
+        session.add(event)
+        session.commit()
+        return event.id
+
+
+def _options(page: str) -> list[str]:
+    """The identity ids a picker on this page is offering."""
+    import re
+
+    return re.findall(r'<option value="(\d+)"', page)
+
+
+def test_two_identities_with_one_name_are_told_apart(edit_env):
+    """A face identity and a person identity for the same human are the
+    normal shape of this store, and both are legitimate targets on a
+    person event — so a picker that prints only the label offers the
+    operator the same word twice and no way to choose between them."""
+    _person_identity(edit_env, "face", "Klara")
+    _person_identity(edit_env, "person", "Klara")
+    event_id = _event_of_class(edit_env, "person", track_id=21)
+
+    page = edit_env.client.get(f"/events/{event_id}").text
+
+    assert "Klara · face" in page
+    assert "Klara · person" in page
+
+
+def test_a_restricted_viewer_is_offered_nothing_to_pick(edit_env):
+    """The label format has to compose with the naming floor, and the
+    guarantee is one level above the label: `_identity_candidates`
+    returns nothing at all below the floor, so the suffix cannot leak a
+    kind or a plate because there is no option to hang it on.
+
+    Asserted as an empty candidate list rather than as a substituted
+    string — "Known person" here would pass for the wrong reason, by
+    describing a redaction that never has to happen.
+    """
+    _person_identity(edit_env, "face", "Klara")
+    event_id = _event_of_class(edit_env, "person", track_id=22)
+
+    with edit_env.Session() as session:
+        for username, role in (("vera", "view"), ("rick", "restricted")):
+            session.add(
+                User(
+                    username=username,
+                    password_hash=hash_password("hunter2!"),
+                    role=role,
+                    created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
+            )
+        session.commit()
+
+    def _login(username):
+        assert edit_env.client.post(
+            "/login",
+            data={"username": username, "password": "hunter2!", "next": "/"},
+            follow_redirects=False,
+        ).status_code == 303
+
+    _login("vera")
+    allowed = edit_env.client.get(f"/events/{event_id}").text
+    assert "Klara · face" in allowed
+    assert _options(allowed)  # the control: there is something to offer
+
+    _login("rick")
+    withheld = edit_env.client.get(f"/events/{event_id}")
+    assert withheld.status_code == 200  # the screen is kept, not refused
+    assert _options(withheld.text) == []
+    assert "Klara" not in withheld.text
+
+
+# -- attributing a miss ----------------------------------------------------
+
+
+def _mark_missed(env, event_id, **data):
+    return env.client.post(
+        f"/events/{event_id}/missed", data=data, follow_redirects=False
+    )
+
+
+def _misses(env, event_id):
+    with env.Session() as session:
+        return session.scalars(
+            select(EventIdentity)
+            .filter_by(event_id=event_id, identity_id=None)
+            .order_by(EventIdentity.id)
+        ).all()
+
+
+def test_a_missed_vehicle_is_recorded_as_a_missed_vehicle(edit_env):
+    """Per-identifier recall (CLD-17) is the whole reason a miss is a row
+    rather than a flag. Filing every miss under `face` because that is
+    the form's default answers "how often does face ID miss" with events
+    that never had a face in them."""
+    r = _mark_missed(edit_env, edit_env.ids.event, missed="1", identifier="vehicle")
+
+    assert r.status_code == 303
+    misses = _misses(edit_env, edit_env.ids.event)
+    assert len(misses) == 1
+    assert misses[0].identifier_key == "vehicle"
+    assert misses[0].verdict == "missed"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"missed": "1", "identifier": "face"},  # offered by nothing, posted anyway
+        {"missed": "1"},  # the old wire shape, defaulting to face
+    ],
+)
+def test_a_miss_attributed_to_an_impossible_identifier_is_refused(edit_env, data):
+    """The accept side of the offer rule. A defaulted `face` on a car
+    event used to be filed silently, which is worse than an error: it
+    corrupts the recall numbers of an identifier that was never run."""
+    r = _mark_missed(edit_env, edit_env.ids.event, **data)
+
+    assert r.status_code == 400
+    assert "vehicle" in r.json()["detail"]  # names what would be accepted
+    assert _misses(edit_env, edit_env.ids.event) == []
+
+
+def test_the_page_shows_a_miss_and_offers_to_retract_it(edit_env):
+    """A mark an operator cannot see is a mark they cannot correct.
+
+    The assertion is scoped to the miss form rather than to the page,
+    because the word "vehicle" appears all over this page in the pickers
+    — a page-level `in` would pass against the clear-all button that
+    exists today and prove nothing about a per-miss retract.
+    """
+    import re
+
+    _mark_missed(edit_env, edit_env.ids.event, missed="1", identifier="vehicle")
+
+    page = edit_env.client.get(f"/events/{edit_env.ids.event}").text
+
+    forms = re.findall(
+        r'<form[^>]*action="/events/\d+/missed"[^>]*>(.*?)</form>', page, re.S
+    )
+    assert forms, "the page offers no missed form at all"
+    retracts = [form for form in forms if 'value="0"' in form]
+    assert retracts, "the miss is shown with no way to take it back"
+    # It has to say *which* miss it retracts, or it is the clear-all
+    # button wearing a per-row disguise.
+    assert any(
+        'name="identifier"' in form and "vehicle" in form for form in retracts
+    )
+
+
+def test_retracting_one_miss_leaves_the_others_and_the_flag(edit_env):
+    """`Event.missed_identity` mirrors "any miss rows exist" and this
+    endpoint is its single writer, so a per-identifier retract has to
+    recompute the flag from what survives. Setting it False while a miss
+    row remains would put every triage query that reads it — the flagged
+    bucket, the status SQL — at odds with the table it summarises."""
+    event_id = _event_of_class(edit_env, "person", track_id=23)
+    for key in ("face", "person"):
+        assert _mark_missed(
+            edit_env, event_id, missed="1", identifier=key
+        ).status_code == 303
+    assert len(_misses(edit_env, event_id)) == 2
+
+    assert _mark_missed(
+        edit_env, event_id, missed="0", identifier="face"
+    ).status_code == 303
+
+    remaining = _misses(edit_env, event_id)
+    assert [m.identifier_key for m in remaining] == ["person"]
+    with edit_env.Session() as session:
+        event = session.get(Event, event_id)
+        assert event.missed_identity is True  # a miss still stands
+        assert event.missed_at is not None
+
+    assert _mark_missed(
+        edit_env, event_id, missed="0", identifier="person"
+    ).status_code == 303
+
+    assert _misses(edit_env, event_id) == []
+    with edit_env.Session() as session:
+        event = session.get(Event, event_id)
+        assert event.missed_identity is False
+        assert event.missed_at is None
+
+
+def test_clearing_without_an_identifier_still_removes_every_miss(edit_env):
+    """The rail's "Clear missed marks" button posts no identifier and is
+    unchanged by this work, so the old shape has to keep meaning what it
+    always meant."""
+    event_id = _event_of_class(edit_env, "person", track_id=24)
+    for key in ("face", "person"):
+        _mark_missed(edit_env, event_id, missed="1", identifier=key)
+
+    assert _mark_missed(edit_env, event_id, missed="0").status_code == 303
+
+    assert _misses(edit_env, event_id) == []
+    with edit_env.Session() as session:
+        assert session.get(Event, event_id).missed_identity is False
+
+
+def test_an_auto_added_class_still_gets_an_identifier_to_pick(edit_env):
+    """Adding a class to `detection.classes` is meant to be the only step
+    (the registry auto-adds an identifier keyed by the class name), so a
+    class nobody configured must not land the operator on a page whose
+    every select is empty."""
+    event_id = _event_of_class(edit_env, "deer", track_id=25)
+
+    page = edit_env.client.get(f"/events/{event_id}")
+
+    assert page.status_code == 200
+    assert '<option value="deer">' in page.text
+    # ... and it is not offered the identifiers that do not consume deer.
+    assert '<option value="vehicle">' not in page.text
+    assert '<option value="face">' not in page.text
