@@ -503,7 +503,6 @@ def _rail_context(session, event_id: int, user: User | None, config) -> dict | N
         for zone in json.loads(d.zones):
             if zone not in zones:
                 zones.append(zone)
-    allowed = compatible_identifier_keys(config, event.class_name)
     return {
         "event": event,
         "camera": session.get(Camera, event.camera_id),
@@ -511,17 +510,33 @@ def _rail_context(session, event_id: int, user: User | None, config) -> dict | N
         "identity_links": links,
         "misses": misses,
         "unlinked": unlinked,
+        **_picker_context(session, user, config, event),
+        "zones": zones,
+        "status": event.review_status,
+    }
+
+
+def _picker_context(session, user: User | None, config, event: Event) -> dict:
+    """The correction pickers' options, for whichever surface renders them.
+
+    Shared because the defect it fixes was two copies of one picker: the
+    rail filtered its options to the identifiers that consume the event's
+    class and the full page did not, so `/events/{id}` offered identities
+    the POST then refused (CLD-135). Built once, so the third surface
+    gets it right by construction.
+    """
+    allowed = compatible_identifier_keys(config, event.class_name)
+    return {
         "candidates": _identity_candidates(session, user, allowed),
         # For the "new identity" / "missed by" selects: the configured
         # identifiers that consume this class, so the form cannot offer
-        # what the POST refuses. (An auto-added key is not configured,
-        # so a dynamically-added class falls back to its own key.)
+        # what the POST refuses. The fallback is load-bearing — an
+        # auto-added key is not configured, so a dynamically-added class
+        # would otherwise get an empty select.
         "identifier_options": sorted(
             k for k in config.identity.identifiers if k in allowed
         )
         or sorted(allowed),
-        "zones": zones,
-        "status": event.review_status,
     }
 
 
@@ -1206,23 +1221,26 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .all()
             )
             camera = session.get(Camera, event.camera_id)
+            # Miss rows (identity_id NULL) come back too, and are split
+            # out in Python the way the rail does it: the page has to
+            # render what it lets an operator retract (CLD-135).
             rows = (
                 session.scalars(
                     select(EventIdentity)
                     .options(selectinload(EventIdentity.identity))
-                    .filter(
-                        EventIdentity.event_id == event_id,
-                        EventIdentity.identity_id.is_not(None),
-                    )
+                    .filter(EventIdentity.event_id == event_id)
                 )
                 .unique()
                 .all()
             )
-            identity_links = [r for r in rows if r.unlinked_at is None]
-            unlinked = [r for r in rows if r.unlinked_at is not None]
-            # The full event page renders the same picker as the rail, so
-            # it takes the same floor (CLD-103) — one leak with two URLs.
-            candidates = _identity_candidates(session, _viewer(request))
+            claims = [r for r in rows if r.identity_id is not None]
+            identity_links = [r for r in claims if r.unlinked_at is None]
+            unlinked = [r for r in claims if r.unlinked_at is not None]
+            misses = [r for r in rows if r.identity_id is None]
+            # The full event page renders the same pickers as the rail,
+            # so it takes the same floor (CLD-103) — one leak with two
+            # URLs — and now the same class filter.
+            pickers = _picker_context(session, _viewer(request), config, event)
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -1240,7 +1258,11 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 ],
                 "identity_links": identity_links,
                 "unlinked": unlinked,
-                "candidates": candidates,
+                "misses": misses,
+                **pickers,
+                # Kept for the rail partial, whose option chain reads it
+                # when this page embeds the rail. The page's own selects
+                # iterate `identifier_options` above.
                 "identifier_keys": list(config.identity.identifiers.keys()),
             },
         )
@@ -1927,7 +1949,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def set_missed_identity(
         event_id: int,
         missed: str = Form(...),
-        identifier: str = Form("face"),
+        identifier: str | None = Form(None),
     ):
         """Mark/unmark a missed identification, attributed to an identifier.
 
@@ -1937,6 +1959,17 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         missed the car" are different failures on the same event.
         `Event.missed_identity` mirrors "any miss rows exist" and this
         endpoint is its single writer.
+
+        Marking is validated against the same compatibility rule the
+        attach POST applies, so a miss cannot be filed against an
+        identifier that never looks at this class. The old wire shape
+        (no identifier) still defaults to "face" — which now 400s on a
+        car event instead of quietly filing a face miss and corrupting
+        that identifier's recall, which is the point (CLD-135).
+
+        Retracting takes an identifier too: with one, only that miss goes;
+        without, every miss on the event goes, which is what the rail's
+        "Clear missed marks" button posts.
         """
         with Session() as session:
             event = session.get(Event, event_id)
@@ -1949,12 +1982,20 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .all()
             )
             if missed == "1":
-                if not any(m.identifier_key == identifier for m in misses):
+                key = identifier or "face"
+                allowed = compatible_identifier_keys(config, event.class_name)
+                if key not in allowed:
+                    raise HTTPException(
+                        400,
+                        f"{key!r} does not identify {event.class_name!r} events — "
+                        f"expected one of {', '.join(sorted(allowed))}",
+                    )
+                if not any(m.identifier_key == key for m in misses):
                     session.add(
                         EventIdentity(
                             event_id=event_id,
                             identity_id=None,
-                            identifier_key=identifier,
+                            identifier_key=key,
                             verdict="missed",
                             verdict_at=now,
                         )
@@ -1965,10 +2006,21 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 # Retracting the mark removes the miss rows — the same
                 # semantics "clear" has for verdicts: an operator taking
                 # back their own judgment, not deleting system evidence.
+                remaining = []
                 for m in misses:
-                    session.delete(m)
-                event.missed_identity = False
-                event.missed_at = None
+                    if identifier and m.identifier_key != identifier:
+                        remaining.append(m)
+                    else:
+                        session.delete(m)
+                # Recomputed from what survives, never set False: the
+                # flag is a denormalized mirror of "any miss rows exist",
+                # and retracting one of two would otherwise clear it
+                # while a miss row stands — every triage query that reads
+                # it (status_clause, the flagged bucket) would then
+                # disagree with the table.
+                event.missed_identity = bool(remaining)
+                if not remaining:
+                    event.missed_at = None
             session.commit()
         return RedirectResponse(f"/events/{event_id}", status_code=303)
 

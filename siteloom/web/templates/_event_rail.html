@@ -11,12 +11,15 @@
    in the payload (CLD-103). The controls themselves stay: attaching or
    reassigning to "+ new identity" needs no directory, and every other
    edit control in this rail renders for a reader who will be refused at
-   the POST too. #}
-{% macro identity_options(candidates, exclude_id=None) %}
-  {% for i in candidates if i.id != exclude_id %}
-    <option value="{{ i.id }}">{{ identity_name(i) }}{% if identity_plate(i) %} · {{ identity_plate(i) }}{% endif %}</option>
-  {% endfor %}
-{% endmacro %}
+   the POST too.
+
+   The option markup itself moved to _pickers.html, so the full event
+   page renders exactly what this does (CLD-135); the local name is kept
+   so the call sites below are untouched. #}
+{% import "_pickers.html" as pickers with context %}
+{% macro identity_options(candidates, exclude_id=None) -%}
+{{ pickers.identity_options(candidates, exclude_id) }}
+{%- endmacro %}
 <div class="rail-inner">
   <div class="rail-head">
     <div class="rail-media">

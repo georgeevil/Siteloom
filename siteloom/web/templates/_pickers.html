@@ -1,0 +1,38 @@
+{# The correction pickers' option markup, shared by the event page and
+   the triage rail (CLD-135).
+
+   One file because the defect it fixes was two copies of one picker
+   drifting: the rail filtered its options to the identifiers that
+   consume the event's class and the full page did not, so `/events/{id}`
+   offered identities the POST then refused. The server half of that is
+   `_picker_context`; this is the render half.
+
+   The label is name · kind · plate. The kind is what makes two
+   identities sharing a label distinguishable — "Klara · face" and
+   "Klara · person" are different rows the operator has to choose
+   between, and a bare name made the choice a coin flip.
+
+   Never `display_name`: names go through `identity_name`, the CLD-111
+   global, and plates through `identity_plate`. The real gate is one
+   level up — `_identity_candidates` returns [] outright below the
+   `/identities` floor, so no options render at all for `restricted` —
+   but the walk in tests/test_restricted_disclosure.py cannot catch a
+   raw read here (it would be asserting over an empty list), so this
+   file must not reach for one. #}
+
+{% macro identity_options(candidates, exclude_id=None) %}
+  {% for i in candidates if i.id != exclude_id %}
+    <option value="{{ i.id }}">{{ identity_name(i) }} · {{ i.identifier_key }}{% if identity_plate(i) %} · {{ identity_plate(i) }}{% endif %}</option>
+  {% endfor %}
+{% endmacro %}
+
+{# The "new identity" / "missed by" selects. Fed `identifier_options`,
+   which is already filtered to the identifiers that consume this event's
+   class, so the form cannot offer what the POST refuses. #}
+{% macro identifier_select(options, name, label, selected=None) %}
+  <select name="{{ name }}" aria-label="{{ label }}">
+    {% for key in options %}
+      <option value="{{ key }}"{% if key == selected %} selected{% endif %}>{{ key }}</option>
+    {% endfor %}
+  </select>
+{% endmacro %}
