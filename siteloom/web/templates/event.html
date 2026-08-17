@@ -168,11 +168,16 @@
 {% if misses %}
 <div class="verdict" style="margin:0.3rem 0 0.2rem;">
   <span class="badge missed">missed identity</span>
+  {# The identifier always rides along. Omitting it for a key-less row
+     would post the clear-all shape, so a button labelled for one miss
+     would delete every miss standing beside it — and no writer produces
+     a key-less row anyway: set_missed_identity is the only one, and it
+     always sets a key. #}
   {% for m in misses %}
   <form method="post" action="/events/{{ event.id }}/missed" style="display:inline; margin-right:0.3rem;">
-    {% if m.identifier_key %}<input type="hidden" name="identifier" value="{{ m.identifier_key }}">{% endif %}
+    <input type="hidden" name="identifier" value="{{ m.identifier_key }}">
     <button name="missed" value="0"
-            title="retract the {{ m.identifier_key or 'unattributed' }} miss">{{ m.identifier_key or 'unattributed' }} &times;</button>
+            title="retract the {{ m.identifier_key }} miss">{{ m.identifier_key }} &times;</button>
   </form>
   {% endfor %}
 </div>

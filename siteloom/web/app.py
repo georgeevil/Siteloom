@@ -516,6 +516,49 @@ def _rail_context(session, event_id: int, user: User | None, config) -> dict | N
     }
 
 
+def _require_identifier(config, event: Event, identifier: str) -> str:
+    """Refuse an operator-supplied identifier key, with one story.
+
+    Two distinct failures, kept distinct because they need different
+    corrections: a key that is not an identifier at all (a typo, or a
+    stale form), and a real identifier whose pipeline does not look at
+    this event's class. Shared by the attach POST and the miss endpoint,
+    so the same mistake is not explained two different ways depending on
+    which form it arrived from (CLD-135).
+
+    A compatible key is accepted before either check, which is what
+    admits an auto-added class: the registry keys those by the class
+    name, so `bird` is absent from `identity.identifiers` while being
+    exactly what a bird event's picker offers.
+
+    Nothing at all is its own refusal. FastAPI parses an empty form
+    field as None, so a form that submitted a blank identifier and one
+    that omitted it are the same value here — and the safe reading of
+    both is "say which one", not a silent default that attributes a miss
+    to a pipeline the operator never named.
+    """
+    allowed = compatible_identifier_keys(config, event.class_name)
+    if not identifier:
+        raise HTTPException(
+            400,
+            "no identifier given; expected one of " + ", ".join(sorted(allowed)),
+        )
+    if identifier in allowed:
+        return identifier
+    if identifier not in config.identity.identifiers:
+        raise HTTPException(
+            400,
+            f"unknown identifier {identifier!r}; expected one of "
+            + ", ".join(sorted(config.identity.identifiers)),
+        )
+    raise HTTPException(
+        400,
+        f"identifier {identifier!r} does not apply to "
+        f"{event.class_name!r} events; expected one of "
+        + ", ".join(sorted(allowed)),
+    )
+
+
 def _picker_context(session, user: User | None, config, event: Event) -> dict:
     """The correction pickers' options, for whichever surface renders them.
 
@@ -1593,19 +1636,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         # enforcement cannot drift.
         allowed = compatible_identifier_keys(config, event.class_name)
         if identity_id == "new":
-            if identifier not in config.identity.identifiers:
-                raise HTTPException(
-                    400,
-                    f"unknown identifier {identifier!r}; expected one of "
-                    + ", ".join(sorted(config.identity.identifiers)),
-                )
-            if identifier not in allowed:
-                raise HTTPException(
-                    400,
-                    f"identifier {identifier!r} does not apply to "
-                    f"{event.class_name!r} events; expected one of "
-                    + ", ".join(sorted(allowed)),
-                )
+            _require_identifier(config, event, identifier)
             identity = Identity(
                 identifier_key=identifier,
                 class_name=event.class_name,
@@ -1982,14 +2013,14 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .all()
             )
             if missed == "1":
-                key = identifier or "face"
-                allowed = compatible_identifier_keys(config, event.class_name)
-                if key not in allowed:
-                    raise HTTPException(
-                        400,
-                        f"{key!r} does not identify {event.class_name!r} events — "
-                        f"expected one of {', '.join(sorted(allowed))}",
-                    )
+                # No default: a miss says which pipeline failed, so one
+                # that names nobody is refused rather than attributed to
+                # "face" on the operator's behalf. Every form that marks
+                # a miss sends the key, and the old wire shape without
+                # one was silently filing face misses — on a person event
+                # it filed them successfully, which is how a pipeline
+                # that never ran acquired a recall figure.
+                key = _require_identifier(config, event, identifier or "")
                 if not any(m.identifier_key == key for m in misses):
                     session.add(
                         EventIdentity(
