@@ -36,7 +36,7 @@ _BADGES: dict[str | None, tuple[str, str]] = {
     # spellings of one thing, deliberately: renaming the column would
     # move data that `siteloom/stats.py` reads.
     "human": ("manual", "linked by an operator — strongest evidence recorded on this claim"),
-    None: ("new", "this claim created the identity; nothing was matched"),
+    None: ("new", "no existing identity cleared the bar, so this claim created one"),
 }
 
 #: What a score means on a `human` row that carries one. Not
@@ -80,6 +80,14 @@ def claim_display(link: EventIdentity, threshold: float | None) -> ClaimDisplay:
       strictly greater rank wins. The number is a true measurement on a
       claim a person made, and keying the score to the badge would hide
       it on exactly the rows an operator is most likely auditing.
+    * **Yes on a `new` row above 0.0**, for the same honesty in the other
+      direction: `_match_vector` reports the top score even when it fails
+      the bar, and ingest stores it on the minting claim — so
+      `sim 0.79 · bar 0.80` on a `new` badge says this identity exists
+      because the best candidate missed by a hundredth, the most useful
+      row on the page for anyone tuning a threshold. The badge's title
+      says "no existing identity cleared the bar", never "nothing was
+      matched": something was compared; it just did not clear.
 
     `threshold` is the effective bar from `IdentityConfig.threshold_for`
     — per-camera override, then site-wide, then None for an auto-added

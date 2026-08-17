@@ -80,7 +80,7 @@ def _claim(**overrides) -> EventIdentity:
         ("plate", "plate"),
         ("visual", "visual"),
         ("human", "manual"),  # the column's word is not the operator's
-        (None, "new"),  # nothing was matched: this claim made the identity
+        (None, "new"),  # no existing identity cleared the bar; this claim made one
     ],
 )
 def test_the_badge_names_how_the_claim_is_evidenced(matched_by, badge):
