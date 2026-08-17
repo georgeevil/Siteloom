@@ -503,7 +503,6 @@ def _rail_context(session, event_id: int, user: User | None, config) -> dict | N
         for zone in json.loads(d.zones):
             if zone not in zones:
                 zones.append(zone)
-    allowed = compatible_identifier_keys(config, event.class_name)
     return {
         "event": event,
         "camera": session.get(Camera, event.camera_id),
@@ -511,17 +510,76 @@ def _rail_context(session, event_id: int, user: User | None, config) -> dict | N
         "identity_links": links,
         "misses": misses,
         "unlinked": unlinked,
+        **_picker_context(session, user, config, event),
+        "zones": zones,
+        "status": event.review_status,
+    }
+
+
+def _require_identifier(config, event: Event, identifier: str | None) -> str:
+    """Refuse an operator-supplied identifier key, with one story.
+
+    Two distinct failures, kept distinct because they need different
+    corrections: a key that is not an identifier at all (a typo, or a
+    stale form), and a real identifier whose pipeline does not look at
+    this event's class. Shared by the attach POST and the miss endpoint,
+    so the same mistake is not explained two different ways depending on
+    which form it arrived from (CLD-135).
+
+    A compatible key is accepted before either check, which is what
+    admits an auto-added class: the registry keys those by the class
+    name, so `bird` is absent from `identity.identifiers` while being
+    exactly what a bird event's picker offers.
+
+    Nothing at all is its own refusal. FastAPI parses an empty form
+    field as None, so a form that submitted a blank identifier and one
+    that omitted it are the same value here — and the safe reading of
+    both is "say which one", not a silent default that attributes a miss
+    to a pipeline the operator never named.
+    """
+    allowed = compatible_identifier_keys(config, event.class_name)
+    if not identifier:
+        raise HTTPException(
+            400,
+            "no identifier given; expected one of " + ", ".join(sorted(allowed)),
+        )
+    if identifier in allowed:
+        return identifier
+    if identifier not in config.identity.identifiers:
+        raise HTTPException(
+            400,
+            f"unknown identifier {identifier!r}; expected one of "
+            + ", ".join(sorted(config.identity.identifiers)),
+        )
+    raise HTTPException(
+        400,
+        f"identifier {identifier!r} does not apply to "
+        f"{event.class_name!r} events; expected one of "
+        + ", ".join(sorted(allowed)),
+    )
+
+
+def _picker_context(session, user: User | None, config, event: Event) -> dict:
+    """The correction pickers' options, for whichever surface renders them.
+
+    Shared because the defect it fixes was two copies of one picker: the
+    rail filtered its options to the identifiers that consume the event's
+    class and the full page did not, so `/events/{id}` offered identities
+    the POST then refused (CLD-135). Built once, so the third surface
+    gets it right by construction.
+    """
+    allowed = compatible_identifier_keys(config, event.class_name)
+    return {
         "candidates": _identity_candidates(session, user, allowed),
         # For the "new identity" / "missed by" selects: the configured
         # identifiers that consume this class, so the form cannot offer
-        # what the POST refuses. (An auto-added key is not configured,
-        # so a dynamically-added class falls back to its own key.)
+        # what the POST refuses. The fallback is load-bearing — an
+        # auto-added key is not configured, so a dynamically-added class
+        # would otherwise get an empty select.
         "identifier_options": sorted(
             k for k in config.identity.identifiers if k in allowed
         )
         or sorted(allowed),
-        "zones": zones,
-        "status": event.review_status,
     }
 
 
@@ -538,14 +596,20 @@ def compatible_identifier_keys(config, class_name: str) -> set[str]:
     every future match, and nothing in the UI said so.
 
     An identifier the registry auto-added is keyed by the class it was
-    minted for (identity/registry.py), hence the class name itself.
+    minted for (identity/registry.py), hence the class name itself — but
+    only when no configured identifier consumes the class, which is the
+    registry's own auto-add condition. On a car event `vehicle` owns the
+    class, so a bare "car" key names a pipeline that can never exist;
+    accepting it would mint identities and file recall stats under a
+    phantom (CLD-135).
     """
     keys = {
         key
         for key, ident in config.identity.identifiers.items()
         if class_name in ident.applies_to
     }
-    keys.add(class_name)
+    if not keys:
+        keys.add(class_name)
     return keys
 
 
@@ -1206,23 +1270,28 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .all()
             )
             camera = session.get(Camera, event.camera_id)
+            # Miss rows (identity_id NULL) come back too, and are split
+            # out in Python the way the rail does it: the page has to
+            # render what it lets an operator retract (CLD-135).
             rows = (
                 session.scalars(
                     select(EventIdentity)
                     .options(selectinload(EventIdentity.identity))
-                    .filter(
-                        EventIdentity.event_id == event_id,
-                        EventIdentity.identity_id.is_not(None),
-                    )
+                    .filter(EventIdentity.event_id == event_id)
                 )
                 .unique()
                 .all()
             )
-            identity_links = [r for r in rows if r.unlinked_at is None]
-            unlinked = [r for r in rows if r.unlinked_at is not None]
-            # The full event page renders the same picker as the rail, so
-            # it takes the same floor (CLD-103) — one leak with two URLs.
-            candidates = _identity_candidates(session, _viewer(request))
+            # The model's own vocabulary, same as the rail — two
+            # spellings of "a standing claim" is how the two surfaces
+            # drifted apart in the first place (CLD-135).
+            identity_links = [r for r in rows if r.is_active]
+            unlinked = [r for r in rows if not r.is_miss and not r.is_active]
+            misses = [r for r in rows if r.is_miss]
+            # The full event page renders the same pickers as the rail,
+            # so it takes the same floor (CLD-103) — one leak with two
+            # URLs — and now the same class filter.
+            pickers = _picker_context(session, _viewer(request), config, event)
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -1240,8 +1309,8 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 ],
                 "identity_links": identity_links,
                 "unlinked": unlinked,
-                "candidates": candidates,
-                "identifier_keys": list(config.identity.identifiers.keys()),
+                "misses": misses,
+                **pickers,
             },
         )
 
@@ -1551,7 +1620,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         return RedirectResponse(_safe_next(next_url, event_id), status_code=303)
 
     def _resolve_target(
-        session, event: Event, identity_id: str, identifier: str, label: str
+        session, event: Event, identity_id: str, identifier: str | None, label: str
     ) -> Identity:
         """The identity an attach/reassign names: an existing one, or a
         new one minted here.
@@ -1571,19 +1640,11 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         # enforcement cannot drift.
         allowed = compatible_identifier_keys(config, event.class_name)
         if identity_id == "new":
-            if identifier not in config.identity.identifiers:
-                raise HTTPException(
-                    400,
-                    f"unknown identifier {identifier!r}; expected one of "
-                    + ", ".join(sorted(config.identity.identifiers)),
-                )
-            if identifier not in allowed:
-                raise HTTPException(
-                    400,
-                    f"identifier {identifier!r} does not apply to "
-                    f"{event.class_name!r} events; expected one of "
-                    + ", ".join(sorted(allowed)),
-                )
+            # No default: minting under a key the operator never named
+            # is the same silent-attribution disease the miss endpoint
+            # refuses — a form that omitted the identifier and one that
+            # blanked it both land here as falsy and are refused alike.
+            identifier = _require_identifier(config, event, identifier)
             identity = Identity(
                 identifier_key=identifier,
                 class_name=event.class_name,
@@ -1688,7 +1749,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def attach_identity(
         event_id: int,
         identity_id: str = Form(...),
-        identifier: str = Form("face"),
+        identifier: str | None = Form(None),
         label: str = Form(""),
         enroll: str = Form("1"),
         next_url: str = Form(""),
@@ -1771,7 +1832,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         event_id: int,
         link_id: int,
         identity_id: str = Form(...),
-        identifier: str = Form("face"),
+        identifier: str | None = Form(None),
         label: str = Form(""),
         next_url: str = Form(""),
     ):
@@ -1927,7 +1988,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     def set_missed_identity(
         event_id: int,
         missed: str = Form(...),
-        identifier: str = Form("face"),
+        identifier: str | None = Form(None),
     ):
         """Mark/unmark a missed identification, attributed to an identifier.
 
@@ -1937,6 +1998,19 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         missed the car" are different failures on the same event.
         `Event.missed_identity` mirrors "any miss rows exist" and this
         endpoint is its single writer.
+
+        Marking is validated against the same compatibility rule the
+        attach POST applies, so a miss cannot be filed against an
+        identifier that never looks at this class. There is no default:
+        a mark that names no identifier — omitted or blank, FastAPI
+        parses both the same — is refused outright rather than
+        attributed to "face" on the operator's behalf, which is how a
+        pipeline that never ran used to acquire recall figures
+        (CLD-135).
+
+        Retracting takes an identifier too: with one, only that miss goes;
+        without, every miss on the event goes, which is what the rail's
+        "Clear missed marks" button posts.
         """
         with Session() as session:
             event = session.get(Event, event_id)
@@ -1949,12 +2023,20 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 .all()
             )
             if missed == "1":
-                if not any(m.identifier_key == identifier for m in misses):
+                # No default: a miss says which pipeline failed, so one
+                # that names nobody is refused rather than attributed to
+                # "face" on the operator's behalf. Every form that marks
+                # a miss sends the key, and the old wire shape without
+                # one was silently filing face misses — on a person event
+                # it filed them successfully, which is how a pipeline
+                # that never ran acquired a recall figure.
+                key = _require_identifier(config, event, identifier)
+                if not any(m.identifier_key == key for m in misses):
                     session.add(
                         EventIdentity(
                             event_id=event_id,
                             identity_id=None,
-                            identifier_key=identifier,
+                            identifier_key=key,
                             verdict="missed",
                             verdict_at=now,
                         )
@@ -1965,10 +2047,21 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 # Retracting the mark removes the miss rows — the same
                 # semantics "clear" has for verdicts: an operator taking
                 # back their own judgment, not deleting system evidence.
+                remaining = []
                 for m in misses:
-                    session.delete(m)
-                event.missed_identity = False
-                event.missed_at = None
+                    if identifier and m.identifier_key != identifier:
+                        remaining.append(m)
+                    else:
+                        session.delete(m)
+                # Recomputed from what survives, never set False: the
+                # flag is a denormalized mirror of "any miss rows exist",
+                # and retracting one of two would otherwise clear it
+                # while a miss row stands — every triage query that reads
+                # it (status_clause, the flagged bucket) would then
+                # disagree with the table.
+                event.missed_identity = bool(remaining)
+                if not remaining:
+                    event.missed_at = None
             session.commit()
         return RedirectResponse(f"/events/{event_id}", status_code=303)
 

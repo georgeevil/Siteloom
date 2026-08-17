@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_pickers.html" as pickers with context %}
 {% block title %}Event {{ event.id }}{% endblock %}
 {% block content %}
 <p><a href="/">&larr; events</a></p>
@@ -111,9 +112,7 @@
           <input type="hidden" name="identifier" value="{{ l.identifier_key or l.identity.identifier_key }}">
           <input type="hidden" name="next_url" value="/events/{{ event.id }}">
           <select name="identity_id" aria-label="Reassign to">
-            {% for i in candidates if i.id != l.identity_id %}
-              <option value="{{ i.id }}">{{ identity_name(i) }}</option>
-            {% endfor %}
+            {{ pickers.identity_options(candidates, l.identity_id) }}
             <option value="new">+ new identity</option>
           </select>
           <button type="submit" title="This event was someone else">move</button>
@@ -146,14 +145,10 @@
 <form class="verdict" method="post" action="/events/{{ event.id }}/identity"
       style="margin:0.3rem 0 0.6rem;">
   <select name="identity_id" aria-label="Attach identity">
-    {% for i in candidates %}
-      <option value="{{ i.id }}">{{ identity_name(i) }}</option>
-    {% endfor %}
+    {{ pickers.identity_options(candidates) }}
     <option value="new">+ new identity</option>
   </select>
-  <select name="identifier" aria-label="Identifier for a new identity">
-    {% for key in identifier_keys %}<option value="{{ key }}">{{ key }}</option>{% endfor %}
-  </select>
+  {{ pickers.identifier_select(identifier_options, "identifier", "Identifier for a new identity") }}
   <input type="text" name="label" placeholder="name (new identity)">
   {# An unchecked box submits nothing; the hidden field is what survives. #}
   <input type="hidden" name="enroll" value="0">
@@ -163,14 +158,35 @@
   <button type="submit">attach identity</button>
 </form>
 
+{# A miss belongs to an identifier, not to the event (CLD-17): "the face
+   identifier missed the person" and "plate OCR missed the car" are
+   different failures, and per-identifier recall is computed from which
+   one it was. So both marking and retracting are per identifier, and the
+   mark form stays available while misses exist — a car event can
+   legitimately be missed by the vehicle identifier and a plate one at
+   once, which the old either/or layout could not express (CLD-135). #}
+{% if misses %}
+<div class="verdict" style="margin:0.3rem 0 0.2rem;">
+  <span class="badge missed">missed identity</span>
+  {# The identifier always rides along. Omitting it for a key-less row
+     would post the clear-all shape, so a button labelled for one miss
+     would delete every miss standing beside it — and no writer produces
+     a key-less row anyway: set_missed_identity is the only one, and it
+     always sets a key. #}
+  {% for m in misses %}
+  <form method="post" action="/events/{{ event.id }}/missed" style="display:inline; margin-right:0.3rem;">
+    <input type="hidden" name="identifier" value="{{ m.identifier_key }}">
+    <button name="missed" value="0"
+            title="retract the {{ m.identifier_key }} miss">{{ m.identifier_key }} &times;</button>
+  </form>
+  {% endfor %}
+</div>
+{% endif %}
+
 <form class="verdict" method="post" action="/events/{{ event.id }}/missed" style="margin:0.3rem 0 0.6rem;">
-  {% if event.missed_identity %}
-    <span class="badge missed">missed identity</span>
-    <button name="missed" value="0" title="clear the missed mark">undo</button>
-  {% else %}
-    <button name="missed" value="1"
-            title="an identifiable face/plate was present but nothing was claimed">mark missed identity</button>
-  {% endif %}
+  {{ pickers.identifier_select(identifier_options, "identifier", "Identifier that missed") }}
+  <button name="missed" value="1"
+          title="an identifiable face/plate was present but this identifier claimed nothing">mark missed identity</button>
 </form>
 
 {# A different statement from every control above it: those grade a

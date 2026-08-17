@@ -117,39 +117,60 @@ def test_wrong_verdict_without_learned_plate_keeps_the_plate(webenv):
 
 def test_missed_mark_records_which_identifier_failed(webenv):
     webenv.client.post(
-        "/events/1/missed", data={"missed": "1", "identifier": "face"}
+        "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
     )
     with webenv.Session() as s:
         miss = s.scalars(
             select(EventIdentity).filter_by(event_id=1, identity_id=None)
         ).one()
         assert miss.verdict == "missed"
-        assert miss.identifier_key == "face"
+        assert miss.identifier_key == "vehicle"
         # The denormalized mirror stays in step.
         assert s.get(Event, 1).missed_identity is True
 
 
 def test_two_identifiers_can_miss_the_same_event(webenv):
-    """A car pulls up, someone gets out: the face identifier and plate OCR
-    can both fail on one event, and they are different failures."""
-    webenv.client.post("/events/1/missed", data={"missed": "1", "identifier": "face"})
-    webenv.client.post(
-        "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
-    )
+    """Someone walks past unrecognised: the face pipeline and the
+    appearance pipeline both failed on one event, and they are different
+    failures.
+
+    Both must be identifiers that *consume* this event's class, or the
+    miss records a failure of something that never ran (CLD-135) — which
+    is why the pair here is face/person on a person event rather than
+    face/vehicle on a car.
+    """
+    with webenv.Session() as s:
+        s.add(
+            Event(
+                camera_id="cam1",
+                track_id=2,
+                class_name="person",
+                first_seen=TS,
+                last_seen=TS,
+                detection_count=1,
+            )
+        )
+        s.commit()
+        event_id = s.scalars(select(Event.id).filter_by(track_id=2)).one()
+
+    for key in ("face", "person"):
+        assert webenv.client.post(
+            f"/events/{event_id}/missed", data={"missed": "1", "identifier": key}
+        ).status_code == 200
     with webenv.Session() as s:
         keys = {
             m.identifier_key
             for m in s.scalars(
-                select(EventIdentity).filter_by(event_id=1, identity_id=None)
+                select(EventIdentity).filter_by(event_id=event_id, identity_id=None)
             )
         }
-        assert keys == {"face", "vehicle"}
+        assert keys == {"face", "person"}
 
 
 def test_marking_the_same_identifier_twice_is_idempotent(webenv):
     for _ in range(2):
         webenv.client.post(
-            "/events/1/missed", data={"missed": "1", "identifier": "face"}
+            "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
         )
     with webenv.Session() as s:
         misses = list(
@@ -159,7 +180,9 @@ def test_marking_the_same_identifier_twice_is_idempotent(webenv):
 
 
 def test_clearing_removes_miss_rows_and_the_mirror(webenv):
-    webenv.client.post("/events/1/missed", data={"missed": "1", "identifier": "face"})
+    webenv.client.post(
+        "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
+    )
     webenv.client.post("/events/1/missed", data={"missed": "0"})
     with webenv.Session() as s:
         assert (
@@ -179,7 +202,9 @@ def test_a_missed_event_is_still_unmatched_in_triage(webenv):
         # Detach the real link so only the miss row remains.
         s.delete(s.get(EventIdentity, 1))
         s.commit()
-    webenv.client.post("/events/1/missed", data={"missed": "1", "identifier": "face"})
+    webenv.client.post(
+        "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
+    )
     page = webenv.client.get("/", params={"unmatched": 1}).text
     assert 'class="row rs-' in page  # the event is listed
     # And it reads flagged, not reviewing, despite the non-null verdict.

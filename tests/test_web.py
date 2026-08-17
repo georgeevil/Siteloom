@@ -210,7 +210,11 @@ def test_identity_verdict_validation(webenv):
 
 
 def test_missed_identity_toggle(webenv):
-    webenv.client.post("/events/1/missed", data={"missed": "1"})
+    # The identifier has to be one this event's class consumes: a miss is
+    # a record of which pipeline failed, and the event is a car (CLD-135).
+    webenv.client.post(
+        "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
+    )
     with webenv.Session() as session:
         event = session.get(Event, 1)
         assert event.missed_identity is True
@@ -231,7 +235,9 @@ def test_events_list_shows_review_state(webenv):
     assert "st-chip st-reviewing" in webenv.client.get("/").text
 
     # A recorded miss outranks a confirmed claim — the event still needs someone.
-    webenv.client.post("/events/1/missed", data={"missed": "1"})
+    webenv.client.post(
+        "/events/1/missed", data={"missed": "1", "identifier": "vehicle"}
+    )
     assert "st-chip st-flagged" in webenv.client.get("/").text
 
 
