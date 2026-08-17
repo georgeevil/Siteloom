@@ -48,7 +48,9 @@ class PurgeResult:
     plate_reads: int = 0
     clips: int = 0
     crop_files: int = 0
-    #: Identity covers cleared because the crop they pointed at is gone.
+    #: Identity covers touched because the crop they pointed at is gone —
+    #: counted whether the cover was re-derived from surviving crops or
+    #: left empty because none remained.
     covers: int = 0
 
 
