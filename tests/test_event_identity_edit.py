@@ -1199,3 +1199,49 @@ def test_an_unknown_identifier_is_refused_as_unknown(edit_env):
         edit_env, deer, missed="1", identifier="deer"
     ).status_code == 303
     assert [m.identifier_key for m in _misses(edit_env, deer)] == ["deer"]
+
+
+def test_a_consumed_class_is_not_an_identifier(edit_env):
+    """`vehicle` owns the car class, so a bare "car" key names a pipeline
+    that can never exist — the registry only mints a class-keyed
+    identifier when nothing configured consumes the class. Accepting it
+    minted identities and filed recall stats under a phantom, which is
+    the exact corruption this issue set out to stop (CLD-135 review).
+    """
+    r = _mark_missed(edit_env, edit_env.ids.event, missed="1", identifier="car")
+    assert r.status_code == 400
+    assert "unknown" in r.json()["detail"].lower()
+    assert _misses(edit_env, edit_env.ids.event) == []
+
+    r = edit_env.client.post(
+        f"/events/{edit_env.ids.event}/identity",
+        data={"identity_id": "new", "identifier": "car"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    with edit_env.Session() as session:
+        assert (
+            session.query(Identity).filter_by(identifier_key="car").count() == 0
+        )
+
+
+def test_minting_without_naming_an_identifier_is_refused(edit_env):
+    """An omitted identifier on an identity_id=new attach must not fall
+    back to "face": FastAPI substitutes a Form default before the
+    handler sees the omission, so the guard only works if there is no
+    default to substitute. Reassign funnels through the same
+    _resolve_target, so one pin covers both endpoints' mint path.
+    """
+    with edit_env.Session() as session:
+        before = session.query(Identity).count()
+
+    r = edit_env.client.post(
+        f"/events/{edit_env.ids.event}/identity",
+        data={"identity_id": "new"},
+        follow_redirects=False,
+    )
+
+    assert r.status_code == 400
+    assert "no identifier" in r.json()["detail"].lower()
+    with edit_env.Session() as session:
+        assert session.query(Identity).count() == before
