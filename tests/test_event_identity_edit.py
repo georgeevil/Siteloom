@@ -1149,3 +1149,53 @@ def test_an_auto_added_class_still_gets_an_identifier_to_pick(edit_env):
     # ... and it is not offered the identifiers that do not consume deer.
     assert '<option value="vehicle">' not in page.text
     assert '<option value="face">' not in page.text
+
+
+def test_a_blank_identifier_is_unset_not_a_face_miss(edit_env):
+    """An empty submission is a form that said nothing, not a form that
+    said "face".
+
+    Collapsing the two costs the distinction the retract path depends on
+    — there, absent means "clear every miss" and explicit means "clear
+    this one" — and on a person event, where face *is* compatible, the
+    collapse is silent: a blank field files a face miss and the operator
+    is never told they attributed anything.
+    """
+    event_id = _event_of_class(edit_env, "person", track_id=26)
+
+    r = _mark_missed(edit_env, event_id, missed="1", identifier="")
+
+    assert r.status_code == 400
+    assert _misses(edit_env, event_id) == []
+
+
+def test_an_unknown_identifier_is_refused_as_unknown(edit_env):
+    """Two different mistakes deserve two different answers: an
+    identifier that does not exist is a typo, and one that exists but
+    does not consume this class is a misunderstanding about the event.
+    Reporting both as the latter sends an operator looking for the wrong
+    problem — and the attach POST next door already tells them apart.
+    """
+    unknown = _mark_missed(
+        edit_env, edit_env.ids.event, missed="1", identifier="nonsense"
+    )
+    assert unknown.status_code == 400
+    assert "unknown" in unknown.json()["detail"].lower()
+
+    incompatible = _mark_missed(
+        edit_env, edit_env.ids.event, missed="1", identifier="face"
+    )
+    assert incompatible.status_code == 400
+    # A real identifier aimed at the wrong class is not an unknown one.
+    assert "unknown" not in incompatible.json()["detail"].lower()
+    assert _misses(edit_env, edit_env.ids.event) == []
+
+    # The trap in telling them apart: an auto-added class is a legitimate
+    # identifier key that is *not* in `identity.identifiers`, so an
+    # unknown check written against that mapping alone would refuse the
+    # only key such an event can ever have.
+    deer = _event_of_class(edit_env, "deer", track_id=27)
+    assert _mark_missed(
+        edit_env, deer, missed="1", identifier="deer"
+    ).status_code == 303
+    assert [m.identifier_key for m in _misses(edit_env, deer)] == ["deer"]
