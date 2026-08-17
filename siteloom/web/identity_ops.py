@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from siteloom.identity.plates import normalize_plate
-from siteloom.store import Detection, Event, Identity
+from siteloom.store import Annotation, Detection, Event, EventIdentity, Identity
 from siteloom.store.models import PLATE_SOURCE_OPERATOR
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ COVER_CANDIDATES = 24
 #: The bound `owns_crop` checks against — every crop the identity could
 #: legitimately wear, rather than the strip the page happened to render.
 COVER_CANDIDATES_MAX = 10_000
+
 
 def shared_store(config, action: str):
     """The process-wide vector store, or an actionable 503.
@@ -141,7 +142,9 @@ def refresh_vector_count(session, vectors, identity: Identity) -> None:
     )
 
 
-def cover_candidates(session, identity: Identity, *, limit: int = 24) -> list[str]:
+def cover_candidates(
+    session, identity: Identity, *, limit: int = COVER_CANDIDATES
+) -> list[str]:
     """Crops that could represent this identity, best first.
 
     Detection crops from its *active* links, highest detector confidence
@@ -152,8 +155,6 @@ def cover_candidates(session, identity: Identity, *, limit: int = 24) -> list[st
     (training/dataset.py) applies at least as hard to the picture that
     names someone in every list on the console.
     """
-    from siteloom.store import Annotation, EventIdentity
-
     paths = [
         p
         for (p,) in session.execute(
@@ -203,7 +204,9 @@ def owns_crop(session, identity: Identity, crop_path: str) -> bool:
     page happened to show: the limit is presentation, and a form built
     from a wider page must not be refused for it.
     """
-    return crop_path in set(cover_candidates(session, identity, limit=COVER_CANDIDATES_MAX))
+    return crop_path in set(
+        cover_candidates(session, identity, limit=COVER_CANDIDATES_MAX)
+    )
 
 
 def recompute_cover(session, identity: Identity, *, dropped) -> bool:
