@@ -32,7 +32,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.web import auth, identity_ops, nav, paging, redaction
+from siteloom.web import auth, identity_ops, nav, paging, provenance, redaction
 from siteloom.store import (
     Camera,
     Detection,
@@ -722,6 +722,29 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         return None
 
     templates.env.globals["cover_src"] = cover_src
+
+    #: Cameras by id, built once. The identity page renders up to 100
+    #: sightings and every one needs its camera to resolve a per-camera
+    #: threshold override (CLD-39); the `next(... for c in config.cameras)`
+    #: scan every other call site uses would be a scan per row.
+    cameras_by_id = {c.id: c for c in config.cameras}
+
+    def claim_display(link, camera_id: str | None = None):
+        """This claim's badge, score and bar — the rule is provenance.py.
+
+        The threshold is the bar *in force now*, not the bar this match
+        cleared: none is persisted on the claim and config is mutable, so
+        a months-old 0.81 sitting under a since-raised 0.82 is a true
+        reading of both numbers, not a bug. Hence "bar", never "cleared".
+        """
+        return provenance.claim_display(
+            link,
+            config.identity.threshold_for(
+                link.identifier_key or "", cameras_by_id.get(camera_id or "")
+            ),
+        )
+
+    templates.env.globals["claim_display"] = claim_display
     #: Per-app so a second app in the same process (tests) starts clean.
     auth_gate = auth.AuthGate()
     login_throttle = auth.LoginThrottle()

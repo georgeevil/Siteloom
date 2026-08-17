@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "_pickers.html" as pickers with context %}
+{% import "_claims.html" as claims with context %}
 {% block title %}Event {{ event.id }}{% endblock %}
 {% block content %}
 <p><a href="/">&larr; events</a></p>
@@ -77,7 +78,8 @@
       <a href="/identities/{{ l.identity.id }}">
         <span class="badge {% if may_name() and not l.identity.label %}unknown{% endif %}">{{ identity_name(l.identity) }}</span></a>
       {% if identity_plate(l.identity) %}<span class="badge plate">{{ identity_plate(l.identity) }}</span>{% endif %}
-      <span class="sim">{{ l.identity.identifier_key }} · {{ '%.2f'|format(l.similarity) }}</span>
+      <span class="sim">{{ l.identity.identifier_key }}</span>
+      {{ claims.evidence(l, event.camera_id) }}
     </span>
 
     <span class="acts">
