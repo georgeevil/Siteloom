@@ -117,14 +117,57 @@ def test_purge_window_is_scoped_and_removes_crops(env):
         assert s.query(BackfillClip).count() == 0
 
 
-def test_purge_window_clears_a_cover_it_deleted_the_file_for(env):
-    """Identity rows are never purged, but their cover can point into the
-    window that just went (CLD-137). Leaving a row that is known-dangling
-    for the renderer to hide is the same shape as clearing rows while
-    leaving the media behind, which the factory reset exists to refuse —
-    so the purge nulls the covers whose files it is about to delete.
+def test_purge_window_repicks_a_cover_from_what_survives(env):
+    """A purge is a reason to re-derive the cover, not only to drop it.
 
-    Event crops cannot reach this state: their rows go in the same pass.
+    The identity keeps every claim outside the window, so it usually
+    still has a perfectly good crop — and nothing else will fire for it:
+    no unlink, no reassign, no merge. Clearing the field and stopping
+    there leaves the identity faceless in every list until an operator
+    happens to pick one by hand.
+    """
+    kept = "cam1/kept.jpg"
+    (env.media / "cam1" / "kept.jpg").write_bytes(b"\xff\xd8jpg")
+    with env.Session() as s:
+        identity = s.query(Identity).one()
+        identity.best_crop_path = "cam1/crop1.jpg"  # the crop about to go
+        identity.cover_locked = True
+        # The out-of-window visit it still has, with a crop of its own.
+        survivor = s.query(Event).filter_by(track_id=2).one()
+        s.add(
+            Detection(
+                event_id=survivor.id, timestamp=T0 - timedelta(hours=10),
+                class_name="person", confidence=0.7, bbox="[1,2,3,4]",
+                crop_path=kept,
+            )
+        )
+        s.add(EventIdentity(event_id=survivor.id, identity_id=identity.id))
+        s.commit()
+
+    purge_window(
+        env.Session,
+        ["cam1"],
+        T0 - timedelta(hours=1),
+        T0 + timedelta(hours=1),
+        env.media,
+    )
+
+    with env.Session() as s:
+        identity = s.query(Identity).one()
+        assert identity.best_crop_path == kept  # re-derived, not emptied
+        # The choice went with the crop it stood for, same as an unlink.
+        assert identity.cover_locked is False
+
+
+def test_purge_window_clears_a_cover_with_nothing_left_to_pick(env):
+    """The other outcome, and still the right one: with every claim
+    inside the purged window there is nothing to re-derive from, so NULL
+    is the honest answer rather than a path to a deleted file.
+
+    Leaving a row that is known-dangling for the renderer to hide is the
+    same shape as clearing rows while leaving the media behind, which the
+    factory reset exists to refuse. Event crops cannot reach this state:
+    their rows go in the same pass.
     """
     with env.Session() as s:
         identity = s.query(Identity).one()
