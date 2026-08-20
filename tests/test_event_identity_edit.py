@@ -1245,3 +1245,135 @@ def test_minting_without_naming_an_identifier_is_refused(edit_env):
     assert "no identifier" in r.json()["detail"].lower()
     with edit_env.Session() as session:
         assert session.query(Identity).count() == before
+
+
+# -- what a claim row says about its own evidence (CLD-136) ----------------
+#
+# Three screens render the same claim, and each used to print
+# `identifier_key · similarity` with no word for *how* the claim was
+# evidenced — so a plate match read `sim 1.00` (a hardcoded sentinel) and
+# a human link read `sim 0.00` (a column nobody measured).
+
+
+def _surfaces(env) -> list[str]:
+    return [
+        f"/events/{env.ids.event}",
+        f"/events/{env.ids.event}/rail",
+        f"/identities/{env.ids.wrong}",
+    ]
+
+
+def _readable(page: str) -> str:
+    """The page minus its stylesheet and scripts.
+
+    The assertions below are "this number appears nowhere", which is the
+    right strength — but `oklch(0.17 0.008 250)` contains "0.00", so a
+    raw page check trips over a colour token and proves nothing about
+    what an operator reads.
+    """
+    import re
+
+    return re.sub(
+        r"<(style|script)\b.*?</\1>", "", page, flags=re.S | re.I
+    )
+
+
+def _beside_badge(page: str, badge: str, span: int = 240) -> str:
+    """The markup immediately following an evidence badge.
+
+    The macro emits the score span right after the badge, so this is
+    where a number would land. Scoped rather than page-wide because a
+    bare "0.00" also matches the detections table's `14:16:00.000` and
+    a CSS `oklch(0.17 0.008 250)` — a loose check would fail on a page
+    that renders no score at all, and pass on one that renders it in
+    different markup.
+    """
+    marker = f"evidence {badge}"
+    assert marker in page, f"no {badge} badge rendered"
+    start = page.index(marker)
+    return page[start : start + span]
+
+
+def _set_evidence(env, **columns):
+    with env.Session() as session:
+        link = session.get(EventIdentity, env.ids.link)
+        for field, value in columns.items():
+            setattr(link, field, value)
+        session.commit()
+
+
+@pytest.mark.parametrize("surface", [0, 1, 2])
+def test_a_plate_claim_shows_the_badge_and_no_invented_score(edit_env, surface):
+    """CLD-136's headline. `_match_plate` returns a hardcoded 1.00 that
+    `_absorb_evidence` then pins in place, and the console printed it as
+    though the matcher had measured a perfect resemblance — the most
+    confident-looking number on the screen, on the one row where the
+    number means nothing at all."""
+    _set_evidence(edit_env, matched_by="plate", similarity=1.0)
+
+    page = edit_env.client.get(_surfaces(edit_env)[surface]).text
+
+    assert "evidence plate" in page
+    assert "1.00" not in _beside_badge(page, "plate")
+    # And nowhere else either — the sentinel had no business on the page.
+    assert "1.00" not in _readable(page)
+
+
+@pytest.mark.parametrize("surface", [0, 1, 2])
+def test_a_manual_claim_shows_no_score_at_all(edit_env, surface):
+    """`sim 0.00` beside a green tick is the console reporting no
+    confidence in a claim a human made outright. There is no number to
+    print here, so none is printed."""
+    _set_evidence(edit_env, matched_by="human", similarity=0.0, verdict="confirmed")
+
+    page = edit_env.client.get(_surfaces(edit_env)[surface]).text
+
+    assert "evidence manual" in page
+    assert "0.00" not in _beside_badge(page, "manual")
+
+
+@pytest.mark.parametrize("surface", [0, 1, 2])
+def test_a_visual_claim_shows_its_score_against_the_bar(edit_env, surface):
+    """The case where the number is real, and the only one where it means
+    what it appears to mean — shown against the threshold in force, which
+    is what makes 0.83 readable as "just over the line" rather than as a
+    number with no scale."""
+    page = edit_env.client.get(_surfaces(edit_env)[surface]).text
+
+    assert "evidence visual" in page
+    assert "sim 0.83" in page
+    assert "bar 0.82" in page  # the vehicle identifier's threshold
+
+
+def test_the_badge_survives_the_naming_floor_and_leaks_no_plate(edit_env):
+    """`/events/{id}` and its rail are readable at `restricted`, so the
+    badge renders there — it names an algorithm, not a person, which is
+    the whole triage signal and it survives losing the name.
+
+    The badge is the *word* `plate`, never the plate number: that would
+    have to go through `identity_plate`, which is None below the floor.
+    """
+    _set_evidence(edit_env, matched_by="plate", similarity=1.0)
+    with edit_env.Session() as session:
+        session.get(Identity, edit_env.ids.wrong).plate = "XYZ789"
+        session.add(
+            User(
+                username="rick",
+                password_hash=hash_password("hunter2!"),
+                role="restricted",
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        )
+        session.commit()
+    assert edit_env.client.post(
+        "/login",
+        data={"username": "rick", "password": "hunter2!", "next": "/"},
+        follow_redirects=False,
+    ).status_code == 303
+
+    for url in _surfaces(edit_env)[:2]:  # /identities is denied wholesale
+        page = edit_env.client.get(url)
+        assert page.status_code == 200
+        assert "evidence plate" in page.text
+        assert "XYZ789" not in page.text
+        assert "Aleks Corolla" not in page.text  # the floor still holds
