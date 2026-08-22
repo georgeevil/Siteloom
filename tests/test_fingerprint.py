@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from siteloom.config import (
     CameraConfig,
+    IdentifierConfig,
     IdentityConfig,
     SiteConfig,
     StorageConfig,
@@ -70,8 +71,9 @@ def test_a_red_crop_reads_red_with_its_measurements():
     assert read.confidence == pytest.approx(1.0)
     assert read.chroma_p95 == pytest.approx(220.0)
     assert read.reason is None
-    # The floors applied ride on the read (the CLD-128 rule): the row
-    # can be re-judged later without re-running anything.
+    # The measurements and the floors applied ride on the read (the
+    # CLD-128 rule): the row can be re-judged later without re-running.
+    assert read.crop_px == 100
     assert read.min_px == 32
     assert read.chroma_floor == pytest.approx(12.0)
 
@@ -103,6 +105,11 @@ def test_a_tiny_crop_is_refused_like_a_tiny_plate():
     read = read_color(solid((0, 0, 220), size=20), min_px=32, chroma_floor=12.0)
     assert read.color is None
     assert read.reason == REASON_TOO_SMALL
+    # Refused is still measured: "would lowering min_px recover this
+    # camera's reads?" must be answerable from the rows.
+    assert read.crop_px == 20
+    assert read.min_px == 32
+    assert read.chroma_floor == pytest.approx(12.0)
 
 
 def test_blue_and_black_land_in_their_bins():
@@ -145,6 +152,60 @@ def test_an_all_ir_visit_reports_the_reason_not_a_guess():
 def test_nothing_measured_is_nothing_not_unknown():
     assert visit_color([]) is None
     assert visit_color([(None, None, None)] * 3) is None
+
+
+def test_the_badge_blames_the_dominant_reason_not_membership():
+    """One grayscale frame in a mostly-too-small visit is a crop-size
+    problem — attributing it to IR would assert 'every read saw a
+    grayscale crop' about something else entirely."""
+    vc = visit_color(
+        [(None, None, REASON_TOO_SMALL)] * 4 + [(None, None, REASON_NO_CHROMA)]
+    )
+    assert vc is not None
+    assert vc.dominant_unnamed_reason == REASON_TOO_SMALL
+
+
+def test_the_template_speaks_the_module_reason_vocabulary():
+    """The chip branches on reason strings; renaming a constant must
+    fail here, not silently degrade the badge."""
+    from pathlib import Path
+
+    import siteloom.web
+
+    template = (
+        Path(siteloom.web.__file__).parent / "templates" / "event.html"
+    ).read_text()
+    assert f"== '{REASON_NO_CHROMA}'" in template
+    assert f"== '{REASON_TOO_SMALL}'" in template
+
+
+# --------------------------------------------------------------------------
+# One resolution decides the gate for ingest and display alike
+# --------------------------------------------------------------------------
+
+
+def test_fingerprint_request_follows_the_vehicle_identifier_by_default():
+    cfg = IdentityConfig()
+    cfg.fingerprint.enabled = True
+    assert cfg.fingerprint_request("car") == {"min_px": 32, "chroma_floor": 12.0}
+    assert cfg.fingerprint_request("person") is None
+    # Adding a class to the vehicle identifier — CLAUDE.md's one-step
+    # way to re-identify it — fingerprints it too; no second list to
+    # keep in sync.
+    cfg.identifiers["vehicle"].applies_to.append("van")
+    assert cfg.fingerprint_request("van") is not None
+    # A named list pins the set independently.
+    cfg.fingerprint.classes = ["truck"]
+    assert cfg.fingerprint_request("van") is None
+    assert cfg.fingerprint_request("truck") is not None
+
+
+def test_fingerprint_request_is_none_when_off_or_without_vehicles():
+    assert IdentityConfig().fingerprint_request("car") is None
+    cfg = IdentityConfig(identifiers={"face": IdentifierConfig(
+        algo="face", applies_to=["person"])})
+    cfg.fingerprint.enabled = True
+    assert cfg.fingerprint_request("car") is None
 
 
 # --------------------------------------------------------------------------
@@ -272,9 +333,16 @@ def test_with_the_flag_on_every_detection_row_carries_its_read(
         assert row.color_confidence == pytest.approx(1.0)
         assert row.color_chroma == pytest.approx(220.0)
         assert row.color_reason is None
+        # The floors and measurements persist with the verdict — the
+        # whole point of the discipline (CLD-128).
+        assert row.color_min_px == 32
+        assert row.color_chroma_floor == pytest.approx(12.0)
+        assert row.color_crop_px == 100
+        assert row.color_saturation is not None
     for row in rows:
         if row.color_name is None:
             assert row.color_reason is None and row.color_chroma is None
+            assert row.color_min_px is None and row.color_chroma_floor is None
 
 
 def test_with_the_flag_off_nothing_is_asked_and_nothing_is_written(
@@ -365,6 +433,25 @@ def test_the_chip_row_renders_only_behind_the_flag(web):
     body = off.client.get(f"/events/{off.event_id}").text
     assert "2/2 frames" not in body
     assert "no plate read attempted" not in body
+
+
+def test_an_unmeasured_event_gets_no_chip_at_all(web, tmp_path):
+    """Flag on, but nothing was ever measured — a Frigate-consumed
+    event with no Detection rows, identity off, or pre-flag history.
+    The chip must not render, because everything it would say ("no
+    plate read attempted") is a claim about work that never ran."""
+    env = web(enabled=True)
+    engine = make_engine(f"sqlite:///{tmp_path}/web.db")
+    with get_session(engine)() as session:
+        for d in session.query(Detection).all():
+            d.color_name = None
+            d.color_confidence = None
+            d.color_chroma = None
+            d.color_reason = None
+        session.commit()
+    body = env.client.get(f"/events/{env.event_id}").text
+    assert "no plate read attempted" not in body
+    assert "color unknown" not in body
 
 
 def test_an_ir_visit_says_unknown_ir_never_gray(web, tmp_path):

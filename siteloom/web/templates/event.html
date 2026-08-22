@@ -11,11 +11,14 @@
   {% if event.track_id is not none %}<span class="muted" style="font-size:0.8em;">track {{ event.track_id }}</span>{% endif %}
 </h2>
 
-{# Vehicle fingerprint (CLD-254), rendered only when the route sent it
-   (flag on + fingerprinted class). "unknown (IR)" is a measurement —
-   the crop was grayscale, so naming a color would be a guess — and a
-   visit with no reads at all shows nothing, never "unknown". The plate
-   chip is counts, not text: it reads the same at every role. #}
+{# Vehicle fingerprint (CLD-254), rendered only when the route sent it —
+   flag on, fingerprinted class, AND something actually measured; an
+   unmeasured event (Frigate-consumed, identity off, pre-flag history)
+   shows nothing rather than affirmative claims about work never done.
+   The badge attributes a missing color to the *dominant* reason: one
+   grayscale frame in a mostly-too-small visit is a crop-size problem,
+   not an IR one. The plate chip is counts, not text: it reads the same
+   at every role. #}
 {% if fingerprint %}
 <p class="muted" style="margin: 0.2rem 0 0.5rem; font-size: 0.85rem;">
   <span class="badge">{{ event.class_name }}</span>
@@ -24,9 +27,12 @@
     {% if vc.color %}
       <span class="badge">{{ vc.color }}</span>
       <span title="frames agreeing on this color / frames that named a color">{{ vc.agreeing }}/{{ vc.named }} frames</span>
-    {% elif 'no-chroma' in vc.unnamed_reasons %}
+    {% elif vc.dominant_unnamed_reason == 'no-chroma' %}
       <span class="badge">color unknown (IR)</span>
-      <span title="every read saw a grayscale crop — infrared, or nothing chromatic to measure">{{ vc.unnamed_reasons['no-chroma'] }} grayscale frames</span>
+      <span title="reads saw a grayscale crop — infrared, or nothing chromatic to measure">{{ vc.unnamed_reasons['no-chroma'] }} grayscale frames</span>
+    {% elif vc.dominant_unnamed_reason == 'too-small' %}
+      <span class="badge">color unknown (crop too small)</span>
+      <span title="most reads were refused under the min_px floor">{{ vc.unnamed_reasons['too-small'] }} frames under the size floor</span>
     {% else %}
       <span class="badge">color unmeasured</span>
     {% endif %}

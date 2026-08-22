@@ -458,10 +458,12 @@ class FingerprintConfig(BaseModel):
     """
 
     enabled: bool = False
-    # Detection classes fingerprinted. Matches the vehicle identifier's
-    # `applies_to` by default; a class outside this list is never
-    # measured, flag or no flag.
-    classes: list[str] = ["car", "truck", "bus", "motorcycle"]
+    # Detection classes fingerprinted. None (the default) follows the
+    # vehicle identifier's `applies_to` — derived, not copied, so
+    # adding "van" there (CLAUDE.md's one-step way to re-identify a new
+    # class) fingerprints it too instead of silently drifting. Name a
+    # list to pin the set independently.
+    classes: list[str] | None = None
     # Crops narrower than this on either side name no color — the
     # center-region vote over a handful of pixels is noise, the same
     # reason plates have a width floor.
@@ -623,6 +625,27 @@ class IdentityConfig(BaseModel):
                 return value
         ident = self.identifiers.get(identifier_key)
         return ident.threshold if ident is not None else None
+
+    def fingerprint_request(self, class_name: str) -> dict | None:
+        """The fingerprint job payload for one detection class, or None.
+
+        One place decides whether a class is fingerprinted and with what
+        floors — ingest builds the module payload from this and the
+        event page asks it whether a chip can exist, so the two can
+        never disagree (the `threshold_for`/`plate_floors_for` rule,
+        CLD-128). Per-camera floors, when they arrive (the always-IR
+        camera wants its own `chroma_floor` or a disable), resolve here.
+        """
+        fp = self.fingerprint
+        if not fp.enabled:
+            return None
+        classes = fp.classes
+        if classes is None:
+            vehicle = self.identifiers.get("vehicle")
+            classes = vehicle.applies_to if vehicle is not None else []
+        if class_name not in classes:
+            return None
+        return {"min_px": fp.min_px, "chroma_floor": fp.chroma_floor}
 
     def plate_floors_for(
         self, identifier_key: str, camera: "CameraConfig | None" = None

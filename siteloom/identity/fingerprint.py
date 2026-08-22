@@ -83,6 +83,13 @@ class ColorRead:
     chroma_p95: float | None = None
     #: Mean saturation (0..1) over the center region.
     saturation: float | None = None
+    #: The crop's short side in pixels — what `min_px` was judged on.
+    #: Recorded on every read, too-small included: "would lowering
+    #: min_px recover this camera's reads?" must be answerable from
+    #: rows, not from a re-run. Note this is the *stored crop*, which
+    #: `detection.crop_margin` grows past the bbox — it is deliberately
+    #: not the same rectangle `identify_min_crop_px` gates.
+    crop_px: int | None = None
     reason: str | None = None
     min_px: int | None = None
     chroma_floor: float | None = None
@@ -93,33 +100,43 @@ class ColorRead:
             "confidence": self.confidence,
             "chroma_p95": self.chroma_p95,
             "saturation": self.saturation,
+            "crop_px": self.crop_px,
             "reason": self.reason,
             "min_px": self.min_px,
             "chroma_floor": self.chroma_floor,
         }
 
 
-def _pixel_color_names(center_bgr: np.ndarray) -> np.ndarray:
-    """Name every center pixel: hue bin when saturated, value tier when
+#: Index-coded color names for the pixel vote: the vote runs in uint8
+#: codes and one bincount, never object arrays of Python strings — this
+#: sits in series with the embedders inside the identity job.
+_NAMES = (
+    "red", "orange", "yellow", "green", "blue", "purple",
+    "brown", "white", "black", "gray",
+)
+_CODE = {name: np.uint8(i) for i, name in enumerate(_NAMES)}
+
+
+def _pixel_color_codes(center_hsv: np.ndarray) -> np.ndarray:
+    """Code every center pixel: hue bin when saturated, value tier when
     not. Vectorized — a per-pixel Python loop on a 200px crop is the
     kind of cost that does not belong in the ingest path."""
-    hsv = cv2.cvtColor(center_bgr, cv2.COLOR_BGR2HSV)
-    h = hsv[..., 0].astype(np.int32)
-    s = hsv[..., 1].astype(np.int32)
-    v = hsv[..., 2].astype(np.int32)
+    h = center_hsv[..., 0]
+    s = center_hsv[..., 1]
+    v = center_hsv[..., 2]
 
-    names = np.full(h.shape, "red", dtype=object)
+    codes = np.full(h.shape, _CODE["red"], dtype=np.uint8)
     for name, lo, hi in _HUE_BINS:
-        names[(h >= lo) & (h < hi)] = name
+        codes[(h >= lo) & (h < hi)] = _CODE[name]
     # Brown is dark orange — a separate perceptual color that shares a
     # hue band, which is why it is a value split rather than a bin.
-    names[(names == "orange") & (v < 130)] = "brown"
+    codes[(codes == _CODE["orange"]) & (v < 130)] = _CODE["brown"]
 
     achromatic = s < _ACHROMATIC_SATURATION
-    names[achromatic & (v >= 170)] = "white"
-    names[achromatic & (v < 80)] = "black"
-    names[achromatic & (v >= 80) & (v < 170)] = "gray"
-    return names
+    codes[achromatic & (v >= 170)] = _CODE["white"]
+    codes[achromatic & (v < 80)] = _CODE["black"]
+    codes[achromatic & (v >= 80) & (v < 170)] = _CODE["gray"]
+    return codes
 
 
 def read_color(
@@ -127,13 +144,21 @@ def read_color(
 ) -> ColorRead:
     """Measure the crop and name its dominant color, or say why not."""
     height, width = crop_bgr.shape[:2]
-    if min(height, width) < min_px:
-        return ColorRead(reason=REASON_TOO_SMALL, min_px=min_px)
+    crop_px = min(height, width)
+    if crop_px < min_px:
+        # Refused, but still a measurement: the size it was judged on
+        # and both floors ride along, same as every other outcome.
+        return ColorRead(
+            crop_px=crop_px,
+            reason=REASON_TOO_SMALL,
+            min_px=min_px,
+            chroma_floor=chroma_floor,
+        )
 
     # Chroma over the WHOLE crop, margin included: the background is
-    # what separates "white car in daylight" from "IR frame".
-    as_int = crop_bgr.astype(np.int32)
-    spread = as_int.max(axis=2) - as_int.min(axis=2)
+    # what separates "white car in daylight" from "IR frame". uint8
+    # ptp is safe — max >= min per pixel, so no wraparound.
+    spread = crop_bgr.max(axis=2) - crop_bgr.min(axis=2)
     chroma_p95 = float(np.percentile(spread, 95))
 
     cy, cx = int(height * (1 - _CENTER_FRACTION) / 2), int(
@@ -147,19 +172,20 @@ def read_color(
         return ColorRead(
             chroma_p95=chroma_p95,
             saturation=saturation,
+            crop_px=crop_px,
             reason=REASON_NO_CHROMA,
             min_px=min_px,
             chroma_floor=chroma_floor,
         )
 
-    names = _pixel_color_names(center)
-    values, counts = np.unique(names, return_counts=True)
+    counts = np.bincount(_pixel_color_codes(hsv).ravel(), minlength=len(_NAMES))
     winner = int(counts.argmax())
     return ColorRead(
-        color=str(values[winner]),
-        confidence=float(counts[winner] / names.size),
+        color=_NAMES[winner],
+        confidence=float(counts[winner] / counts.sum()),
         chroma_p95=chroma_p95,
         saturation=saturation,
+        crop_px=crop_px,
         min_px=min_px,
         chroma_floor=chroma_floor,
     )
@@ -181,6 +207,16 @@ class VisitColor:
     #: Frames whose read gave no color, by reason (e.g. all-IR visits
     #: show up here as {"no-chroma": n} — the honest "unknown (IR)").
     unnamed_reasons: dict[str, int]
+
+    @property
+    def dominant_unnamed_reason(self) -> str | None:
+        """The reason most unnamed frames gave — what a screen may
+        attribute the missing color to. A visit that was mostly
+        too-small with one grayscale frame is a crop-size problem, not
+        an IR one; membership in the dict must never decide the badge."""
+        if not self.unnamed_reasons:
+            return None
+        return max(self.unnamed_reasons, key=lambda k: self.unnamed_reasons[k])
 
 
 def visit_color(

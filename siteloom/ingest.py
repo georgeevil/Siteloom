@@ -408,14 +408,10 @@ class IngestService:
         # Vehicle fingerprint (CLD-254): the floors ride in the payload
         # like plate floors do, and their absence is the module's off
         # switch — a directly-driven module (tests, replay) that sends
-        # no key gets no read.
-        fingerprint_req: dict | None = None
-        fp_cfg = identity_cfg.fingerprint
-        if fp_cfg.enabled and det["class_name"] in fp_cfg.classes:
-            fingerprint_req = {
-                "min_px": fp_cfg.min_px,
-                "chroma_floor": fp_cfg.chroma_floor,
-            }
+        # no key gets no read. One resolution, shared with the event
+        # page's chip gate (`fingerprint_request`), so ingest and
+        # display cannot disagree about what is fingerprinted.
+        fingerprint_req = identity_cfg.fingerprint_request(det["class_name"])
         for key, ident in identity_cfg.identifiers.items():
             if not ident.plate_ocr:
                 continue
@@ -452,7 +448,11 @@ class IngestService:
             detection.color_name = color["color"]
             detection.color_confidence = color["confidence"]
             detection.color_chroma = color["chroma_p95"]
+            detection.color_saturation = color["saturation"]
+            detection.color_crop_px = color["crop_px"]
             detection.color_reason = color["reason"]
+            detection.color_min_px = color["min_px"]
+            detection.color_chroma_floor = color["chroma_floor"]
         registry = identity_cfg.identifiers
         for emb in result.result["embeddings"]:
             ident_cfg = registry.get(emb["identifier"])
