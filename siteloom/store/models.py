@@ -203,6 +203,25 @@ class Detection(Base):
     bbox: Mapped[str] = mapped_column(Text)  # JSON [x1, y1, x2, y2]
     zones: Mapped[str] = mapped_column(Text, default="[]")  # JSON [name, ...]
     crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Vehicle fingerprint color read (CLD-254), per frame like plate
+    # reads: the visit-level answer is display-time grouping, never a
+    # column. All NULL together means "not measured" — fingerprinting
+    # off, a non-vehicle class, or a pre-column row — which every reader
+    # must render as nothing, not as unknown. A NULL `color_name` with a
+    # `color_reason` is a real read that named no color (grayscale/IR
+    # crop, too-small crop). The measurements (`color_chroma`,
+    # `color_crop_px`, `color_saturation`) and the floors they were
+    # judged against (`color_min_px`, `color_chroma_floor`) are kept on
+    # every read, refused ones included — moving a floor is a question
+    # about existing rows, never a re-run (the PlateRead discipline).
+    color_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    color_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    color_chroma: Mapped[float | None] = mapped_column(Float, nullable=True)
+    color_saturation: Mapped[float | None] = mapped_column(Float, nullable=True)
+    color_crop_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    color_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    color_min_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    color_chroma_floor: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="detections")
 

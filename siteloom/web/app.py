@@ -28,7 +28,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, not_, or_, select
+from sqlalchemy import case, func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
@@ -1315,6 +1315,49 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             # so it takes the same floor (CLD-103) — one leak with two
             # URLs — and now the same class filter.
             pickers = _picker_context(session, _viewer(request), config, event)
+            # Vehicle fingerprint (CLD-254). The class gate is the same
+            # resolution ingest builds its payload from
+            # (`fingerprint_request`), and the chip additionally demands
+            # that something was actually *measured* — a color read or a
+            # plate attempt. Rendering on the flag alone stated things
+            # about events the pipeline never touched: a Frigate event
+            # (no Detection rows, plate-matched without PlateRead rows)
+            # got an affirmative "no plate read attempted", and a config
+            # with fingerprint on but identity off showed an empty chip
+            # forever. No measurements, no chip. Consensus is
+            # display-time grouping over the rows already loaded, the
+            # /plates decision (CLD-131). The plate chip is counts only
+            # — never text — so it says the same thing at every role and
+            # the restricted disclosure walk has nothing new to withhold.
+            fingerprint = None
+            if config.identity.fingerprint_request(event.class_name) is not None:
+                from siteloom.identity.fingerprint import visit_color
+
+                attempts, accepted = session.execute(
+                    select(
+                        func.count(),
+                        func.coalesce(
+                            func.sum(
+                                case((PlateRead.accepted.is_(True), 1), else_=0)
+                            ),
+                            0,
+                        ),
+                    )
+                    .select_from(PlateRead)
+                    .where(PlateRead.event_id == event_id)
+                ).one()
+                color = visit_color(
+                    [
+                        (d.color_name, d.color_confidence, d.color_reason)
+                        for d in detections
+                    ]
+                )
+                if color is not None or attempts:
+                    fingerprint = {
+                        "color": color,
+                        "plate_attempts": attempts,
+                        "plate_accepted": accepted,
+                    }
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -1333,6 +1376,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "identity_links": identity_links,
                 "unlinked": unlinked,
                 "misses": misses,
+                "fingerprint": fingerprint,
                 **pickers,
             },
         )
