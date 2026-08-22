@@ -19,9 +19,19 @@ Job payload:
                    ingest rationed out for this frame (CLD-130's cadence
                    cap). The embedding still runs — only the OCR is
                    skipped, and no PlateRead travels for it.
+    fingerprint: {min_px, chroma_floor} — optional; when present, the
+                   vehicle-fingerprint color read (CLD-254) runs on the
+                   crop with these floors. Ingest sends it only when the
+                   feature flag is on and the class is fingerprinted, so
+                   its absence is the off switch.
 Result:
     {"embeddings": [{identifier, algo, vector: [float], plate: str|None,
-                     plate_read: dict|None}]}
+                     plate_read: dict|None}],
+     "fingerprint": dict|None}
+
+`fingerprint` is per crop, not per identifier — color belongs to the
+detection, and it travels (as `ColorRead.as_payload()`) even when the
+read named no color, exactly as failed plate reads do.
 
 `plate_read` is the whole OCR attempt (CLD-85), flattened to a plain dict
 by `PlateRead.as_payload()` — scalars plus the plate sub-crop as JPEG
@@ -63,6 +73,17 @@ class IdentityModule:
         )
         if crop is None:
             raise ValueError("could not decode crop_jpeg")
+
+        fingerprint = None
+        fp_floors = payload.get("fingerprint")
+        if fp_floors:
+            from siteloom.identity.fingerprint import read_color
+
+            fingerprint = read_color(
+                crop,
+                min_px=fp_floors["min_px"],
+                chroma_floor=fp_floors["chroma_floor"],
+            ).as_payload()
 
         out: list[dict[str, Any]] = []
         for key, ident in self.registry.identifiers_for(payload["class_name"]):
@@ -112,4 +133,4 @@ class IdentityModule:
                     "plate_read": plate_read,
                 }
             )
-        return {"embeddings": out}
+        return {"embeddings": out, "fingerprint": fingerprint}

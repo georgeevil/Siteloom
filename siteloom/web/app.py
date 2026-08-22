@@ -1315,6 +1315,38 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             # so it takes the same floor (CLD-103) — one leak with two
             # URLs — and now the same class filter.
             pickers = _picker_context(session, _viewer(request), config, event)
+            # Vehicle fingerprint (CLD-254), flag-gated. Consensus is
+            # display-time grouping over the per-frame reads already
+            # loaded, the /plates decision (CLD-131). The plate chip is
+            # counts only — attempts and accepts — never text, so it
+            # says the same thing at every role and the restricted
+            # disclosure walk has nothing new to withhold.
+            fingerprint = None
+            fp_cfg = config.identity.fingerprint
+            if fp_cfg.enabled and event.class_name in fp_cfg.classes:
+                from siteloom.identity.fingerprint import visit_color
+
+                fingerprint = {
+                    "color": visit_color(
+                        [
+                            (d.color_name, d.color_confidence, d.color_reason)
+                            for d in detections
+                        ]
+                    ),
+                    "plate_attempts": session.scalar(
+                        select(func.count())
+                        .select_from(PlateRead)
+                        .where(PlateRead.event_id == event_id)
+                    ),
+                    "plate_accepted": session.scalar(
+                        select(func.count())
+                        .select_from(PlateRead)
+                        .where(
+                            PlateRead.event_id == event_id,
+                            PlateRead.accepted.is_(True),
+                        )
+                    ),
+                }
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -1333,6 +1365,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "identity_links": identity_links,
                 "unlinked": unlinked,
                 "misses": misses,
+                "fingerprint": fingerprint,
                 **pickers,
             },
         )

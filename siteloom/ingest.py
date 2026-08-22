@@ -405,6 +405,17 @@ class IngestService:
         # embedding still runs, so re-ID is unchanged).
         plate_floors: dict[str, dict] = {}
         skip_plate_ocr: list[str] = []
+        # Vehicle fingerprint (CLD-254): the floors ride in the payload
+        # like plate floors do, and their absence is the module's off
+        # switch — a directly-driven module (tests, replay) that sends
+        # no key gets no read.
+        fingerprint_req: dict | None = None
+        fp_cfg = identity_cfg.fingerprint
+        if fp_cfg.enabled and det["class_name"] in fp_cfg.classes:
+            fingerprint_req = {
+                "min_px": fp_cfg.min_px,
+                "chroma_floor": fp_cfg.chroma_floor,
+            }
         for key, ident in identity_cfg.identifiers.items():
             if not ident.plate_ocr:
                 continue
@@ -425,12 +436,23 @@ class IngestService:
                     "class_name": det["class_name"],
                     "plate_floors": plate_floors,
                     "skip_plate_ocr": skip_plate_ocr,
+                    "fingerprint": fingerprint_req,
                 },
             )
         )
         if not result.ok:
             log.error("identity job failed on %s: %s", cam.id, result.error)
             return
+        # The color read lands on the Detection row whether or not it
+        # named a color, and before any resolution happens — it is a
+        # measurement of the frame, not of the match (CLD-254). The
+        # module computed it; writing rows stays this layer's job.
+        color = result.result.get("fingerprint")
+        if color is not None and detection is not None:
+            detection.color_name = color["color"]
+            detection.color_confidence = color["confidence"]
+            detection.color_chroma = color["chroma_p95"]
+            detection.color_reason = color["reason"]
         registry = identity_cfg.identifiers
         for emb in result.result["embeddings"]:
             ident_cfg = registry.get(emb["identifier"])

@@ -203,6 +203,18 @@ class Detection(Base):
     bbox: Mapped[str] = mapped_column(Text)  # JSON [x1, y1, x2, y2]
     zones: Mapped[str] = mapped_column(Text, default="[]")  # JSON [name, ...]
     crop_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Vehicle fingerprint color read (CLD-254), per frame like plate
+    # reads: the visit-level answer is display-time grouping, never a
+    # column. All NULL together means "not measured" — fingerprinting
+    # off, a non-vehicle class, or a pre-column row — which every reader
+    # must render as nothing, not as unknown. A NULL `color_name` with a
+    # `color_reason` is a real read that named no color (grayscale/IR
+    # crop, too-small crop); `color_chroma` is the measurement that
+    # decision was made on, kept so the floor can be retuned from rows.
+    color_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    color_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    color_chroma: Mapped[float | None] = mapped_column(Float, nullable=True)
+    color_reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="detections")
 
