@@ -405,6 +405,13 @@ class IngestService:
         # embedding still runs, so re-ID is unchanged).
         plate_floors: dict[str, dict] = {}
         skip_plate_ocr: list[str] = []
+        # Vehicle fingerprint (CLD-254): the floors ride in the payload
+        # like plate floors do, and their absence is the module's off
+        # switch — a directly-driven module (tests, replay) that sends
+        # no key gets no read. One resolution, shared with the event
+        # page's chip gate (`fingerprint_request`), so ingest and
+        # display cannot disagree about what is fingerprinted.
+        fingerprint_req = identity_cfg.fingerprint_request(det["class_name"])
         for key, ident in identity_cfg.identifiers.items():
             if not ident.plate_ocr:
                 continue
@@ -425,12 +432,27 @@ class IngestService:
                     "class_name": det["class_name"],
                     "plate_floors": plate_floors,
                     "skip_plate_ocr": skip_plate_ocr,
+                    "fingerprint": fingerprint_req,
                 },
             )
         )
         if not result.ok:
             log.error("identity job failed on %s: %s", cam.id, result.error)
             return
+        # The color read lands on the Detection row whether or not it
+        # named a color, and before any resolution happens — it is a
+        # measurement of the frame, not of the match (CLD-254). The
+        # module computed it; writing rows stays this layer's job.
+        color = result.result.get("fingerprint")
+        if color is not None and detection is not None:
+            detection.color_name = color["color"]
+            detection.color_confidence = color["confidence"]
+            detection.color_chroma = color["chroma_p95"]
+            detection.color_saturation = color["saturation"]
+            detection.color_crop_px = color["crop_px"]
+            detection.color_reason = color["reason"]
+            detection.color_min_px = color["min_px"]
+            detection.color_chroma_floor = color["chroma_floor"]
         registry = identity_cfg.identifiers
         for emb in result.result["embeddings"]:
             ident_cfg = registry.get(emb["identifier"])

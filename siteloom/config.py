@@ -445,6 +445,38 @@ class IdentifierConfig(BaseModel):
     learn_max_per_event: int = 3
 
 
+class FingerprintConfig(BaseModel):
+    """Flock-style vehicle attributes (CLD-254), off by default.
+
+    Color is pure pixel math on the crop the pipeline already carries —
+    no model — so the only cost of turning it on is a few columns per
+    detection. Body type comes free from the YOLO class and plate
+    status from existing PlateRead rows; color is the one new
+    measurement, and its floors follow the plate-floor discipline:
+    every read records its measurements next to the floor applied, so
+    moving a floor is a question about existing data.
+    """
+
+    enabled: bool = False
+    # Detection classes fingerprinted. None (the default) follows the
+    # vehicle identifier's `applies_to` — derived, not copied, so
+    # adding "van" there (CLAUDE.md's one-step way to re-identify a new
+    # class) fingerprints it too instead of silently drifting. Name a
+    # list to pin the set independently.
+    classes: list[str] | None = None
+    # Crops narrower than this on either side name no color — the
+    # center-region vote over a handful of pixels is noise, the same
+    # reason plates have a width floor.
+    min_px: int = 32
+    # 95th-percentile per-pixel channel spread below which the crop is
+    # achromatic and no color is named. This is the IR-honesty floor: a
+    # grayscale frame must read "unknown (IR)", never a confidently
+    # wrong "gray". Measured over the whole crop, margin included,
+    # because daylight background is what separates a white car from an
+    # IR frame.
+    chroma_floor: float = 12.0
+
+
 def _default_identifiers() -> dict[str, IdentifierConfig]:
     return {
         # People are the unknown-identity churn source (CLD-41): both
@@ -498,6 +530,10 @@ class IdentityConfig(BaseModel):
     identifiers: dict[str, IdentifierConfig] = Field(
         default_factory=_default_identifiers
     )
+    # Vehicle fingerprint attributes (CLD-254). A plain sub-model, not
+    # part of the identifier overlay below: it has no per-key built-ins
+    # to merge, so partial YAML already keeps the other defaults.
+    fingerprint: FingerprintConfig = Field(default_factory=FingerprintConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -589,6 +625,27 @@ class IdentityConfig(BaseModel):
                 return value
         ident = self.identifiers.get(identifier_key)
         return ident.threshold if ident is not None else None
+
+    def fingerprint_request(self, class_name: str) -> dict | None:
+        """The fingerprint job payload for one detection class, or None.
+
+        One place decides whether a class is fingerprinted and with what
+        floors — ingest builds the module payload from this and the
+        event page asks it whether a chip can exist, so the two can
+        never disagree (the `threshold_for`/`plate_floors_for` rule,
+        CLD-128). Per-camera floors, when they arrive (the always-IR
+        camera wants its own `chroma_floor` or a disable), resolve here.
+        """
+        fp = self.fingerprint
+        if not fp.enabled:
+            return None
+        classes = fp.classes
+        if classes is None:
+            vehicle = self.identifiers.get("vehicle")
+            classes = vehicle.applies_to if vehicle is not None else []
+        if class_name not in classes:
+            return None
+        return {"min_px": fp.min_px, "chroma_floor": fp.chroma_floor}
 
     def plate_floors_for(
         self, identifier_key: str, camera: "CameraConfig | None" = None
