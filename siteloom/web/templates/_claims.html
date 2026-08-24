@@ -1,0 +1,26 @@
+{# What a claim's evidence looks like, on all three screens that show one
+   (CLD-136). The rule is siteloom/web/provenance.py; this is only its
+   markup, in one file because two spans repeated on three screens is
+   exactly the drift CLD-135 was filed for.
+
+   The badge is the WORD — "plate", "visual", "manual", "new" — never a
+   plate number. A number would have to go through `identity_plate`,
+   which is None below the naming floor; the word carries no identity
+   information and needs no redaction. /events/{id} and its rail render
+   at `restricted`, and tests/test_restricted_disclosure.py walks them,
+   so a raw `l.identity.plate` here would be caught. #}
+
+{% macro evidence(link, camera_id=None) %}
+  {% set d = claim_display(link, camera_id) %}
+  {# Note for whoever styles this: `.badge.plate` is already the amber
+     chip the plate NUMBER wears (base.html:183), so a plate evidence
+     badge inherits it and sits beside the number in the same colour.
+     Consistent rather than wrong — amber already reads as "plate-ish"
+     there — but if the two ever need telling apart, style
+     `.badge.evidence` rather than renaming these. #}
+  <span class="badge evidence {{ d.badge }}" title="{{ d.title }}">{{ d.badge }}</span>
+  {%- if d.score is not none %}
+  <span class="sim mono"{% if d.score_title %} title="{{ d.score_title }}"{% endif %}>sim {{ '%.2f' | format(d.score) }}
+    {%- if d.threshold is not none %} &middot; bar {{ '%.2f' | format(d.threshold) }}{% endif %}</span>
+  {%- endif %}
+{% endmacro %}

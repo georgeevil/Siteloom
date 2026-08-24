@@ -39,6 +39,20 @@ identity:
   enabled: true
   vector_db_path: identity_db
   auto_add_classes: true
+  # Vehicle fingerprint (CLD-254): per-frame color reads on vehicle
+  # crops, shown as a chip row on vehicle event pages. Expect the
+  # always-IR front-yard camera to show "color unknown (IR)" — that is
+  # the honest reading of a grayscale feed, not a bug.
+  fingerprint:
+    enabled: true
+    # The knobs below are the defaults, spelled out so toggling them is
+    # an edit, not a hunt. Every read stores its measurements next to
+    # the floors applied, so retuning is a query over existing rows.
+    # classes: [car, truck, bus, motorcycle]  # default: follows the
+    #                             # vehicle identifier's applies_to
+    # min_px: 32                  # crops narrower than this name no color
+    # chroma_floor: 12.0          # below this the crop is grayscale (IR)
+    #                             # and no color is named
 
 audio:
   enabled: false              # UniFi live path is video-only for now

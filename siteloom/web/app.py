@@ -28,11 +28,11 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, not_, or_, select
+from sqlalchemy import case, func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from siteloom.config import SiteConfig, load_config
-from siteloom.web import auth, identity_ops, nav, paging, redaction
+from siteloom.web import auth, identity_ops, nav, paging, provenance, redaction
 from siteloom.store import (
     Camera,
     Detection,
@@ -722,6 +722,29 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
         return None
 
     templates.env.globals["cover_src"] = cover_src
+
+    #: Cameras by id, built once. The identity page renders up to 100
+    #: sightings and every one needs its camera to resolve a per-camera
+    #: threshold override (CLD-39); the `next(... for c in config.cameras)`
+    #: scan every other call site uses would be a scan per row.
+    cameras_by_id = {c.id: c for c in config.cameras}
+
+    def claim_display(link, camera_id: str | None = None):
+        """This claim's badge, score and bar — the rule is provenance.py.
+
+        The threshold is the bar *in force now*, not the bar this match
+        cleared: none is persisted on the claim and config is mutable, so
+        a months-old 0.81 sitting under a since-raised 0.82 is a true
+        reading of both numbers, not a bug. Hence "bar", never "cleared".
+        """
+        return provenance.claim_display(
+            link,
+            config.identity.threshold_for(
+                link.identifier_key or "", cameras_by_id.get(camera_id or "")
+            ),
+        )
+
+    templates.env.globals["claim_display"] = claim_display
     #: Per-app so a second app in the same process (tests) starts clean.
     auth_gate = auth.AuthGate()
     login_throttle = auth.LoginThrottle()
@@ -1292,6 +1315,49 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             # so it takes the same floor (CLD-103) — one leak with two
             # URLs — and now the same class filter.
             pickers = _picker_context(session, _viewer(request), config, event)
+            # Vehicle fingerprint (CLD-254). The class gate is the same
+            # resolution ingest builds its payload from
+            # (`fingerprint_request`), and the chip additionally demands
+            # that something was actually *measured* — a color read or a
+            # plate attempt. Rendering on the flag alone stated things
+            # about events the pipeline never touched: a Frigate event
+            # (no Detection rows, plate-matched without PlateRead rows)
+            # got an affirmative "no plate read attempted", and a config
+            # with fingerprint on but identity off showed an empty chip
+            # forever. No measurements, no chip. Consensus is
+            # display-time grouping over the rows already loaded, the
+            # /plates decision (CLD-131). The plate chip is counts only
+            # — never text — so it says the same thing at every role and
+            # the restricted disclosure walk has nothing new to withhold.
+            fingerprint = None
+            if config.identity.fingerprint_request(event.class_name) is not None:
+                from siteloom.identity.fingerprint import visit_color
+
+                attempts, accepted = session.execute(
+                    select(
+                        func.count(),
+                        func.coalesce(
+                            func.sum(
+                                case((PlateRead.accepted.is_(True), 1), else_=0)
+                            ),
+                            0,
+                        ),
+                    )
+                    .select_from(PlateRead)
+                    .where(PlateRead.event_id == event_id)
+                ).one()
+                color = visit_color(
+                    [
+                        (d.color_name, d.color_confidence, d.color_reason)
+                        for d in detections
+                    ]
+                )
+                if color is not None or attempts:
+                    fingerprint = {
+                        "color": color,
+                        "plate_attempts": attempts,
+                        "plate_accepted": accepted,
+                    }
         return templates.TemplateResponse(
             request,
             "event.html",
@@ -1310,6 +1376,7 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
                 "identity_links": identity_links,
                 "unlinked": unlinked,
                 "misses": misses,
+                "fingerprint": fingerprint,
                 **pickers,
             },
         )

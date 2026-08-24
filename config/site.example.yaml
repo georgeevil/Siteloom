@@ -66,6 +66,17 @@ identity:
   enabled: true
   vector_db_path: identity_db   # Qdrant embedded mode — a directory, no server
   auto_add_classes: true        # unseen classes get a generic identifier on the fly
+  # Vehicle fingerprint (CLD-254), off by default: per-frame color reads
+  # on vehicle crops, shown as a chip row on vehicle event pages. Every
+  # read records its measurements next to the floors applied, so the
+  # floors are retuned by querying rows, never by re-running.
+  # fingerprint:
+  #   enabled: true
+  #   classes: [car, truck, bus, motorcycle]  # default: follows the
+  #                               # vehicle identifier's applies_to
+  #   min_px: 32                  # crops narrower than this name no color
+  #   chroma_floor: 12.0          # below this the crop is grayscale (IR)
+  #                               # and no color is named
   # An identifier you name is merged OVER the defaults below, key by
   # key: writing `face: {threshold: 0.42}` keeps face's min_margin and
   # min_sightings rather than dropping them (CLD-125 — it used to drop

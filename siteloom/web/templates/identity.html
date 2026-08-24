@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_claims.html" as claims with context %}
 {% block title %}{{ identity.display_name }}{% endblock %}
 {% block content %}
 <p><a href="/identities">&larr; identities</a></p>
@@ -192,14 +193,14 @@
 <h3 style="font-size:0.95rem;">Sightings</h3>
 {% if links %}
 <table>
-  <tr><th>Event</th><th>Camera</th><th>When</th><th>Similarity</th><th>Hits</th></tr>
+  <tr><th>Event</th><th>Camera</th><th>When</th><th>Evidence</th><th>Hits</th></tr>
   {% for l in links %}
   <tr>
     <td><a href="/events/{{ l.event_id }}">#{{ l.event_id }}</a>
         {% if l.event.guest_window %}<span class="badge guest">guest window</span>{% endif %}</td>
     <td>{{ l.event.camera.name if l.event.camera else l.event.camera_id }}</td>
     <td class="muted">{{ local_time(l.event.first_seen, '%Y-%m-%d %H:%M:%S') }}</td>
-    <td>{{ '%.2f'|format(l.similarity) }}</td>
+    <td>{{ claims.evidence(l, l.event.camera_id) }}</td>
     <td>{{ l.hit_count }}</td>
   </tr>
   {% endfor %}
