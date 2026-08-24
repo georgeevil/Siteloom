@@ -134,7 +134,11 @@ Two things that only a real run tells you:
 * **The runner is faster than the dev box at the tests too** — 2m14s with coverage against
   3m57s locally.
 
-Known warning, not fixed here: `actions/checkout@v4`, `actions/setup-python@v5` and
-`actions/upload-artifact@v4` target Node 20 and the runner logs a deprecation notice.
-Bumping the majors is a one-line change, but it is a change to a workflow that has been
-observed green, and re-verifying it costs another full run. Worth doing on its own.
+The Node 20 deprecation notice that first run logged is gone: the three actions are now
+`actions/checkout@v7`, `actions/setup-python@v7` and `actions/upload-artifact@v7`, which
+declare `node24`. Note `upload-artifact@v5` would not have been enough — it added
+preliminary Node 24 support but still ran on Node 20 by default, so v6 is the real floor
+there. The inputs this workflow passes are unchanged across the majors, and none of the
+breaking changes touch it (checkout v7 only blocks fork checkout under
+`pull_request_target`/`workflow_run`; setup-python v7 dropped the unused `pip-install`
+input). All three need runner ≥ 2.327.1, which `ubuntu-latest` is well past.
