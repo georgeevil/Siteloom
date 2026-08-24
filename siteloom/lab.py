@@ -41,6 +41,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from sqlalchemy import select
@@ -108,8 +109,13 @@ def build_corpus(
     The corpus replays the *identify* stage: detection and tracking are
     upstream and already happened, and their output — the crop, its
     confidence and bbox — is on the `Detection` row. The identify gates
-    are re-derived per camera exactly as `ingest._identify` applies
-    them, so a frame the live pass never resolved is marked, not lost.
+    are re-derived per camera from the same rules `ingest._identify`
+    reads, so a frame the live pass never resolved is marked, not lost
+    — with one stated approximation: significance is judged from the
+    final `Event.significant` column, while live it grows per frame
+    (`_update_significance`), so the first `min_detections - 1` frames
+    of an eventually-significant event replay ungated where live gated
+    them, and an `events retag` can move the column after the fact.
     """
     events = {
         e.id: e
@@ -148,9 +154,12 @@ def build_corpus(
     ):
         event = events[det.event_id]
         rules = rules_of[det.event_id]
+        cam = cams.get(event.camera_id)
         x1, y1, x2, y2 = json.loads(det.bbox)
         gated = None
-        if rules.identify_only_significant and not event.significant:
+        if cam is not None and "identity" not in cam.modules:
+            gated = "no-identity-module"  # per-camera selection (NFR3)
+        elif rules.identify_only_significant and not event.significant:
             gated = "insignificant"
         elif det.confidence < rules.identify_min_confidence:
             gated = "confidence"
@@ -203,10 +212,25 @@ def build_corpus(
 
 # -- embeddings, once -------------------------------------------------------
 
-#: (crop_path, algo) -> (vector | None, embedder quality | None). A None
-#: vector is a real measurement (no face in the crop) and is cached so a
-#: re-sweep does not re-run the detector on it.
-EmbeddingBank = dict[tuple[str, str], tuple[np.ndarray | None, float | None]]
+
+class Embedded(NamedTuple):
+    """One crop's embedding under one algo.
+
+    A None vector is a real measurement (no face in the crop) and is
+    cached so a re-sweep does not re-run the detector. `fallback` marks
+    a vector produced by the tight-crop enrolment fallback — usable for
+    *seeding* (enrolment uses it live) but never for a corpus frame:
+    live matching produced no vector for that frame and ran no resolve,
+    and a replay must not invent decisions live never made.
+    """
+
+    vector: np.ndarray | None
+    quality: float | None
+    fallback: bool = False
+
+
+#: (crop_path, algo) -> Embedded
+EmbeddingBank = dict[tuple[str, str], Embedded]
 
 
 def algo_map(config: SiteConfig, corpus: Corpus, keys: list[str]) -> dict[str, str]:
@@ -278,30 +302,46 @@ def _default_embedder_factory(config: SiteConfig):
     return factory
 
 
-def _embed_one(embedder, image) -> tuple[np.ndarray | None, float | None]:
+def _embed_one(embedder, image) -> Embedded:
     """One crop through one embedder, with its quality where it has one.
 
     Face embedders report the detector's score for the face they chose
-    (`embed_best`); a crop with no detectable face falls back to a tight
-    112x112 embed rather than losing the sample — the same fallback
-    `enroll.embed_crop_file` uses, because these vectors must land in
-    the space the enrolled ones live in.
+    (`embed_best`); a crop with no detectable face falls back to the
+    tight-crop embed enrolment uses (`enroll.tight_face_fallback`), so
+    seed galleries land in the space the enrolled vectors live in — but
+    the result is *marked*: live matching never produced a vector for
+    such a crop, so a corpus frame must treat it as no-embedding.
     """
     if hasattr(embedder, "embed_best"):
         vector, quality = embedder.embed_best(image)
-        if vector is None and hasattr(embedder, "_recognizer"):
-            import cv2
+        if vector is not None:
+            return Embedded(vector, quality)
+        from siteloom.identity.enroll import tight_face_fallback
 
-            try:
-                resized = cv2.resize(image, (112, 112))
-                feature = (
-                    embedder._recognizer.feature(resized).flatten().astype("float32")
-                )
-                vector = embedder._finish(feature)
-            except (cv2.error, AttributeError):
-                vector = None
-        return vector, quality
-    return embedder.embed(image), None
+        return Embedded(tight_face_fallback(embedder, image), None, fallback=True)
+    return Embedded(embedder.embed(image), None)
+
+
+#: Save the embedding cache and poll for interruption this often during
+#: an embed pass — the "commit batch" of a GPU job, so a Ctrl-C keeps
+#: everything computed so far (the ProgressReporter contract).
+_EMBED_BATCH = 100
+
+
+def _save_cache(cache_file: Path, cached: dict[str, Embedded]) -> None:
+    keys = list(cached)
+    np.savez(
+        cache_file,
+        keys=np.array(keys, dtype=object),
+        vecs=np.array([cached[k].vector for k in keys], dtype=object),
+        quals=np.array(
+            [
+                float("nan") if cached[k].quality is None else cached[k].quality
+                for k in keys
+            ]
+        ),
+        fbs=np.array([cached[k].fallback for k in keys], dtype=bool),
+    )
 
 
 def embed_corpus(
@@ -311,6 +351,7 @@ def embed_corpus(
     *,
     embedder_factory=None,
     tick=None,
+    check=None,
 ) -> tuple[EmbeddingBank, dict[str, int]]:
     """Embed every (crop_path, algo) target once, cached on disk.
 
@@ -319,6 +360,11 @@ def embed_corpus(
     first pass and every later variant — today or next week — reuses
     them byte-identically. One `.npz` per algo; the face file carries a
     hash of the projection matrix so retraining it busts the cache.
+
+    `tick` fires once per target (cache hits included — a warm-cache
+    run must not read as stalled on /jobs); `check` is polled every
+    `_EMBED_BATCH` embeds, right after an incremental cache save, so an
+    interrupt keeps what was computed.
     """
     factory = embedder_factory or _default_embedder_factory(config)
     bank: EmbeddingBank = {}
@@ -332,15 +378,23 @@ def embed_corpus(
     for algo, paths in sorted(by_algo.items()):
         tag = f"-{_projection_tag(config)}" if algo == "face" else ""
         cache_file = cache_dir / f"lab-emb-{algo}{tag}.npz"
-        cached: dict[str, tuple[np.ndarray | None, float | None]] = {}
+        cached: dict[str, Embedded] = {}
         if cache_file.exists():
             data = np.load(cache_file, allow_pickle=True)
+            fbs = data["fbs"] if "fbs" in data else [False] * len(data["keys"])
             cached = {
-                str(k): (v if v is not None else None, None if q != q else float(q))
-                for k, v, q in zip(data["keys"], data["vecs"], data["quals"])
+                str(k): Embedded(
+                    v if v is not None else None,
+                    None if q != q else float(q),
+                    bool(fb),
+                )
+                for k, v, q, fb in zip(
+                    data["keys"], data["vecs"], data["quals"], fbs
+                )
             }
         needed = sorted({p for p in paths if p not in cached})
         embedder = None
+        since_save = 0
         for path in needed:
             import cv2
 
@@ -352,35 +406,36 @@ def embed_corpus(
                 continue
             if embedder is None:
                 embedder = factory(algo)
-            vector, quality = _embed_one(embedder, image)
-            cached[path] = (
-                None if vector is None else np.asarray(vector, dtype=np.float32),
-                quality,
-            )
+            entry = _embed_one(embedder, image)
+            if entry.vector is not None:
+                entry = entry._replace(
+                    vector=np.asarray(entry.vector, dtype=np.float32)
+                )
+            cached[path] = entry
             stats["embedded"] += 1
+            since_save += 1
             if tick:
                 tick()
-        if needed:
-            keys = list(cached)
-            np.savez(
-                cache_file,
-                keys=np.array(keys, dtype=object),
-                vecs=np.array([cached[k][0] for k in keys], dtype=object),
-                quals=np.array(
-                    [
-                        float("nan") if cached[k][1] is None else cached[k][1]
-                        for k in keys
-                    ]
-                ),
-            )
-        for path in paths:
+            if since_save >= _EMBED_BATCH:
+                _save_cache(cache_file, cached)
+                since_save = 0
+                if check:
+                    check()
+        if since_save:
+            _save_cache(cache_file, cached)
+        if check and needed:
+            check()
+        needed_set = set(needed)
+        for path in dict.fromkeys(paths):
             entry = cached.get(path)
             if entry is None:
                 continue  # missing file, already counted
-            if entry[0] is None:
+            if entry.vector is None:
                 stats["no_embedding"] += 1
             stats["cached"] += 1
             bank[(path, algo)] = entry
+            if tick and path not in needed_set:
+                tick()  # cache hit — progress must still move
     return bank, stats
 
 
@@ -504,9 +559,12 @@ def seed_reembed(
         algo = algo_for.get(seed.identifier_key, "generic")
         for crop in seed.crop_paths[:max_vectors]:
             entry = bank.get((crop, algo))
-            if entry is None or entry[0] is None:
+            if entry is None or entry.vector is None:
                 continue
-            store.add(seed.identifier_key, entry[0], row.id, crop_path=crop)
+            # Fallback vectors are fine HERE: enrolment builds live
+            # galleries with the same tight-crop fallback, so a seed
+            # using it stays faithful to what live matching ran against.
+            store.add(seed.identifier_key, entry.vector, row.id, crop_path=crop)
             row.vector_count += 1
         id_map[row.id] = seed.live_id
     sandbox.flush()
@@ -520,6 +578,7 @@ def seed_copy(
     plan: list[SeedIdentity],
     *,
     max_vectors: int = 20,
+    exclude_crop_paths: frozenset[str] | set[str] = frozenset(),
 ) -> dict[int, int]:
     """Exact-copy the live galleries into the sandbox.
 
@@ -528,6 +587,14 @@ def seed_copy(
     holding it briefly is also what guarantees no concurrent writer.
     Refuses with the alternative rather than waiting: the lab's default
     (`reembed`) works alongside a running site.
+
+    `exclude_crop_paths` — the replayed events' own crops — keeps
+    vectors the live resolver learned *from the incident under test*
+    out of the seed, the same hygiene `seed_plan` applies to reembed;
+    without it a copy pre-teaches the sandbox exactly what the incident
+    mis-learned. Only filterable where provenance exists: a pre-CLD-84
+    vector carries no crop_path and rides along, which is the "exact"
+    in exact copy — the count of such vectors is worth reporting.
     """
     try:
         live = VectorStore(live_vector_path)
@@ -542,15 +609,18 @@ def seed_copy(
         id_map: dict[int, int] = {}
         for seed in plan:
             row = _sandbox_identity(sandbox, seed)
-            points = live.identity_points(seed.identifier_key, seed.live_id)
-            for vector, payload in points[:max_vectors]:
-                store.add(
-                    seed.identifier_key,
-                    vector,
-                    row.id,
-                    crop_path=payload.get("crop_path"),
-                )
+            kept = 0
+            for vector, payload in live.identity_points(
+                seed.identifier_key, seed.live_id
+            ):
+                if kept >= max_vectors:
+                    break
+                crop = payload.get("crop_path")
+                if crop and crop in exclude_crop_paths:
+                    continue
+                store.add(seed.identifier_key, vector, row.id, crop_path=crop)
                 row.vector_count += 1
+                kept += 1
             id_map[row.id] = seed.live_id
         sandbox.flush()
         return id_map
@@ -676,13 +746,21 @@ def run_variant(
     face_quality: str = "detector",
     include_gated: bool = False,
     tick=None,
+    check=None,
 ) -> VariantResult:
     """Drive the corpus through one resolver under one config.
 
     A fresh sandbox per variant: temp-dir Qdrant (never the shared
     store), in-memory SQLite, one real IdentityResolver. `seeder` is
     called with (sandbox session, store) and returns the sandbox->live
-    identity map; pass None for an empty sandbox.
+    identity map; pass None for an empty sandbox. `check` (interrupt
+    poll) runs at event boundaries, right after each commit.
+
+    Stated fidelity limit beyond seeding: the replay drives frames
+    under their *post-merge* event ids, while live `resolve()` ran
+    before the de-fragmentation merges — so on an event assembled from
+    several fragments, live granted each fragment its own per-event
+    learn/mint budget and verdict cutoff where the replay pools one.
     """
     cams: dict[str, CameraConfig] = {c.id: c for c in config.cameras}
     tmp = tempfile.mkdtemp(prefix="siteloom-lab-")
@@ -713,6 +791,8 @@ def run_variant(
             for frame in corpus.frames:
                 if frame.event_id != current_event:
                     sandbox.commit()  # live ingest commits per frame batch
+                    if check:
+                        check()
                     current_event = frame.event_id
                 if tick:
                     tick()
@@ -732,7 +812,14 @@ def run_variant(
                         if frame.crop_path
                         else None
                     )
-                    vector, face_score = entry if entry else (None, None)
+                    if entry is not None and entry.fallback:
+                        # Enrolment's tight-crop fallback vector: live
+                        # matching produced NO vector for this crop and
+                        # ran no resolve, so for a corpus frame it is a
+                        # no-embedding, not a decision to invent.
+                        entry = None
+                    vector = entry.vector if entry else None
+                    face_score = entry.quality if entry else None
                     plate = frame.plates.get(key)
                     if vector is None and plate is None:
                         decisions.append(

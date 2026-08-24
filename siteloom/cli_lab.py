@@ -184,9 +184,15 @@ def replay(  # noqa: PLR0913 - a lab is knobs
 
             with progress.phase("Embedding crops", total=len(targets)):
                 bank, embed_stats = lab.embed_corpus(
-                    targets, site, cache, tick=progress.advance
+                    targets, site, cache,
+                    tick=progress.advance,
+                    check=progress.check_interrupt,
                 )
             progress.check_interrupt()
+
+            replayed_crops = frozenset(
+                f.crop_path for f in corpus.frames if f.crop_path
+            )
 
             def seeder(sandbox, store):
                 if seed == "reembed":
@@ -198,6 +204,7 @@ def replay(  # noqa: PLR0913 - a lab is knobs
                     return lab.seed_copy(
                         site.identity.vector_db_path, sandbox, store, plan,
                         max_vectors=seed_max_vectors,
+                        exclude_crop_paths=replayed_crops,
                     )
                 return {}
 
@@ -224,6 +231,7 @@ def replay(  # noqa: PLR0913 - a lab is knobs
                         face_quality=fq,
                         include_gated=include_gated,
                         tick=progress.advance,
+                        check=progress.check_interrupt,
                     )
                 entry = lab.score_variant(result, corpus)
                 entry["config"] = lab.config_summary(cfg, keys)

@@ -503,3 +503,33 @@ def test_budget_parked_frames_can_found_a_later_events_mint(vectors, session):
     promoted = _resolve(resolver, session, _distinct(2), event_id=82)
     assert promoted.identity is not None and promoted.is_new
     assert session.query(Identity).count() == 2
+
+
+def test_an_auto_added_class_gets_the_default_mint_budget(vectors, session):
+    """The identifiers nobody tuned are exactly where flooding protection
+    must not silently sit out: an identifier key with no config entry
+    (auto-added classes) runs under the field-default budget, not 0."""
+    resolver = _resolver(vectors)  # config has no "dog" identifier
+    outcomes = [
+        resolver.resolve(
+            session, identifier_key="dog", class_name="dog",
+            vector=_distinct(i).tolist(), plate=None, timestamp=TS,
+            threshold=0.8, event_id=91,
+        )
+        for i in range(5)
+    ]
+    minted = [r for r in outcomes if r.identity is not None]
+    from siteloom.config import IdentifierConfig
+
+    assert len(minted) == IdentifierConfig.model_fields["mint_max_per_event"].default
+    assert all(r.pending for r in outcomes[len(minted):])
+
+
+def test_budget_refusals_of_an_ungated_identifier_skip_the_pool(vectors, session):
+    """min_sightings=1 identifiers have no promotion path, so parking
+    their refused frames would be a write nothing ever reads — the pool
+    must stay untouched."""
+    resolver = _resolver(vectors, min_sightings=1, mint_max_per_event=1)
+    for i in range(4):
+        _resolve(resolver, session, _distinct(i), event_id=92)
+    assert vectors.search_labeled("person-pending", _distinct(2), limit=5) == []

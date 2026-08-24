@@ -677,3 +677,159 @@ def test_identity_module_carries_embedder_quality(monkeypatch):
     by_key = {e["identifier"]: e for e in result["embeddings"]}
     assert by_key["face"]["quality"] == 0.42
     assert by_key["person"]["quality"] is None
+
+
+# -- review fixes: seed hygiene, fallback semantics, interrupt batches ------
+
+
+def test_seed_copy_excludes_the_replayed_events_crops(env, tmp_path):
+    """An exact copy must still not import vectors the live resolver
+    learned from the incident under test — where provenance exists,
+    those points are filtered like the reembed path filters crops."""
+    config, Session, ids, root = env
+    live_path = root / "live_copy_vectors"
+    live = VectorStore(live_path)
+    live.add(
+        "vehicle", _vector_for("ecar"), ids["tacoma"], crop_path="/gallery/e.jpg"
+    )
+    live.add(
+        "vehicle", _vector_for("dcar"), ids["tacoma"], crop_path="/incident/d.jpg"
+    )
+    live.close()
+
+    seed = lab.SeedIdentity(
+        live_id=ids["tacoma"], identifier_key="vehicle", class_name="car",
+        label="Tacoma", plate="TEST123", plate_source=None,
+        first_seen=T0, last_seen=T0,
+    )
+    engine = make_engine("sqlite://")
+    init_db(engine)
+    store = VectorStore(tmp_path / "copy_sandbox")
+    try:
+        with get_session(engine)() as sandbox:
+            id_map = lab.seed_copy(
+                str(live_path), sandbox, store, [seed],
+                exclude_crop_paths={"/incident/d.jpg"},
+            )
+            (sandbox_id,) = id_map
+            assert store.count_identity("vehicle", sandbox_id) == 1
+            hit = store.best_match("vehicle", _vector_for("ecar"))
+            assert hit is not None and hit.score > 0.99
+    finally:
+        store.close()
+
+
+class FallbackFaceStub:
+    """A face embedder that never finds a face but supports the
+    enrolment tight-crop fallback path."""
+
+    class _Rec:
+        def feature(self, resized):
+            mean = resized.reshape(-1, 3).mean(axis=0).astype(np.float32)
+            return np.tile(mean, 3)[:8]
+
+    _recognizer = _Rec()
+
+    def embed_best(self, bgr):
+        return None, None
+
+    def embed(self, bgr):
+        return None
+
+    def _finish(self, feature):
+        norm = np.linalg.norm(feature)
+        return (feature / norm).astype(np.float32) if norm > 0 else None
+
+
+def test_fallback_face_vectors_seed_but_never_replay(env, tmp_path):
+    """Live matching produced no vector for a faceless crop and ran no
+    resolve — so the enrolment-fallback vector may build a seed gallery
+    (enrolment does exactly that live) but a corpus frame must replay
+    as no-embedding, not as a decision live never made."""
+    config, Session, ids, root = env
+    face_cfg = IdentityConfig(
+        identifiers={
+            "face": IdentifierConfig(algo="face", applies_to=["person"])
+        }
+    )
+    with Session() as session:
+        corpus = lab.build_corpus(session, config, [ids["people"]])
+    site = config.model_copy(deep=True)
+    site.identity = face_cfg
+    algo_for = {"face": "face"}
+    targets = lab.embedding_targets(corpus, [], site, algo_for)
+    bank, stats = lab.embed_corpus(
+        targets, site, root / "cache-fallback",
+        embedder_factory=lambda algo: FallbackFaceStub(),
+    )
+    assert all(entry.fallback and entry.vector is not None
+               for entry in bank.values())
+    assert stats["no_embedding"] == 0  # the vectors exist — for seeding
+
+    result = lab.run_variant(
+        "fb", face_cfg, corpus, bank, None, config=site, algo_for=algo_for
+    )
+    face_outcomes = {
+        d.outcome for d in result.decisions if d.identifier == "face"
+    }
+    assert face_outcomes == {"no-embedding"}
+
+    # The same bank still seeds a gallery, the way enrolment would.
+    seed = lab.SeedIdentity(
+        live_id=1, identifier_key="face", class_name="person",
+        label="Ana", plate=None, plate_source=None,
+        first_seen=T0, last_seen=T0,
+        crop_paths=[corpus.frames[0].crop_path],
+    )
+    engine = make_engine("sqlite://")
+    init_db(engine)
+    store = VectorStore(tmp_path / "fb_sandbox")
+    try:
+        with get_session(engine)() as sandbox:
+            id_map = lab.seed_reembed(sandbox, store, [seed], bank, algo_for)
+            (sandbox_id,) = id_map
+            assert store.count_identity("face", sandbox_id) == 1
+    finally:
+        store.close()
+
+
+def test_embed_corpus_commits_batches_and_polls_check(env, monkeypatch):
+    """The ProgressReporter contract: an interrupt mid-pass keeps what
+    was computed, because the cache is saved before every poll."""
+    config, Session, ids, root = env
+    monkeypatch.setattr(lab, "_EMBED_BATCH", 2)
+    crops = sorted(
+        str(p) for p in (root / "crops").iterdir() if p.suffix == ".jpg"
+    )
+    targets = {(p, "generic") for p in crops[:5]}
+    cache = root / "cache-interrupt"
+
+    class Stop(RuntimeError):
+        pass
+
+    def check():
+        raise Stop()
+
+    with pytest.raises(Stop):
+        lab.embed_corpus(
+            targets, config, cache,
+            embedder_factory=_stub_factory(), check=check,
+        )
+    saved = np.load(next(cache.glob("lab-emb-generic*.npz")), allow_pickle=True)
+    assert len(saved["keys"]) >= 2  # the batch landed before the poll
+
+    # A rerun picks the partial cache up instead of recomputing it.
+    bank, stats = lab.embed_corpus(
+        targets, config, cache, embedder_factory=_stub_factory()
+    )
+    assert stats["embedded"] == 5 - len(saved["keys"])
+    assert len(bank) == 5
+
+
+def test_a_camera_without_the_identity_module_is_gated(env):
+    config, Session, ids, _ = env
+    site = config.model_copy(deep=True)
+    site.cameras[0].modules = ["detection"]
+    with Session() as session:
+        corpus = lab.build_corpus(session, site, [ids["people"]])
+    assert {f.gated for f in corpus.frames} == {"no-identity-module"}

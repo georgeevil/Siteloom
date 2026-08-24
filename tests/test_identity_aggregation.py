@@ -160,3 +160,20 @@ def test_resolver_reads_the_knob_off_the_identifier(vectors, session):
         ).identity.id
         == steady.id
     )
+
+
+def test_a_saturated_window_does_not_inflate_the_mean(vectors):
+    """The crowded-neighbourhood case the knob exists for: when one
+    gallery saturates the flat window, the runner-up's mean must come
+    from its whole gallery (grouped re-ask), not from whichever of its
+    hits happened to fit — a windowed mean degrades toward max exactly
+    where max is the problem."""
+    _gallery(vectors, 1, [(0.9, 5)] * 30)
+    _gallery(vectors, 2, [(0.85, 6), (0.4, 7), (0.4, 8)])
+    ranked = vectors.search_identities(
+        "person", PROBE, aggregation="mean_top_k", top_k=3
+    )
+    by_id = {hit.identity_id: hit.score for hit in ranked}
+    assert by_id[1] == pytest.approx(0.9, abs=1e-3)
+    # (0.85 + 0.4 + 0.4) / 3, not (0.85 + 0.4) / 2 from the window.
+    assert by_id[2] == pytest.approx(0.55, abs=1e-3)

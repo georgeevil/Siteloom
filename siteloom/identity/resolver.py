@@ -58,6 +58,14 @@ def _pending_collection(identifier_key: str) -> str:
 #: back receives no further frames.
 _EVENT_BUDGET_MEMORY = 4096
 
+#: The mint budget an identifier with no config entry gets — auto-added
+#: classes above all. Read off the field so it cannot drift from the
+#: configured default. These are exactly the identifiers nobody has
+#: tuned, so the flooding bound must not silently sit out for them
+#: (min_sightings=1 minting means every unmatched frame is a mint
+#: candidate).
+_DEFAULT_MINT_CAP = int(IdentifierConfig.model_fields["mint_max_per_event"].default)
+
 
 @dataclass
 class Resolution:
@@ -163,13 +171,17 @@ class IdentityResolver:
             # and then discard it. A plate is exempt — exact evidence
             # mints regardless — and the check is per (identifier,
             # event) so it bounds the immediate-quality path and the
-            # min_sightings=1 path alike. Refused frames are parked in
-            # the pending pool: within this event they only accumulate
-            # (promotion runs through the gate below, which is never
-            # reached once the budget is spent), so they expire on TTL
-            # or found a mint in a later event — real sightings either
-            # way, just not license to flood this visit with identities.
-            mint_cap = ident_cfg.mint_max_per_event if ident_cfg else 0
+            # min_sightings=1 path alike. For a gated identifier
+            # (min_sightings > 1) refused frames park in the pending
+            # pool: within this event they only accumulate (promotion
+            # runs through the gate below, which is never reached once
+            # the budget is spent), so they expire on TTL or found a
+            # mint in a later event — real sightings either way, just
+            # not license to flood this visit with identities.
+            mint_cap = (
+                ident_cfg.mint_max_per_event if ident_cfg else _DEFAULT_MINT_CAP
+            )
+            min_sightings = ident_cfg.min_sightings if ident_cfg else 1
             if (
                 mint_cap > 0
                 and plate is None
@@ -177,13 +189,17 @@ class IdentityResolver:
                 and self._event_minted.get((identifier_key, event_id), 0)
                 >= mint_cap
             ):
-                if arr is not None:
+                # Only park where the pool has a reader: promotion runs
+                # behind the min_sightings gate, so for a first-sighting
+                # identifier a parked point would be a write nothing ever
+                # consults — its next visit's first frame mints outright
+                # anyway.
+                if arr is not None and min_sightings > 1:
                     self._park(identifier_key, arr, camera_id, timestamp, crop_path)
                 return Resolution(
                     identity=None, similarity=similarity, is_new=False,
                     pending=True,
                 )
-            min_sightings = ident_cfg.min_sightings if ident_cfg else 1
             gate = (
                 min_sightings > 1
                 and arr is not None
@@ -423,16 +439,22 @@ class IdentityResolver:
         camera_id: str | None,
         timestamp: datetime,
         crop_path: str | None = None,
+        *,
+        prune: bool = True,
     ) -> None:
         """Park an unknown sighting in the identifier's pending pool.
 
         Pruned to `pending_ttl_s` on stream time first, so a one-off
-        blurry crop expires instead of seeding a promotion forever.
+        blurry crop expires instead of seeding a promotion forever —
+        unless the caller just pruned (`_consistent_sightings` does, to
+        search a fresh pool), in which case a second locked range-delete
+        would be pure wasted I/O on the hottest path.
         """
         pool = _pending_collection(identifier_key)
-        self.vectors.prune_older_than(
-            pool, timestamp.timestamp() - self.cfg.pending_ttl_s
-        )
+        if prune:
+            self.vectors.prune_older_than(
+                pool, timestamp.timestamp() - self.cfg.pending_ttl_s
+            )
         self.vectors.add_labeled(
             pool,
             arr,
@@ -580,6 +602,8 @@ class IdentityResolver:
         prior = self.vectors.search_labeled(pool, arr, limit=max(min_sightings * 4, 16))
         similar = sum(1 for hit in prior if hit.score >= threshold)
         if similar + 1 < min_sightings:
-            self._park(identifier_key, arr, camera_id, timestamp, crop_path)
+            self._park(
+                identifier_key, arr, camera_id, timestamp, crop_path, prune=False
+            )
             return None
         return self.vectors.pop_matching(pool, arr, threshold)

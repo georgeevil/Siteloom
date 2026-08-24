@@ -223,7 +223,14 @@ class VectorStore:
             hits = scores.setdefault(int(point.payload["identity_id"]), [])
             if len(hits) < keep:
                 hits.append(float(point.score))
-        if len(res.points) < limit or len(scores) >= min_identities:
+        # When the window came back short it held the whole collection
+        # and the flat grouping is exhaustive. A *saturated* window is
+        # only trustworthy for max (each identity's best hit ranks
+        # early): a mean over what happened to fit is inflated toward
+        # max for exactly the crowded neighbourhoods the knob exists
+        # for, so mean_top_k always re-asks grouped when saturated.
+        exhaustive = len(res.points) < limit
+        if exhaustive or (keep == 1 and len(scores) >= min_identities):
             return _ranked_hits(
                 {ident: sum(vals) / len(vals) for ident, vals in scores.items()}
             )
@@ -231,12 +238,15 @@ class VectorStore:
         # Verified working against embedded Qdrant, which needs no index
         # to group on a payload field. A remote server (V1 multi-site)
         # may want a payload index on identity_id for this to stay cheap
-        # — nothing to do today, and the same call either way.
+        # — nothing to do today, and the same call either way. Groups
+        # are ranked by their best hit, so for a mean we fetch a few
+        # more than the contest strictly needs — an identity whose best
+        # hit is mid-pack can still carry the best mean.
         groups = self._client.query_points_groups(
             collection_name=collection,
             query=vector.astype(np.float32).tolist(),
             group_by="identity_id",
-            limit=min_identities,
+            limit=min_identities if keep == 1 else max(min_identities, 8),
             group_size=keep,
         )
         aggregated: dict[int, float] = {}
