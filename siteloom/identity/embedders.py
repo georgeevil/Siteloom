@@ -279,11 +279,26 @@ class FaceEmbedder:
 
     def embed(self, bgr: np.ndarray) -> np.ndarray | None:
         """Best face in the image, embedded — the ProcessingModule path."""
+        vector, _ = self.embed_best(bgr)
+        return vector
+
+    def embed_best(
+        self, bgr: np.ndarray
+    ) -> tuple[np.ndarray | None, float | None]:
+        """Best face in the image, embedded, with the detector's score.
+
+        The score is YuNet's confidence in the *face*, which is the
+        quality signal the face identifier actually needs — the person
+        box's YOLO confidence says "this is a person", not "this face is
+        legible", and feeding it to `immediate_quality` is how a crisp
+        walk-past minted an identity per blurry 20-px face (CLD-139's
+        mint half). Returns (None, None) when no face is found.
+        """
         faces = self.detect(bgr)
         if not faces:
-            return None
+            return None, None
         best = max(faces, key=lambda f: f[-1])
-        return self.embed_face(bgr, best)
+        return self.embed_face(bgr, best), float(best[-1])
 
     def _finish(self, feature: np.ndarray) -> np.ndarray | None:
         if self._projection is not None:

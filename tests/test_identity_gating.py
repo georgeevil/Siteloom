@@ -428,3 +428,78 @@ def test_neither_gate_is_reachable_without_the_other(vectors, session, gate):
         assert grown == 3  # the floor is off, the per-event cap is not
     else:
         assert grown == 0  # the cap is off, but every frame is under the floor
+
+
+# -- 4. the mint budget -----------------------------------------------------
+#
+# `learn_max_per_event` bounds what a visit teaches ONE identity, but a
+# mint is a new identity with a fresh budget — so a visit whose frames
+# kept missing could convert gallery flooding into identity flooding
+# (one 73-second live visit minted 50 identities). `mint_max_per_event`
+# is the bound on that: per (identifier, event), refused frames park in
+# the pending pool instead of minting.
+
+
+def _distinct(i: int):
+    import numpy as np
+
+    vec = np.zeros(64, dtype=np.float32)
+    vec[i] = 1.0
+    return vec
+
+
+def test_the_mint_budget_bounds_identity_flooding(vectors, session):
+    resolver = _resolver(vectors, min_sightings=1, mint_max_per_event=2)
+    outcomes = [
+        _resolve(resolver, session, _distinct(i), event_id=71) for i in range(5)
+    ]
+    assert [r.identity is not None for r in outcomes] == [
+        True, True, False, False, False,
+    ]
+    assert all(r.pending for r in outcomes[2:])
+    assert session.query(Identity).count() == 2
+
+
+def test_a_plate_mint_is_exempt_from_the_budget(vectors, session):
+    """A plate is exact evidence — the budget must never park it."""
+    resolver = _resolver(vectors, "vehicle", min_sightings=1, mint_max_per_event=1)
+    first = resolver.resolve(
+        session, identifier_key="vehicle", class_name="car",
+        vector=_distinct(1).tolist(), plate=None, timestamp=TS,
+        threshold=0.8, event_id=72,
+    )
+    assert first.identity is not None  # spends the budget
+    plated = resolver.resolve(
+        session, identifier_key="vehicle", class_name="car",
+        vector=_distinct(2).tolist(), plate="AAA111", timestamp=TS,
+        threshold=0.8, event_id=72,
+    )
+    assert plated.identity is not None and plated.is_new
+    assert plated.identity.plate == "AAA111"
+
+
+def test_a_zero_budget_restores_unbounded_minting(vectors, session):
+    resolver = _resolver(vectors, min_sightings=1, mint_max_per_event=0)
+    for i in range(5):
+        assert _resolve(
+            resolver, session, _distinct(i), event_id=73
+        ).identity is not None
+    assert session.query(Identity).count() == 5
+
+
+def test_budget_parked_frames_can_found_a_later_events_mint(vectors, session):
+    """A refused frame is still a real sighting: it waits in the pool
+    and corroborates a mint on the next visit, it is not evidence
+    destroyed."""
+    resolver = _resolver(vectors, min_sightings=2, mint_max_per_event=1)
+    # Visit 81: one pair promotes (spending the budget), then a new
+    # subject's frame arrives and is parked by the budget.
+    assert _resolve(resolver, session, _distinct(1), event_id=81).pending
+    minted = _resolve(resolver, session, _distinct(1), event_id=81)
+    assert minted.identity is not None and minted.is_new
+    parked = _resolve(resolver, session, _distinct(2), event_id=81)
+    assert parked.pending and parked.identity is None
+    # Visit 82: the same subject returns; the parked sighting counts.
+    promoted = _resolve(resolver, session, _distinct(2), event_id=82)
+    assert promoted.identity is not None and promoted.is_new
+    assert session.query(Identity).count() == 2

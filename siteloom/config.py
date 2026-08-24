@@ -443,6 +443,28 @@ class IdentifierConfig(BaseModel):
     # without a redeploy — which is this change's rollback lever.
     learn_min_quality: float = 0.6
     learn_max_per_event: int = 3
+    # How an identity's score is aggregated over its gallery hits when
+    # ranking candidates (CLD-152). "max" — the historical behaviour —
+    # lets a single lucky near-duplicate define a gallery's score, which
+    # is what turns one polluted vector into a permanent attractor (a
+    # 70-vector gallery of one parking spot matched an unrelated car at
+    # 0.91 on the strength of its best background look-alike).
+    # "mean_top_k" averages the identity's best `score_top_k` hits
+    # (fewer, if the gallery is smaller), so a match needs corroboration
+    # from several vectors rather than one outlier. Score scales differ
+    # between the two — retune `threshold` when switching, ideally by
+    # replaying incidents through `siteloom lab replay` first.
+    score_aggregation: Literal["max", "mean_top_k"] = "max"
+    score_top_k: int = 3
+    # Cap on how many identities one event may mint per identifier
+    # (CLD-139's missing half). `learn_max_per_event` bounds what a
+    # visit teaches ONE identity, but a mint is a new identity with a
+    # fresh budget — so unmatched frames could convert "one identity
+    # gets 30 vectors" into "30 identities get 1 vector each" (a single
+    # 73-second visit minted 50). When the budget is spent, further
+    # unknown frames park in the pending pool instead of minting; a
+    # plate always mints (exact evidence). 0 = unlimited.
+    mint_max_per_event: int = 3
 
 
 class FingerprintConfig(BaseModel):

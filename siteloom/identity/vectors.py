@@ -170,6 +170,8 @@ class VectorStore:
         *,
         limit: int = CANDIDATE_POINTS,
         min_identities: int = 2,
+        aggregation: str = "max",
+        top_k: int = 1,
     ) -> list[Hit]:
         """Best score per *identity*, ranked — with the runner-up guaranteed.
 
@@ -201,19 +203,30 @@ class VectorStore:
         if grouped search is unavailable: the pinned client supports it in
         both local and server mode, and a silent degradation here would
         restore exactly the bug being fixed.
+
+        `aggregation` (CLD-152) decides how one identity's several hits
+        become its score: "max" keeps the historical best-hit behaviour;
+        "mean_top_k" averages the identity's best `top_k` hits (fewer if
+        the gallery holds fewer), so one lucky near-duplicate in a large
+        gallery cannot define its score alone.
         """
         if not self._client.collection_exists(collection):
             return []
+        keep = max(1, top_k) if aggregation == "mean_top_k" else 1
         res = self._client.query_points(
             collection_name=collection,
             query=vector.astype(np.float32).tolist(),
             limit=limit,
         )
-        best: dict[int, float] = {}
+        scores: dict[int, list[float]] = {}
         for point in res.points:  # sorted by score desc
-            best.setdefault(int(point.payload["identity_id"]), float(point.score))
-        if len(res.points) < limit or len(best) >= min_identities:
-            return _ranked_hits(best)
+            hits = scores.setdefault(int(point.payload["identity_id"]), [])
+            if len(hits) < keep:
+                hits.append(float(point.score))
+        if len(res.points) < limit or len(scores) >= min_identities:
+            return _ranked_hits(
+                {ident: sum(vals) / len(vals) for ident, vals in scores.items()}
+            )
 
         # Verified working against embedded Qdrant, which needs no index
         # to group on a payload field. A remote server (V1 multi-site)
@@ -224,15 +237,15 @@ class VectorStore:
             query=vector.astype(np.float32).tolist(),
             group_by="identity_id",
             limit=min_identities,
-            group_size=1,
+            group_size=keep,
         )
-        return _ranked_hits(
-            {
-                int(point.payload["identity_id"]): float(point.score)
-                for group in groups.groups
-                for point in group.hits[:1]
-            }
-        )
+        aggregated: dict[int, float] = {}
+        for group in groups.groups:
+            hits = group.hits[:keep]
+            if hits:
+                ident = int(hits[0].payload["identity_id"])
+                aggregated[ident] = sum(float(p.score) for p in hits) / len(hits)
+        return _ranked_hits(aggregated)
 
     @_locked
     def best_match(self, collection: str, vector: np.ndarray) -> Hit | None:
@@ -369,6 +382,25 @@ class VectorStore:
                 ),
             ).count
         )
+
+    @_locked
+    def identity_points(
+        self, collection: str, identity_id: int
+    ) -> list[tuple[np.ndarray, dict]]:
+        """One identity's vectors with their payloads.
+
+        The export half of an exact gallery copy — the replay lab's
+        `--seed copy` reads a (momentarily unheld) live store with this
+        and re-inserts into its sandbox, so an experiment can reproduce
+        the precise gallery a live match ran against, including vectors
+        whose crop provenance predates CLD-84.
+        """
+        return [
+            (np.asarray(point.vector, dtype=np.float32), dict(point.payload or {}))
+            for point in self._scroll_identity(
+                collection, identity_id, with_vectors=True
+            )
+        ]
 
     def _scroll_identity(
         self, collection: str, identity_id: int, *, with_vectors: bool = False

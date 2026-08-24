@@ -106,6 +106,14 @@ class IdentityResolver:
         # budget. No lock is needed — an event belongs to one camera and
         # ingest runs one worker thread per camera.
         self._event_learned: OrderedDict[tuple[str, int, int], int] = OrderedDict()
+        # Per-event MINT budgets, keyed (identifier, event) — the other
+        # half of CLD-139. `_event_learned` bounds what a visit teaches
+        # one identity, but a mint is a new identity with a fresh
+        # budget, so unmatched frames could convert gallery flooding
+        # into identity flooding (one 73-second visit minted 50). Same
+        # in-memory/LRU discipline and the same restart cost: a restart
+        # mid-visit grants a fresh budget, bounded again immediately.
+        self._event_minted: OrderedDict[tuple[str, int], int] = OrderedDict()
 
     def resolve(
         self,
@@ -150,6 +158,31 @@ class IdentityResolver:
         promoted_first_seen = timestamp
         promoted: list[tuple[np.ndarray, dict]] = []
         if is_new:
+            # Mint budget first, before the pool is consulted: refusing
+            # AFTER `_consistent_sightings` would pop a promoted cluster
+            # and then discard it. A plate is exempt — exact evidence
+            # mints regardless — and the check is per (identifier,
+            # event) so it bounds the immediate-quality path and the
+            # min_sightings=1 path alike. Refused frames are parked in
+            # the pending pool: within this event they only accumulate
+            # (promotion runs through the gate below, which is never
+            # reached once the budget is spent), so they expire on TTL
+            # or found a mint in a later event — real sightings either
+            # way, just not license to flood this visit with identities.
+            mint_cap = ident_cfg.mint_max_per_event if ident_cfg else 0
+            if (
+                mint_cap > 0
+                and plate is None
+                and event_id is not None
+                and self._event_minted.get((identifier_key, event_id), 0)
+                >= mint_cap
+            ):
+                if arr is not None:
+                    self._park(identifier_key, arr, camera_id, timestamp, crop_path)
+                return Resolution(
+                    identity=None, similarity=similarity, is_new=False,
+                    pending=True,
+                )
             min_sightings = ident_cfg.min_sightings if ident_cfg else 1
             gate = (
                 min_sightings > 1
@@ -208,6 +241,7 @@ class IdentityResolver:
                 )
                 identity.vector_count += 1
             self._note_learned(identifier_key, event_id, identity.id, len(founding))
+            self._note_minted(identifier_key, event_id)
             # Counts sightings, not vectors: every promoted sighting
             # really happened, whether or not its vector was kept.
             identity.appearance_count += len(promoted)
@@ -373,6 +407,42 @@ class IdentityResolver:
         while len(self._event_learned) > _EVENT_BUDGET_MEMORY:
             self._event_learned.popitem(last=False)
 
+    def _note_minted(self, identifier_key: str, event_id: int | None) -> None:
+        if event_id is None:
+            return
+        key = (identifier_key, event_id)
+        self._event_minted[key] = self._event_minted.get(key, 0) + 1
+        self._event_minted.move_to_end(key)
+        while len(self._event_minted) > _EVENT_BUDGET_MEMORY:
+            self._event_minted.popitem(last=False)
+
+    def _park(
+        self,
+        identifier_key: str,
+        arr: np.ndarray,
+        camera_id: str | None,
+        timestamp: datetime,
+        crop_path: str | None = None,
+    ) -> None:
+        """Park an unknown sighting in the identifier's pending pool.
+
+        Pruned to `pending_ttl_s` on stream time first, so a one-off
+        blurry crop expires instead of seeding a promotion forever.
+        """
+        pool = _pending_collection(identifier_key)
+        self.vectors.prune_older_than(
+            pool, timestamp.timestamp() - self.cfg.pending_ttl_s
+        )
+        self.vectors.add_labeled(
+            pool,
+            arr,
+            {
+                "ts": timestamp.timestamp(),
+                "camera": camera_id,
+                "crop_path": crop_path,
+            },
+        )
+
     def _threshold(
         self,
         identifier_key: str,
@@ -420,7 +490,12 @@ class IdentityResolver:
         margin = ident_cfg.min_margin if ident_cfg else 0.0
         ranked = [
             (hit.identity_id, hit.score)
-            for hit in self.vectors.search_identities(identifier_key, arr)
+            for hit in self.vectors.search_identities(
+                identifier_key,
+                arr,
+                aggregation=ident_cfg.score_aggregation if ident_cfg else "max",
+                top_k=ident_cfg.score_top_k if ident_cfg else 1,
+            )
         ]
         if not ranked or ranked[0][1] < eff_threshold:
             return None, ranked[0][1] if ranked else 0.0, False
@@ -505,14 +580,6 @@ class IdentityResolver:
         prior = self.vectors.search_labeled(pool, arr, limit=max(min_sightings * 4, 16))
         similar = sum(1 for hit in prior if hit.score >= threshold)
         if similar + 1 < min_sightings:
-            self.vectors.add_labeled(
-                pool,
-                arr,
-                {
-                    "ts": timestamp.timestamp(),
-                    "camera": camera_id,
-                    "crop_path": crop_path,
-                },
-            )
+            self._park(identifier_key, arr, camera_id, timestamp, crop_path)
             return None
         return self.vectors.pop_matching(pool, arr, threshold)
