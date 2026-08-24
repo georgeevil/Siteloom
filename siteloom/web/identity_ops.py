@@ -143,7 +143,11 @@ def refresh_vector_count(session, vectors, identity: Identity) -> None:
 
 
 def cover_candidates(
-    session, identity: Identity, *, limit: int = COVER_CANDIDATES
+    session,
+    identity: Identity,
+    *,
+    limit: int = COVER_CANDIDATES,
+    exclude_event_ids: tuple[int, ...] = (),
 ) -> list[str]:
     """Crops that could represent this identity, best first.
 
@@ -154,21 +158,26 @@ def cover_candidates(
     annotation is a guess, and the rule that a guess is not training data
     (training/dataset.py) applies at least as hard to the picture that
     names someone in every list on the console.
+
+    `exclude_event_ids` drops named events' crops entirely — the replay
+    lab seeds galleries from "what the identity knew from *other*
+    events", because seeding from the event being replayed pre-teaches
+    the sandbox the answer under test.
     """
-    paths = [
-        p
-        for (p,) in session.execute(
-            select(Detection.crop_path)
-            .join(EventIdentity, EventIdentity.event_id == Detection.event_id)
-            .where(
-                EventIdentity.identity_id == identity.id,
-                EventIdentity.unlinked_at.is_(None),
-                Detection.crop_path.is_not(None),
-            )
-            .order_by(Detection.confidence.desc())
-            .limit(limit)
+    query = (
+        select(Detection.crop_path)
+        .join(EventIdentity, EventIdentity.event_id == Detection.event_id)
+        .where(
+            EventIdentity.identity_id == identity.id,
+            EventIdentity.unlinked_at.is_(None),
+            Detection.crop_path.is_not(None),
         )
-    ]
+        .order_by(Detection.confidence.desc())
+        .limit(limit)
+    )
+    if exclude_event_ids:
+        query = query.where(Detection.event_id.not_in(exclude_event_ids))
+    paths = [p for (p,) in session.execute(query)]
     if len(paths) < limit:
         paths += [
             p
