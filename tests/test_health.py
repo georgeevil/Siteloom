@@ -435,6 +435,33 @@ def test_cancel_signals_a_live_process(config, config_file):
 # -- installed service units ------------------------------------------------
 
 
+@pytest.fixture
+def linux_units(tmp_path, monkeypatch):
+    """A unit directory `check_services` will actually look in.
+
+    The check picks its backend off the live platform, so on macOS these
+    tests read ~/Library/LaunchAgents — the developer's real machine —
+    and never see the fixture they just installed. Pinning the platform
+    rather than the factory keeps the real construction path, runner and
+    all, and `platform` is imported inside the check.
+    """
+    import platform as _platform
+
+    from siteloom.service.manager import SystemdBackend
+
+    units = tmp_path / "units"
+    monkeypatch.setattr(_platform, "system", lambda: "Linux")
+    # User scope only. Handing both scopes the same directory counts every
+    # unit twice, which makes a single installed unit look like a
+    # vector-store collision with itself.
+    monkeypatch.setattr(
+        SystemdBackend,
+        "unit_dir",
+        lambda self, scope: units if scope == "user" else tmp_path / "no-system-units",
+    )
+    return units
+
+
 def _install_unit(directory, label, config_path, unit="serve"):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{label}.service").write_text(
@@ -446,32 +473,25 @@ def _install_unit(directory, label, config_path, unit="serve"):
     )
 
 
-def test_check_services_reports_installed_units(tmp_path, config_file, monkeypatch):
-    from siteloom.service.manager import SystemdBackend
-
-    units = tmp_path / "units"
-    monkeypatch.setattr(SystemdBackend, "unit_dir", lambda self, scope: units)
-    _install_unit(units, "siteloom-test-serve", config_file)
+def test_check_services_reports_installed_units(config_file, linux_units):
+    _install_unit(linux_units, "siteloom-test-serve", config_file)
 
     report = run_checks(_load(config_file), [health.check_services])
     check = report.checks[0]
     assert check.status == OK
-    assert "siteloom-test-serve" in check.detail
+    # Exact, not a substring: a unit counted once per scope would read
+    # "2 installed" and still satisfy an `in`.
+    assert check.detail == "1 installed: siteloom-test-serve"
 
 
 def test_check_services_catches_a_vector_store_collision(
-    tmp_path, config_file, monkeypatch
+    tmp_path, config_file, linux_units
 ):
     """The rule check_vector_store enforces at runtime, applied to what
     is configured to start. Two units sharing an embedded Qdrant
     directory can never both run, and a boot is a late time to find out.
     """
     import yaml
-
-    from siteloom.service.manager import SystemdBackend
-
-    units = tmp_path / "units"
-    monkeypatch.setattr(SystemdBackend, "unit_dir", lambda self, scope: units)
 
     shared = str(tmp_path / "shared-vectors")
     paths = []
@@ -484,7 +504,7 @@ def test_check_services_catches_a_vector_store_collision(
         path = tmp_path / f"{name}.yaml"
         path.write_text(yaml.safe_dump(cfg.model_dump(mode="json")))
         paths.append(path)
-        _install_unit(units, f"siteloom-{name}-serve", path)
+        _install_unit(linux_units, f"siteloom-{name}-serve", path)
 
     report = run_checks(_load(config_file), [health.check_services])
     check = report.checks[0]
@@ -493,18 +513,14 @@ def test_check_services_catches_a_vector_store_collision(
     assert "one client per path per machine" in check.remedy
 
 
-def test_check_services_never_shells_out(tmp_path, config_file, monkeypatch):
+def test_check_services_never_shells_out(config_file, linux_units, monkeypatch):
     """`doctor` runs as this unit's own ExecStartPre. Asking the service
     manager about the service it is in the middle of starting is a
     question with no good answer and a plausible hang, so the check reads
     unit files and nothing else."""
     import subprocess as _subprocess
 
-    from siteloom.service.manager import SystemdBackend
-
-    units = tmp_path / "units"
-    monkeypatch.setattr(SystemdBackend, "unit_dir", lambda self, scope: units)
-    _install_unit(units, "siteloom-test-serve", config_file)
+    _install_unit(linux_units, "siteloom-test-serve", config_file)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("check_services must not run a subprocess")
@@ -513,6 +529,10 @@ def test_check_services_never_shells_out(tmp_path, config_file, monkeypatch):
     monkeypatch.setattr(_subprocess, "Popen", forbidden)
     report = run_checks(_load(config_file), [health.check_services])
     assert report.checks[0].status == OK
+    # Naming the fixture's own unit is what stops this passing vacuously:
+    # "no units installed" is also OK, so an assertion on the status alone
+    # holds just as well when the check never saw the unit at all.
+    assert "siteloom-test-serve" in report.checks[0].detail
 
 
 def test_check_services_is_not_a_readiness_check():

@@ -27,6 +27,13 @@ import socket
 
 log = logging.getLogger(__name__)
 
+# SOCK_CLOEXEC is a Linux-only constant, and reading it off `socket`
+# elsewhere is an AttributeError — which the OSError guard in `_send` does
+# not catch, in the one module whose whole promise is that it never raises.
+# Python has set FD_CLOEXEC on new file descriptors by default since PEP
+# 446, so falling back to 0 gives up nothing on the platforms that lack it.
+_CLOEXEC = getattr(socket, "SOCK_CLOEXEC", 0)
+
 
 def _send(message: bytes) -> bool:
     address = os.environ.get("NOTIFY_SOCKET")
@@ -37,7 +44,7 @@ def _send(message: bytes) -> bool:
     if address[0] == "@":
         address = "\0" + address[1:]
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as sock:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | _CLOEXEC) as sock:
             sock.connect(address)
             sock.sendall(message)
         return True
