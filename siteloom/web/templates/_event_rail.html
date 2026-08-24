@@ -17,6 +17,7 @@
    page renders exactly what this does (CLD-135); the local name is kept
    so the call sites below are untouched. #}
 {% import "_pickers.html" as pickers with context %}
+{% import "_claims.html" as claims with context %}
 {% macro identity_options(candidates, exclude_id=None) -%}
 {{ pickers.identity_options(candidates, exclude_id) }}
 {%- endmacro %}
@@ -81,7 +82,8 @@
             {{ identity_name(link.identity) }}
           </div>
           <div class="id-sub mono">
-            {{ link.identity.identifier_key }} · sim {{ '%.2f' | format(link.similarity) }}
+            {{ link.identity.identifier_key }}
+            {{- claims.evidence(link, e.camera_id) }}
             {%- if identity_plate(link.identity) %} · {{ identity_plate(link.identity) }}{% endif %}
           </div>
           {# Was this claim right? A verdict judges; the row below edits. #}
