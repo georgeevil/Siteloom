@@ -233,6 +233,12 @@ identity_db/
 # Local deployment configs (absolute paths, per-machine)
 site.yaml
 archive.yaml
+
+# Local working artifacts: service logs, experiment harnesses/measurements,
+# and the replay lab's cached embeddings — per-machine, never content
+/logs/
+/experiments/
+/.lab-cache/
 .playwright-mcp/
 
 # Agent worktrees created by Claude Code (isolated checkouts, never content)
