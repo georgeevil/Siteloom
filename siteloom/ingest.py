@@ -334,7 +334,16 @@ class IngestService:
                     event.best_crop_path = crop_path
                 # Flip significance before identifying so the frame that
                 # crosses the gate still gets identity resolution.
+                was_significant = event.significant
                 self._update_significance(event, rules)
+                if event.significant and not was_significant:
+                    # The frames spent earning significance were stored but
+                    # never identified; now that the event has proved real,
+                    # they get the same pass (CLD-286). Before the current
+                    # frame, so plate-OCR rationing stays chronological.
+                    event = self._identify_backlog(
+                        session, cam, event, detection, rules
+                    )
                 self._identify(
                     session, cam, event, det, ts, crop_path, rules, detection
                 )
@@ -375,27 +384,33 @@ class IngestService:
         crop_path: str | None,
         rules: EventConfig,
         detection: Detection | None = None,
-    ) -> None:
+    ) -> Event:
         """Second-pass identification on a detection crop (PRD §6.3/6.4).
 
         The crop goes through the dispatcher like any other job — the
         IdentityModule computes embeddings (edge work), the resolver
         matches/creates identities against the stores (central work).
+
+        Returns the surviving event: the identity-aware merge (CLD-40)
+        may fold `event` into a prior visit and delete its row, and a
+        caller identifying several frames in a row (`_identify_backlog`)
+        must follow the survivor rather than keep writing links against
+        a deleted id.
         """
         if self.resolver is None or not det.get("crop_jpeg"):
-            return
+            return event
         if "identity" not in cam.modules:
-            return  # per-camera module selection (NFR3)
+            return event  # per-camera module selection (NFR3)
         # Quality gates: an ephemeral fragment or a weak/tiny crop makes a
         # useless embedding — and every unresolved one mints a fresh
         # unknown identity, which is exactly the churn being gated out.
         if rules.identify_only_significant and not event.significant:
-            return
+            return event
         if det["confidence"] < rules.identify_min_confidence:
-            return
+            return event
         x1, y1, x2, y2 = det["bbox"]
         if min(x2 - x1, y2 - y1) < rules.identify_min_crop_px:
-            return
+            return event
         identity_cfg = self.config.identity
         # Plate extras, resolved here because only this layer knows the
         # camera: the effective quality floors (CLD-128, one resolution
@@ -438,7 +453,7 @@ class IngestService:
         )
         if not result.ok:
             log.error("identity job failed on %s: %s", cam.id, result.error)
-            return
+            return event
         # The color read lands on the Detection row whether or not it
         # named a color, and before any resolution happens — it is a
         # measurement of the frame, not of the match (CLD-254). The
@@ -554,6 +569,65 @@ class IngestService:
                     ),
                     payload,
                 )
+        return event
+
+    def _identify_backlog(
+        self,
+        session,
+        cam: CameraConfig,
+        event: Event,
+        current: Detection,
+        rules: EventConfig,
+    ) -> Event:
+        """Identify the frames an event spent earning significance (CLD-286).
+
+        The significance gate keeps identity work off ephemeral events, but
+        it also meant a *departure* — whose biggest, most legible plate
+        frames come first — spent exactly those frames on warm-up and then
+        OCR'd only the shrinking tail. The evidence is already stored:
+        Detection rows with crops on disk, at most `min_detections - 1` of
+        them, so once the event proves real they get the same `_identify`
+        pass the gate deferred. Runs inside the flipping frame's session,
+        in timestamp order and before the current frame, so plate-OCR
+        rationing (CLD-130) sees one chronological visit and resume
+        equivalence holds (the flip and its backlog commit together).
+
+        The per-frame quality gates still apply inside `_identify`; only
+        the significance gate is behind us by construction. Returns the
+        surviving event, because a backlog frame can trigger the
+        identity-aware merge like any other.
+        """
+        if self.resolver is None or "identity" not in cam.modules:
+            return event
+        if not rules.identify_only_significant:
+            return event  # nothing was gated, every frame already ran
+        # The flipping frame's own row is identified by the caller; it
+        # needs its id assigned before it can be excluded here.
+        session.flush()
+        rows = (
+            session.query(Detection)
+            .filter(Detection.event_id == event.id, Detection.id != current.id)
+            .order_by(Detection.timestamp, Detection.id)
+            .all()
+        )
+        for row in rows:
+            if not row.crop_path:
+                continue
+            try:
+                crop_jpeg = Path(row.crop_path).read_bytes()
+            except OSError as exc:
+                log.warning("backlog crop unreadable %s: %s", row.crop_path, exc)
+                continue
+            det = {
+                "class_name": row.class_name,
+                "confidence": row.confidence,
+                "bbox": json.loads(row.bbox),
+                "crop_jpeg": crop_jpeg,
+            }
+            event = self._identify(
+                session, cam, event, det, row.timestamp, row.crop_path, rules, row
+            )
+        return event
 
     def _note_plate_ocr(self, event_id: int, identifier: str, ts: datetime) -> None:
         """Remember when this visit last had an OCR attempt (CLD-130).

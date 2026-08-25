@@ -359,17 +359,18 @@ def test_ingest_with_identity_pipeline(sample_video, tmp_path):
         identities = session.query(Identity).all()
         links = session.query(EventIdentity).all()
 
-    # Constant embedding -> one identity, re-matched every frame once the
-    # event passes the significance gate (frames 1-2 of 10 are skipped:
-    # identity resolution waits for min_detections=3).
+    # Constant embedding -> one identity, re-matched every frame. Identity
+    # resolution waits for min_detections=3, but the two warm-up frames
+    # are identified retroactively when the event flips (CLD-286), so all
+    # ten frames count.
     assert len(identities) == 1
     identity = identities[0]
     assert identity.identifier_key == "person"
     assert identity.label is None  # unknown until labeled
-    assert identity.appearance_count == 8
+    assert identity.appearance_count == 10
     # One event (single track) -> one link, hit-counted per identified frame.
     assert len(links) == 1
-    assert links[0].hit_count == 8
+    assert links[0].hit_count == 10
     # Match provenance is persisted at ingest — it cannot be
     # reconstructed afterwards (CLD-17's plate-vs-visual split).
     assert links[0].identifier_key == "person"
@@ -377,7 +378,9 @@ def test_ingest_with_identity_pipeline(sample_video, tmp_path):
     assert links[0].learned_plate is False
 
 
-def _identity_service(sample_video, tmp_path, frames, events_cfg=None):
+def _identity_service(
+    sample_video, tmp_path, frames, events_cfg=None, identity_module=None
+):
     config = SiteConfig(
         site_id="test-site",
         cameras=[
@@ -397,7 +400,7 @@ def _identity_service(sample_video, tmp_path, frames, events_cfg=None):
     )
     dispatcher = LocalBackend()
     dispatcher.register("detection", SequenceDetector(frames))
-    dispatcher.register("identity", StubIdentity())
+    dispatcher.register("identity", identity_module or StubIdentity())
     return IngestService(config, dispatcher=dispatcher)
 
 
@@ -481,9 +484,11 @@ def test_same_identity_fragments_merge_into_one_event(sample_video, tmp_path):
     assert events[0].detection_count == 8
     assert events[0].track_id == 2  # adopted so later frames fast-path
     assert events[0].mean_confidence == pytest.approx(0.9)
-    # One pairing, not one per fragment: hits from frames 3-4 and 7-8.
+    # One pairing, not one per fragment: each fragment's warm-up frames
+    # are identified retroactively at its own flip (CLD-286), so all
+    # eight frames hit.
     assert len(links) == 1
-    assert links[0].hit_count == 4
+    assert links[0].hit_count == 8
 
 
 def test_identity_merge_disabled_by_zero_gap(sample_video, tmp_path):
@@ -513,6 +518,60 @@ def test_ephemeral_fragment_never_resolves_identity(sample_video, tmp_path):
         assert session.query(EventIdentity).count() == 0
 
 
+class RecordingIdentity(StubIdentity):
+    """StubIdentity that records the crop bytes of every job it sees."""
+
+    def __init__(self):
+        self.crops = []
+
+    def process(self, job):
+        self.crops.append(job.payload["crop_jpeg"])
+        return super().process(job)
+
+
+def test_backlog_replays_warmup_frames_in_order_at_the_flip(
+    sample_video, tmp_path
+):
+    """CLD-286: the frames spent earning significance are identified
+    retroactively when the event flips — from the stored crops, oldest
+    first, before the flipping frame — and exactly once each. A departure's
+    biggest plate frames come first, so losing them to warm-up meant losing
+    the plate (event 578)."""
+    frames = []
+    for i in range(5):
+        d = _det(track_id=1)
+        d["crop_jpeg"] = b"\xff\xd8crop%d" % i
+        frames.append([d])
+    recorder = RecordingIdentity()
+    service = _identity_service(
+        sample_video, tmp_path, frames, identity_module=recorder
+    )
+    service.run_camera(service.config.cameras[0])
+    # min_detections=3: the flip lands on frame 3, whose _identify runs
+    # after the backlog — so the identity module sees one chronological
+    # visit, which is also what keeps plate-OCR rationing honest.
+    assert recorder.crops == [b"\xff\xd8crop%d" % i for i in range(5)]
+    with service.Session() as session:
+        assert session.query(EventIdentity).one().hit_count == 5
+
+
+def test_backlog_respects_the_per_frame_quality_gates(sample_video, tmp_path):
+    """CLD-286: only the significance gate is behind the backlog pass by
+    construction — a weak warm-up frame stays out after the flip too."""
+    frames = [[_det(track_id=1, confidence=0.3)] for _ in range(2)]
+    frames += [[_det(track_id=1)] for _ in range(3)]
+    recorder = RecordingIdentity()
+    service = _identity_service(
+        sample_video, tmp_path, frames, identity_module=recorder
+    )
+    service.run_camera(service.config.cameras[0])
+    # The 0.3 frames sit below identify_min_confidence: the backlog query
+    # finds them but _identify's own gates refuse them, same as live.
+    assert len(recorder.crops) == 3
+    with service.Session() as session:
+        assert session.query(EventIdentity).one().hit_count == 3
+
+
 def test_weak_or_tiny_detections_skip_identity(sample_video, tmp_path):
     """Low-confidence and small-bbox crops are skipped by the identity
     quality gates even on a significant event."""
@@ -523,9 +582,10 @@ def test_weak_or_tiny_detections_skip_identity(sample_video, tmp_path):
     service.run_camera(service.config.cameras[0])
     with service.Session() as session:
         links = session.query(EventIdentity).all()
-    # Frames 1-2 pre-gate, 3-4 identify, 5-6 fail the quality gates.
+    # Frames 1-2 are recovered by the backlog pass at the flip (CLD-286),
+    # 3-4 identify live, 5-6 fail the quality gates either way.
     assert len(links) == 1
-    assert links[0].hit_count == 2
+    assert links[0].hit_count == 4
 
 
 def test_ingest_does_not_revive_a_claim_the_operator_unlinked(
