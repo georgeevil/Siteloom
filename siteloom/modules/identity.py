@@ -25,9 +25,15 @@ Job payload:
                    feature flag is on and the class is fingerprinted, so
                    its absence is the off switch.
 Result:
-    {"embeddings": [{identifier, algo, vector: [float], plate: str|None,
+    {"embeddings": [{identifier, algo, vector: [float],
+                     quality: float|None, plate: str|None,
                      plate_read: dict|None}],
      "fingerprint": dict|None}
+
+`quality` is the embedder's own confidence in what it embedded, where it
+has one — the face pipeline reports YuNet's score for the face it chose.
+None for embedders with no such signal; ingest then falls back to the
+detector's box confidence, the pre-existing behaviour.
 
 `fingerprint` is per crop, not per identifier — color belongs to the
 detection, and it travels (as `ColorRead.as_payload()`) even when the
@@ -88,7 +94,16 @@ class IdentityModule:
         out: list[dict[str, Any]] = []
         for key, ident in self.registry.identifiers_for(payload["class_name"]):
             embedder = self.registry.embedder_for(key)
-            vector = embedder.embed(crop)
+            # Per-identifier quality, where the embedder can measure one:
+            # the face pipeline knows how confident it is in the *face*
+            # (YuNet's score), which is a different fact from the YOLO
+            # confidence in the parent box that ingest otherwise uses.
+            # A plain float — this dict crosses a process boundary.
+            quality = None
+            if hasattr(embedder, "embed_best"):
+                vector, quality = embedder.embed_best(crop)
+            else:
+                vector = embedder.embed(crop)
             plate = None
             plate_read = None
             if ident.plate_ocr and key not in payload.get("skip_plate_ocr", ()):
@@ -126,6 +141,7 @@ class IdentityModule:
                     "identifier": key,
                     "algo": ident.algo,
                     "vector": vector.tolist() if vector is not None else None,
+                    "quality": quality,
                     "plate": plate,
                     # A failed read still travels: the entry may carry
                     # nothing resolvable and exist only so ingest can

@@ -485,7 +485,17 @@ class IngestService:
                 threshold=identity_cfg.threshold_for(emb["identifier"], cam),
                 max_vectors=ident_cfg.max_vectors_per_identity if ident_cfg else 20,
                 camera_id=cam.id,
-                quality=det["confidence"],
+                # The identifier's own quality signal when the module
+                # measured one (the face pipeline's YuNet score), else
+                # the detector's box confidence. The box says "this is a
+                # person", not "this face is legible" — feeding it to
+                # `immediate_quality` is how a crisp walk-past minted an
+                # identity per blurry face (CLD-139's mint half).
+                quality=(
+                    emb["quality"]
+                    if emb.get("quality") is not None
+                    else det["confidence"]
+                ),
                 # Names the visit this frame belongs to, which is what
                 # bounds per-event learning and what makes a `wrong`
                 # verdict stop further accretion mid-event (CLD-139).

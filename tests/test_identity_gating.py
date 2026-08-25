@@ -428,3 +428,108 @@ def test_neither_gate_is_reachable_without_the_other(vectors, session, gate):
         assert grown == 3  # the floor is off, the per-event cap is not
     else:
         assert grown == 0  # the cap is off, but every frame is under the floor
+
+
+# -- 4. the mint budget -----------------------------------------------------
+#
+# `learn_max_per_event` bounds what a visit teaches ONE identity, but a
+# mint is a new identity with a fresh budget — so a visit whose frames
+# kept missing could convert gallery flooding into identity flooding
+# (one 73-second live visit minted 50 identities). `mint_max_per_event`
+# is the bound on that: per (identifier, event), refused frames park in
+# the pending pool instead of minting.
+
+
+def _distinct(i: int):
+    import numpy as np
+
+    vec = np.zeros(64, dtype=np.float32)
+    vec[i] = 1.0
+    return vec
+
+
+def test_the_mint_budget_bounds_identity_flooding(vectors, session):
+    resolver = _resolver(vectors, min_sightings=1, mint_max_per_event=2)
+    outcomes = [
+        _resolve(resolver, session, _distinct(i), event_id=71) for i in range(5)
+    ]
+    assert [r.identity is not None for r in outcomes] == [
+        True, True, False, False, False,
+    ]
+    assert all(r.pending for r in outcomes[2:])
+    assert session.query(Identity).count() == 2
+
+
+def test_a_plate_mint_is_exempt_from_the_budget(vectors, session):
+    """A plate is exact evidence — the budget must never park it."""
+    resolver = _resolver(vectors, "vehicle", min_sightings=1, mint_max_per_event=1)
+    first = resolver.resolve(
+        session, identifier_key="vehicle", class_name="car",
+        vector=_distinct(1).tolist(), plate=None, timestamp=TS,
+        threshold=0.8, event_id=72,
+    )
+    assert first.identity is not None  # spends the budget
+    plated = resolver.resolve(
+        session, identifier_key="vehicle", class_name="car",
+        vector=_distinct(2).tolist(), plate="AAA111", timestamp=TS,
+        threshold=0.8, event_id=72,
+    )
+    assert plated.identity is not None and plated.is_new
+    assert plated.identity.plate == "AAA111"
+
+
+def test_a_zero_budget_restores_unbounded_minting(vectors, session):
+    resolver = _resolver(vectors, min_sightings=1, mint_max_per_event=0)
+    for i in range(5):
+        assert _resolve(
+            resolver, session, _distinct(i), event_id=73
+        ).identity is not None
+    assert session.query(Identity).count() == 5
+
+
+def test_budget_parked_frames_can_found_a_later_events_mint(vectors, session):
+    """A refused frame is still a real sighting: it waits in the pool
+    and corroborates a mint on the next visit, it is not evidence
+    destroyed."""
+    resolver = _resolver(vectors, min_sightings=2, mint_max_per_event=1)
+    # Visit 81: one pair promotes (spending the budget), then a new
+    # subject's frame arrives and is parked by the budget.
+    assert _resolve(resolver, session, _distinct(1), event_id=81).pending
+    minted = _resolve(resolver, session, _distinct(1), event_id=81)
+    assert minted.identity is not None and minted.is_new
+    parked = _resolve(resolver, session, _distinct(2), event_id=81)
+    assert parked.pending and parked.identity is None
+    # Visit 82: the same subject returns; the parked sighting counts.
+    promoted = _resolve(resolver, session, _distinct(2), event_id=82)
+    assert promoted.identity is not None and promoted.is_new
+    assert session.query(Identity).count() == 2
+
+
+def test_an_auto_added_class_gets_the_default_mint_budget(vectors, session):
+    """The identifiers nobody tuned are exactly where flooding protection
+    must not silently sit out: an identifier key with no config entry
+    (auto-added classes) runs under the field-default budget, not 0."""
+    resolver = _resolver(vectors)  # config has no "dog" identifier
+    outcomes = [
+        resolver.resolve(
+            session, identifier_key="dog", class_name="dog",
+            vector=_distinct(i).tolist(), plate=None, timestamp=TS,
+            threshold=0.8, event_id=91,
+        )
+        for i in range(5)
+    ]
+    minted = [r for r in outcomes if r.identity is not None]
+    from siteloom.config import IdentifierConfig
+
+    assert len(minted) == IdentifierConfig.model_fields["mint_max_per_event"].default
+    assert all(r.pending for r in outcomes[len(minted):])
+
+
+def test_budget_refusals_of_an_ungated_identifier_skip_the_pool(vectors, session):
+    """min_sightings=1 identifiers have no promotion path, so parking
+    their refused frames would be a write nothing ever reads — the pool
+    must stay untouched."""
+    resolver = _resolver(vectors, min_sightings=1, mint_max_per_event=1)
+    for i in range(4):
+        _resolve(resolver, session, _distinct(i), event_id=92)
+    assert vectors.search_labeled("person-pending", _distinct(2), limit=5) == []

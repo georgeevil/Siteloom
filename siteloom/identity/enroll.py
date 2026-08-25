@@ -56,6 +56,29 @@ def identity_for_label(session: Session, name: str) -> Identity:
     return identity
 
 
+def tight_face_fallback(embedder, crop):
+    """Embed a crop with no detectable face by treating it as the face.
+
+    The enrolment path's fallback: rather than losing a verified sample,
+    the whole crop is resized to the recognizer's input and embedded
+    directly. Returns None when the embedder has no recognizer or the
+    crop is hopeless. NOTE this produces a vector live *matching* never
+    would — the live module simply skips a faceless crop — so callers
+    replaying live behaviour must not use it for match-side frames (the
+    lab marks these vectors and excludes them from corpus frames).
+    """
+    if not hasattr(embedder, "_recognizer"):
+        return None
+    import cv2
+
+    try:
+        resized = cv2.resize(crop, (112, 112))
+        feature = embedder._recognizer.feature(resized).flatten().astype("float32")
+        return embedder._finish(feature)
+    except (cv2.error, AttributeError):
+        return None
+
+
 def embed_crop_file(embedder, crop_path: str | None):
     """Re-embed a stored crop JPEG with the identifier's own embedder.
 
@@ -73,15 +96,8 @@ def embed_crop_file(embedder, crop_path: str | None):
     if crop is None:
         return None
     embedding = embedder.embed(crop)
-    if embedding is None and hasattr(embedder, "_recognizer"):
-        try:
-            resized = cv2.resize(crop, (112, 112))
-            feature = (
-                embedder._recognizer.feature(resized).flatten().astype("float32")
-            )
-            embedding = embedder._finish(feature)
-        except (cv2.error, AttributeError):
-            embedding = None
+    if embedding is None:
+        embedding = tight_face_fallback(embedder, crop)
     return embedding
 
 
