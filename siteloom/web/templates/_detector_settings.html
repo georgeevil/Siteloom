@@ -49,6 +49,21 @@
   </div>
 </div>
 
+{% if camera %}
+<div class="tw-block">
+  <h4>Day or night settings?</h4>
+  <p class="tw-hint">Cameras that go infrared at night can carry a
+     separate night profile — colour-based tracking is weaker in IR, so
+     the right settings differ. Trial the profile the footage matches.</p>
+  <label style="font-size:12.5px; margin-right:14px">
+    <input type="radio" name="profile" value="day" checked> Day
+    {%- if camera.detection %} (this camera's tuned settings){% endif %}</label>
+  <label style="font-size:12.5px">
+    <input type="radio" name="profile" value="night"> Night
+    {%- if camera.night %} (this camera's night profile){% else %} (starts from the day settings){% endif %}</label>
+</div>
+{% endif %}
+
 <div class="tw-block">
   <h4>3 · Where these settings start from</h4>
   <table class="tw-prov">

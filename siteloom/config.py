@@ -199,6 +199,12 @@ class CameraConfig(BaseModel):
     # Per-camera detection overrides (CLD-101): confidence floors,
     # tracker knobs, model. Resolved by DetectionConfig.for_camera.
     detection: DetectionOverride | None = None
+    # The night profile (CLD-129): a second override layered over the
+    # camera's day-effective settings whenever the footage reads as IR
+    # (measured — `siteloom/scene.py` — never the clock, because
+    # reindex/backfill process old footage at today's wall time).
+    # Setting it is what turns profile switching on for a camera.
+    night: DetectionOverride | None = None
 
 
 class UniFiConfig(BaseModel):
@@ -280,25 +286,35 @@ class DetectionConfig(BaseModel):
         "bird",
     ]
 
-    def for_camera(self, camera: "CameraConfig") -> "DetectionConfig":
-        """Effective detection settings for one camera (CLD-101).
+    def for_camera(
+        self, camera: "CameraConfig", profile: str = "day"
+    ) -> "DetectionConfig":
+        """Effective detection settings for one camera (CLD-101), for
+        one profile (CLD-129).
 
-        Site defaults + the camera's `DetectionOverride`; shared by the
+        Site defaults + the camera's `DetectionOverride` + (night) the
+        camera's `night` override — night layers over the day-effective
+        values, so a camera's daytime tuning carries into its nights
+        except where the night override says otherwise. Shared by the
         live pipeline, the tuning lab and the tracker harness so no two
         surfaces can disagree about what a camera actually runs.
         `tracker` merges (over the site dict, which merges over
         TRACKER_DEFAULTS); every other non-None field replaces.
         """
-        if camera.detection is None:
+        layers = [o for o in (camera.detection,) if o is not None]
+        if profile == "night" and camera.night is not None:
+            layers.append(camera.night)
+        if not layers:
             return self
         merged = self.model_copy(deep=True)
-        for field, value in camera.detection.model_dump().items():
-            if value is None:
-                continue
-            if field == "tracker":
-                merged.tracker = {**merged.tracker, **value}
-            else:
-                setattr(merged, field, value)
+        for override in layers:
+            for field, value in override.model_dump().items():
+                if value is None:
+                    continue
+                if field == "tracker":
+                    merged.tracker = {**merged.tracker, **value}
+                else:
+                    setattr(merged, field, value)
         return merged
 
 

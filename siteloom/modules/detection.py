@@ -14,6 +14,9 @@ Job payload (all serializable):
     sample_fps: float — the camera's sampling rate, which sizes the
                 tracker's lost-track buffer (track_buffer_s × fps);
                 omitted by callers with no meaningful rate
+    profile:    "day" | "night" — which of the camera's setting
+                profiles is in force (CLD-129); absent means day.
+                Night runs a separate model + tracker instance
 
 Result: {"detections": [{class_name, confidence, bbox, track_id,
                           zones, crop_jpeg}]}
@@ -178,6 +181,13 @@ class DetectionModule:
             raise ValueError("could not decode image_jpeg")
 
         camera_id = payload["camera_id"]
+        # The night profile is a different model + tracker (CLD-129):
+        # ultralytics reads tracker settings once per predictor, so the
+        # profiles cannot share one. The composite key gives each its
+        # own instance — the same mechanism per-camera models use, and
+        # the id never reaches the store (rows keep the plain camera).
+        if payload.get("profile") == "night":
+            camera_id = f"{camera_id}#night"
         cfg = self._cfg_for(camera_id)
         model = self._model_for(camera_id)
         # Run the detector at the lowest applicable threshold; per-class

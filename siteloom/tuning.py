@@ -42,6 +42,10 @@ from typing import Any, Callable
 
 from siteloom.config import DetectionConfig
 from siteloom.dispatch.base import Job
+
+# One IR threshold for the whole system: a trial's "reads as night" and
+# live profile switching (CLD-129, siteloom/scene.py) must agree.
+from siteloom.scene import IR_SATURATION  # noqa: F401 — re-export
 from siteloom.track_eval import Observation, TrackingReport, summarize
 
 log = logging.getLogger(__name__)
@@ -51,10 +55,6 @@ log = logging.getLogger(__name__)
 MAX_MOMENTS = 48
 #: Ordinary annotated frames kept, spread evenly across the clip.
 RHYTHM_FRAMES = 12
-#: Mean HSV saturation below this reads as IR/grayscale footage — the
-#: signal for "appearance embeddings are weak here" (CLD-129's cheap
-#: half; profile *switching* stays with that ticket).
-IR_SATURATION = 14.0
 
 #: Named scene presets (CLD-102 rung 1). `tested: True` means measured
 #: on the tracker corpus; everything else is a reasoned starting point

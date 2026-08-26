@@ -39,6 +39,7 @@ from siteloom.store import (
     init_db,
     make_engine,
 )
+from siteloom.scene import ProfileMonitor, mean_saturation
 from siteloom.store.claims import active_claim, fold_claim, link_claim
 from siteloom.tracking.occlusion import OcclusionMonitor, swap_evidence
 
@@ -100,17 +101,26 @@ def build_dispatcher(config: SiteConfig) -> JobDispatcher:
         dispatcher: JobDispatcher = LocalBackend()
     else:  # pragma: no cover — future backends
         raise ValueError(f"unknown backend {config.backend.kind!r}")
-    dispatcher.register("detection", DetectionModule(
-        config.detection,
-        # Effective per-camera settings (CLD-101), resolved here so the
-        # module keeps receiving plain DetectionConfigs. Only cameras
-        # that actually override anything get an entry.
-        per_camera={
-            cam.id: config.detection.for_camera(cam)
-            for cam in config.cameras
-            if cam.detection is not None
-        },
-    ))
+    # Effective per-camera settings (CLD-101), resolved here so the
+    # module keeps receiving plain DetectionConfigs. Only cameras that
+    # actually override anything get an entry; a camera with a night
+    # profile (CLD-129) gets a second entry under the composite key the
+    # module uses when the payload says night — a separate model and
+    # tracker, because ultralytics reads tracker settings once per
+    # predictor and profiles differ in exactly those settings.
+    per_camera = {
+        cam.id: config.detection.for_camera(cam)
+        for cam in config.cameras
+        if cam.detection is not None
+    }
+    per_camera.update({
+        f"{cam.id}#night": config.detection.for_camera(cam, "night")
+        for cam in config.cameras
+        if cam.night is not None
+    })
+    dispatcher.register(
+        "detection", DetectionModule(config.detection, per_camera=per_camera)
+    )
     if config.identity.enabled:
         dispatcher.register(
             "identity", IdentityModule(config.identity, device=config.detection.device)
@@ -156,6 +166,11 @@ class IngestService:
         # restart mid-episode forgets the episode, which costs at worst
         # one IoU-stitched phantom — today's behaviour.
         self._occlusion: dict[str, OcclusionMonitor] = {}
+        # Day/night state per night-configured camera (CLD-129) — the
+        # same in-memory advisory class as the occlusion monitors: a
+        # restart re-derives the profile within a confirm-streak of
+        # frames from the footage itself.
+        self._profiles: dict[str, ProfileMonitor] = {}
         self._sync_cameras()
 
         self.resolver: IdentityResolver | None = None
@@ -329,6 +344,21 @@ class IngestService:
     def _process_frame(self, cam: CameraConfig, frame: Frame) -> None:
         if "detection" not in cam.modules:
             return
+        # The day/night decision (CLD-129), only where a night profile
+        # exists: measured from this frame's own pixels — never the
+        # clock, which lies during reindex/backfill — with hysteresis
+        # so dusk cannot flap the tracker. The frame is already decoded
+        # here; the probe is one cvtColor.
+        profile = None
+        if cam.night is not None:
+            monitor = self._profiles.get(cam.id)
+            if monitor is None:
+                monitor = self._profiles[cam.id] = ProfileMonitor()
+            ts = frame.timestamp.replace(tzinfo=None)
+            profile = monitor.observe(
+                (ts - _EPOCH).total_seconds(),
+                mean_saturation(frame.image),
+            )
         ok, jpeg = cv2.imencode(".jpg", frame.image)
         if not ok:
             log.warning("frame encode failed for %s", cam.id)
@@ -344,6 +374,7 @@ class IngestService:
                 # Sizes the tracker's lost-track buffer: track_buffer_s
                 # is seconds, the tracker counts sampled frames.
                 "sample_fps": cam.sample_fps,
+                **({"profile": profile} if profile is not None else {}),
             },
         )
         result = self.dispatcher.submit_and_wait(job)

@@ -238,7 +238,7 @@
     <tr><th>camera</th><th>model</th><th>confidence</th><th>class floors</th><th>buffer (s)</th><th>tracker</th><th>fps</th><th></th></tr>
     {% for row in effective %}
     <tr>
-      <td>{{ row.camera.name or row.camera.id }}</td>
+      <td>{{ row.camera.name or row.camera.id }}{% if row.profile == 'night' %} · <strong>night</strong>{% endif %}</td>
       <td class="{{ 'dt-ovr' if 'model' in row.overridden }}">{{ row.effective.model }}</td>
       <td class="{{ 'dt-ovr' if 'confidence' in row.overridden }}">{{ row.effective.confidence }}</td>
       <td class="{{ 'dt-ovr' if 'class_confidence' in row.overridden }}">{{ row.effective.class_confidence or '—' }}</td>
@@ -246,10 +246,11 @@
       <td class="{{ 'dt-ovr' if 'tracker' in row.overridden }}">{{ row.effective.tracker }}</td>
       <td>{{ row.camera.sample_fps }}</td>
       <td>
-        {% if row.camera.detection %}
+        {% if (row.profile == 'night' and row.camera.night) or (row.profile == 'day' and row.camera.detection) %}
         <form method="post" action="/detector/reset-camera" style="display:inline">
           <input type="hidden" name="camera" value="{{ row.camera.id }}">
-          <button title="drop this camera's override; follow the site again">reset</button>
+          <input type="hidden" name="profile" value="{{ row.profile }}">
+          <button title="{% if row.profile == 'night' %}remove the night profile{% else %}drop this camera's override; follow the site again{% endif %}">reset</button>
         </form>
         {% endif %}
       </td>

@@ -284,3 +284,38 @@ def test_a_revert_is_itself_a_recorded_revertable_change(env):
     # The history panel shows the trail.
     body = env.get("/detector").text
     assert "reverted to" in body
+
+
+# -- day/night profiles (CLD-129) ------------------------------------------
+
+
+def test_apply_to_the_night_profile_diffs_against_day_effective(env):
+    """The night override records only what differs from the camera's
+    DAY-effective settings — restating a day override into the night
+    layer would detach it from future day changes."""
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.6)
+    run_id = fake_run(env, confidence=0.6, tracker={
+        "fuse_score": False, "with_reid": False,
+    })
+    env.post("/detector/apply",
+             data={"run_id": run_id, "target": "cam-a:night"},
+             follow_redirects=False)
+    night = env.config.cameras[0].night
+    assert night is not None
+    assert night.confidence is None          # 0.6 IS the day-effective value
+    assert night.tracker == {"with_reid": False}
+    # Round-trips to disk, and the effective table shows the night row.
+    on_disk = load_config(env.config_path)
+    assert on_disk.cameras[0].night.tracker == {"with_reid": False}
+    body = env.get("/detector").text
+    assert "night" in body
+
+
+def test_resetting_the_night_profile_leaves_the_day_override(env):
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.6)
+    env.config.cameras[0].night = DetectionOverride(confidence=0.9)
+    env.post("/detector/reset-camera",
+             data={"camera": "cam-a", "profile": "night"},
+             follow_redirects=False)
+    assert env.config.cameras[0].night is None
+    assert env.config.cameras[0].detection.confidence == 0.6

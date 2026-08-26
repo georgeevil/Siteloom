@@ -174,7 +174,18 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
             )
             rows.append({
                 "camera": cam, "effective": eff, "overridden": overridden,
+                "profile": "day",
             })
+            if cam.night is not None:
+                rows.append({
+                    "camera": cam,
+                    "effective": site.for_camera(cam, "night"),
+                    "overridden": {
+                        k for k, v in cam.night.model_dump().items()
+                        if v is not None
+                    },
+                    "profile": "night",
+                })
         return rows
 
     #: The wizard's field vocabulary: label + plain meaning, in display
@@ -229,11 +240,11 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         })
         return rows
 
-    def _settings_diff(settings: dict, cam) -> list[dict]:
+    def _settings_diff(settings: dict, cam, profile: str = "day") -> list[dict]:
         """What applying a trial would actually change, against the
-        camera's (or site's) current effective values."""
+        camera's (or site's) current effective values for the profile."""
         site = config.detection
-        eff = site.for_camera(cam) if cam is not None else site
+        eff = site.for_camera(cam, profile) if cam is not None else site
         rows = []
         for field in ("model", "confidence", "class_confidence",
                       "track_buffer_s"):
@@ -552,7 +563,8 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
                     plain_comparison(comparison) if comparison else None
                 ),
                 "would_change": _settings_diff(
-                    report.get("settings") or {}, report_cam
+                    report.get("settings") or {}, report_cam,
+                    report.get("profile") or "day",
                 ),
                 "report_camera": report_cam,
                 "recommendations": recommend(report, report["sample_fps"]),
@@ -588,14 +600,20 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         params.one_of(source_kind, "source_kind", ("nvr", "clip", "upload"))
 
         cam = next((c for c in config.cameras if c.id == camera), None)
+        # Which of the camera's profiles the trial starts from (CLD-129)
+        # â€” night bases on the day-effective + night override, the same
+        # resolution live ingest uses when the footage reads as IR.
+        profile = "night" if form.get("profile") == "night" else "day"
         base = (
-            config.detection.for_camera(cam) if cam is not None
+            config.detection.for_camera(cam, profile) if cam is not None
             else config.detection
         )
         try:
             det_cfg, sample_fps, summary = parse_settings(form, base)
         except HTTPException as exc:
             return page(request, exc.status_code, form=form, error=exc.detail)
+        if profile == "night":
+            summary = f"night profile, {summary}"
         if sample_fps is None:
             sample_fps = cam.sample_fps if cam is not None else 5.0
 
@@ -683,7 +701,8 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
                             source, det_cfg, sample_fps, out_dir,
                             group_for=config.events.group_for,
                             progress=tick,
-                            label={"camera": cam.id if cam else None},
+                            label={"camera": cam.id if cam else None,
+                                   "profile": profile},
                         )
                 last.update(status="complete", frames=report["frames"],
                             groups=len(report["groups"]))
@@ -719,10 +738,16 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         minimal override. Snapshot first, so it is revertable."""
         report = _run(run_id)
         settings = report.get("settings") or {}
+        # "cam-id:night" targets the camera's night profile (CLD-129).
+        target_cam, _, target_profile = target.partition(":")
+        target_profile = target_profile or "day"
         cam_for_diff = next(
-            (c for c in config.cameras if c.id == target), None
+            (c for c in config.cameras if c.id == target_cam), None
         )
-        changed = [r["field"] for r in _settings_diff(settings, cam_for_diff)]
+        changed = [
+            r["field"]
+            for r in _settings_diff(settings, cam_for_diff, target_profile)
+        ]
         _snapshot(
             request, reason,
             f"applied trial {run_id} to {target}"
@@ -740,12 +765,22 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
                 "track_buffer_s", det.track_buffer_s
             )
         else:
-            cam = next((c for c in config.cameras if c.id == target), None)
+            cam = cam_for_diff
             if cam is None:
                 raise HTTPException(400, f"{target!r} is not a configured camera")
-            cam.detection = minimal_override(config.detection, settings)
-            if report.get("sample_fps"):
-                cam.sample_fps = float(report["sample_fps"])
+            if target_profile == "night":
+                # The diff base for night is the camera's DAY-effective
+                # config, not the site: restating a day override into
+                # the night layer would detach it from future day
+                # changes. sample_fps stays a camera property â€” the
+                # scene's speed does not change with the light.
+                cam.night = minimal_override(
+                    config.detection.for_camera(cam), settings
+                )
+            else:
+                cam.detection = minimal_override(config.detection, settings)
+                if report.get("sample_fps"):
+                    cam.sample_fps = float(report["sample_fps"])
         _persist()
         return RedirectResponse("/detector", status_code=303)
 
@@ -783,13 +818,20 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
 
     @app.post("/detector/reset-camera")
     def reset_camera(
-        request: Request, camera: str = Form(...), reason: str = Form("")
+        request: Request,
+        camera: str = Form(...),
+        profile: str = Form("day"),
+        reason: str = Form(""),
     ):
         cam = next((c for c in config.cameras if c.id == camera), None)
         if cam is None:
             raise HTTPException(400, f"{camera!r} is not a configured camera")
-        _snapshot(request, reason, f"reset {camera} to the site defaults")
-        cam.detection = None
+        if profile == "night":
+            _snapshot(request, reason, f"removed {camera}'s night profile")
+            cam.night = None
+        else:
+            _snapshot(request, reason, f"reset {camera} to the site defaults")
+            cam.detection = None
         _persist()
         return RedirectResponse("/detector", status_code=303)
 
@@ -840,9 +882,12 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         if cam is None:
             raise HTTPException(400, f"{camera!r} is not a configured camera")
         form = dict((await request.form()).items())
+        profile = "night" if form.get("profile") == "night" else "day"
         det_cfg, sample_fps, summary = parse_settings(
-            form, config.detection.for_camera(cam)
+            form, config.detection.for_camera(cam, profile)
         )
+        if profile == "night":
+            summary = f"night profile, {summary}"
         _state["preview"] = {
             "camera": cam.id,
             "cfg": det_cfg,

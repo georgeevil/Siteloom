@@ -151,11 +151,22 @@
     <form method="post" action="/detector/apply" class="tr-forms">
       <input type="hidden" name="run_id" value="{{ run_id }}">
       <select name="target">
-        {% for cam in cameras %}<option value="{{ cam.id }}" {% if report_camera and report_camera.id == cam.id %}selected{% endif %}>{{ cam.name or cam.id }}</option>{% endfor %}
+        {% for cam in cameras %}
+        <option value="{{ cam.id }}" {% if report_camera and report_camera.id == cam.id and report.profile != 'night' %}selected{% endif %}>{{ cam.name or cam.id }}</option>
+        <option value="{{ cam.id }}:night" {% if report_camera and report_camera.id == cam.id and report.profile == 'night' %}selected{% endif %}>{{ cam.name or cam.id }} — night profile</option>
+        {% endfor %}
       </select>
       <input name="reason" placeholder="why? (optional, kept in history)" size="24">
       <button class="tr-go">Apply to camera</button>
     </form>
   </div>
+  {% if report.scene.ir and report_camera and report.profile != 'night' %}
+  <p style="font-size:12px; color:var(--muted); margin-top:8px">
+    This footage reads as night (IR) — consider applying to
+    <strong>{{ report_camera.name or report_camera.id }} — night
+    profile</strong>, so the daytime settings stay untouched and the
+    camera switches automatically when the footage goes IR.
+  </p>
+  {% endif %}
 </div>
 {% endblock %}
