@@ -533,3 +533,67 @@ def test_budget_refusals_of_an_ungated_identifier_skip_the_pool(vectors, session
     for i in range(4):
         _resolve(resolver, session, _distinct(i), event_id=92)
     assert vectors.search_labeled("person-pending", _distinct(2), limit=5) == []
+
+
+# -- the occlusion gate ----------------------------------------------------
+
+# A partial-box crop — another subject's box over this one when the
+# frame was sampled — embeds whatever sliver was visible plus the
+# occluder. Matching against it is fine (recognising a half-hidden
+# regular is the point of a gallery); teaching from it is how one bad
+# vector starts stealing matches on every later visit.
+
+
+def test_an_occluded_frame_may_match_but_never_learns(vectors, session):
+    resolver = _resolver(vectors, min_sightings=1, learn_max_per_event=5)
+    identity = _identity(session)
+    vectors.add("person", QUERY, identity.id)
+    identity.vector_count = 1
+
+    hit = _resolve(resolver, session, QUERY, occluded=True, event_id=70)
+    assert hit.identity is identity
+    assert identity.vector_count == 1  # matched, taught nothing
+
+
+def test_an_occluded_unknown_is_refused_and_not_parked(vectors, session):
+    """Even at a quality that would normally mint on sight: quality says
+    the *box* was crisp, and a crisp box over a half-hidden subject is
+    still a half-hidden subject. And unlike a budget refusal it must NOT
+    park — the pool has no further gate, so a parked occluded vector
+    would end up in a founding gallery at promotion, which is exactly
+    the pollution the gate exists to keep out."""
+    resolver = _resolver(vectors, min_sightings=2, immediate_quality=0.85)
+    refused = _resolve(
+        resolver, session, QUERY, occluded=True, quality=0.99, event_id=71
+    )
+    assert refused.identity is None
+    assert refused.pending
+    assert vectors.search_labeled("person-pending", QUERY, limit=1) == []
+
+
+def test_occlusion_never_blocks_a_plate_mint(vectors, session):
+    """A plate is exact OCR evidence with its own quality floors; the
+    occlusion gate is about appearance vectors."""
+    resolver = _resolver(vectors, min_sightings=2)
+    res = resolver.resolve(
+        session, identifier_key="person", class_name="car",
+        vector=QUERY.tolist(), plate="AB1234", timestamp=TS,
+        threshold=0.8, occluded=True, event_id=72,
+    )
+    assert res.identity is not None
+    assert res.identity.plate == "AB1234"
+    # ... but the occluded appearance vector still stays out of the new
+    # identity's gallery: it minted on the plate, not on the crop.
+    assert res.identity.vector_count == 0
+
+
+def test_occlusion_does_not_gate_the_face_identifier(vectors, session):
+    """A face embedding only exists because YuNet found and scored an
+    actual face — a hidden face yields no embedding at all — so the
+    appearance-pollution risk the gate exists for is not there."""
+    resolver = _resolver(vectors, "face", min_sightings=2, immediate_quality=0.5)
+    res = _resolve(
+        resolver, session, QUERY, key="face", occluded=True,
+        quality=0.9, event_id=73,
+    )
+    assert res.identity is not None  # immediate-quality mint, ungated

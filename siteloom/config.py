@@ -51,6 +51,7 @@ class EventRulesOverride(BaseModel):
     identify_min_confidence: float | None = None
     identify_min_crop_px: int | None = None
     identify_only_significant: bool | None = None
+    occlusion_stitch: bool | None = None
 
 
 class PlateFloors(NamedTuple):
@@ -203,6 +204,20 @@ class DetectionConfig(BaseModel):
     # created and instantly discarded, and every detection becomes its
     # own event (CLD-5).
     tracker: dict[str, float | int | bool | str] = {"fuse_score": False}
+    # How long a lost track may coast on its Kalman prediction before the
+    # tracker drops it, in seconds of stream time. The underlying knob is
+    # `track_buffer`, which counts *sampled* frames — a fixed frame count
+    # silently means 5 s on a 2 fps camera and 2 s on a 5 fps one, which
+    # is how CLD-96's fix was right for one sampling rate only. The
+    # effective buffer is round(track_buffer_s * sample_fps) per camera;
+    # an explicit `tracker.track_buffer` still overrides it outright.
+    # 4 s survives a person walking behind another (the occlusion corpus
+    # clip's overlap is ~4 s) and is safe only because the default
+    # tracker verifies re-acquisition by appearance (BoT-SORT ReID) —
+    # a long buffer with motion-only matching re-opens CLD-96, where a
+    # dead track's coasting prediction adopted a stranger. Buffer length
+    # and ReID are one decision, not two.
+    track_buffer_s: float = 4.0
     # Per-class minimum confidence, overriding `confidence` for that
     # class (e.g. demand more of "dog" than "person"). The detector runs
     # at the lowest applicable threshold and per-class filtering happens
@@ -283,6 +298,17 @@ class EventConfig(BaseModel):
     identify_min_confidence: float = 0.5
     identify_min_crop_px: int = 48
     identify_only_significant: bool = True
+    # Occlusion-aware stitching: a track born inside (or just after)
+    # another subject's box is a suspect phantom, and stitching it by
+    # IoU is exactly the trap — its box overlaps the *occluder*, so the
+    # IoU vote hands the hidden subject's frames to the wrong event.
+    # When on, a suspect birth skips the IoU stitch and starts its own
+    # event; the identity-aware merge then folds it into the right visit
+    # only if its embedding clears CLD-41's full gate (threshold and
+    # margin). An ambiguous phantom stays a fragment, which is the
+    # correct failure: the stitcher exists to undo fragments, and
+    # nothing undoes a wrong merge. Off until the corpus says otherwise.
+    occlusion_stitch: bool = False
 
     def for_camera(self, camera: "CameraConfig") -> "EventConfig":
         """Effective rules for one camera: site defaults + overrides.

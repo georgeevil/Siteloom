@@ -24,6 +24,12 @@ Job payload:
                    crop with these floors. Ingest sends it only when the
                    feature flag is on and the class is fingerprinted, so
                    its absence is the off switch.
+    appearance_only: bool — optional; when true, skip identifiers, OCR
+                   and fingerprinting entirely and return one generic
+                   appearance embedding of the whole crop under the
+                   reserved identifier "_appearance". For callers that
+                   compare crops to each other (the occlusion swap
+                   check) rather than resolving them.
 Result:
     {"embeddings": [{identifier, algo, vector: [float],
                      quality: float|None, plate: str|None,
@@ -79,6 +85,28 @@ class IdentityModule:
         )
         if crop is None:
             raise ValueError("could not decode crop_jpeg")
+
+        if payload.get("appearance_only"):
+            # A bare appearance embedding of the whole crop, regardless
+            # of which identifiers apply to the class — the occlusion
+            # swap check compares crops *to each other*, so it needs a
+            # like-for-like vector even where the configured identifier
+            # is face-only (a distant person's face never resolves) and
+            # must not pay for OCR or face detection it will not use.
+            # "_appearance" is not a registry key on purpose: nothing
+            # downstream may mistake this for a resolvable identifier.
+            vector = self.registry.generic_embedder().embed(crop)
+            return {
+                "embeddings": [{
+                    "identifier": "_appearance",
+                    "algo": "generic",
+                    "vector": vector.tolist() if vector is not None else None,
+                    "quality": None,
+                    "plate": None,
+                    "plate_read": None,
+                }],
+                "fingerprint": None,
+            }
 
         fingerprint = None
         fp_floors = payload.get("fingerprint")

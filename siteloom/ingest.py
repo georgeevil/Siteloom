@@ -40,8 +40,14 @@ from siteloom.store import (
     make_engine,
 )
 from siteloom.store.claims import active_claim, fold_claim, link_claim
+from siteloom.tracking.occlusion import OcclusionMonitor, swap_evidence
 
 log = logging.getLogger(__name__)
+
+# Frame time as seconds for the occlusion monitor. Naive UTC (CLD-100),
+# so a fixed epoch rather than .timestamp(), which would route through
+# the process's local zone.
+_EPOCH = datetime(1970, 1, 1)
 
 # Live-stream reconnect pacing: exponential backoff between attempts,
 # reset once a connection has stayed up long enough to count as stable.
@@ -57,6 +63,21 @@ LIVE_STABLE_S = 30.0
 # dwarf every sane warm-up (min_detections is single digits) while
 # keeping the worst case to seconds.
 IDENTIFY_BACKLOG_MAX = 64
+
+# The occlusion swap check (`_check_swap`): how many stored crops per
+# side get re-embedded when an episode closes. Three of each is enough
+# for a max-similarity comparison and bounds the synchronous cost on the
+# camera thread to a dozen embedder passes per closed episode — episodes
+# are rare, and the crops closest to the episode are the ones compared.
+SWAP_PROBE_FRAMES = 3
+# The margin a cross-match must clear when no generic-algo identifier
+# names one for the class (CLD-41's rule, applied to the swap question:
+# a suspicion must beat its runner-up, not merely clear a bar).
+SWAP_DEFAULT_MARGIN = 0.05
+# An event whose track vanished longer ago than this cannot be a swap
+# participant worth flagging — the episode's tracks are current by
+# construction, so this only guards against stale track-id reuse.
+SWAP_EVENT_RECENCY_S = 600.0
 
 def _bbox_iou(
     a: tuple[float, float, float, float] | list[float],
@@ -117,6 +138,14 @@ class IngestService:
         # visit's cadence survives the CLD-40 merges (the id in hand at
         # decision time is the one the last frame used).
         self._plate_ocr_last: dict[tuple[int, str], datetime] = {}
+        # One occlusion monitor per camera, like the tracker state it
+        # watches: it consumes each frame's (track_id, bbox) pairs and
+        # answers which detections sit inside another subject's box and
+        # which fresh track ids look like occlusion phantoms. In-memory
+        # advisory state (the durable record is Detection.occluded): a
+        # restart mid-episode forgets the episode, which costs at worst
+        # one IoU-stitched phantom — today's behaviour.
+        self._occlusion: dict[str, OcclusionMonitor] = {}
         self._sync_cameras()
 
         self.resolver: IdentityResolver | None = None
@@ -302,6 +331,9 @@ class IngestService:
                 "timestamp": frame.timestamp.isoformat(),
                 "zones": [z.model_dump() for z in cam.zones],
                 "require_zone": cam.require_zone,
+                # Sizes the tracker's lost-track buffer: track_buffer_s
+                # is seconds, the tracker counts sampled frames.
+                "sample_fps": cam.sample_fps,
             },
         )
         result = self.dispatcher.submit_and_wait(job)
@@ -311,6 +343,12 @@ class IngestService:
         detections = result.result["detections"]
         if detections:
             self._store_detections(cam, frame.timestamp, detections)
+        else:
+            # An empty frame still advances the occlusion clock: an
+            # episode whose subjects left the scene must close (and get
+            # its swap check) now, not whenever the next detection
+            # happens to arrive — potentially hours later.
+            self._occlusion_idle(cam, frame.timestamp)
         # A frame with nothing in it is still a frame the soak got through;
         # counting only productive ones would make a quiet night look dead.
         self._tick(cam.id, 1, frames=1, detections=len(detections))
@@ -321,9 +359,34 @@ class IngestService:
         # SQLite DateTime columns are naive; store UTC without tzinfo.
         ts = timestamp.replace(tzinfo=None)
         rules = self._rules_for(cam)
+        # One occlusion read per frame, before any rows are written: the
+        # monitor needs the whole frame's boxes to see one inside
+        # another, and its verdicts feed both the stitch decision and
+        # the per-row `occluded` flag below.
+        monitor = self._occlusion.get(cam.id)
+        if monitor is None:
+            monitor = self._occlusion[cam.id] = OcclusionMonitor()
+        # The class-group key rides along so only same-group tracks can
+        # occlude each other: containment cannot see depth, and a person
+        # in front of a parked car must not read as occluded.
+        occlusion = monitor.feed(
+            (ts - _EPOCH).total_seconds(),
+            [
+                {
+                    "track_id": det["track_id"],
+                    "bbox": det["bbox"],
+                    "group": "|".join(rules.group_for(det["class_name"])),
+                }
+                for det in detections
+            ],
+        )
         with self.Session() as session:
             for seq, det in enumerate(detections):
-                event = self._find_or_create_event(session, cam.id, det, ts, rules)
+                notes = occlusion[seq]
+                event = self._find_or_create_event(
+                    session, cam.id, det, ts, rules,
+                    suspect_birth=notes["suspect_birth"] is not None,
+                )
                 crop_path = self._save_crop(cam.id, det, ts, seq)
                 detection = Detection(
                     event_id=event.id,
@@ -333,6 +396,7 @@ class IngestService:
                     bbox=json.dumps(det["bbox"]),
                     zones=json.dumps(det["zones"]),
                     crop_path=crop_path,
+                    occluded=bool(notes["occluded_with"]),
                 )
                 session.add(detection)
                 event.last_seen = ts
@@ -354,8 +418,32 @@ class IngestService:
                         session, cam, event, detection, rules
                     )
                 self._identify(
-                    session, cam, event, det, ts, crop_path, rules, detection
+                    session, cam, event, det, ts, crop_path, rules, detection,
+                    occluded=bool(notes["occluded_with"]),
                 )
+            # Episodes that closed on this frame get their swap check now
+            # — the first moment both sides can have post-episode frames
+            # — inside the same commit, so a flag and the frame that
+            # triggered it land together.
+            for episode in monitor.pop_closed():
+                self._check_swap(session, cam, episode, ts)
+            session.commit()
+
+    def _occlusion_idle(self, cam: CameraConfig, timestamp: datetime) -> None:
+        """Advance a camera's occlusion monitor over a detection-less
+        frame. No rows are written unless an episode closes, in which
+        case its swap check runs in its own short session."""
+        monitor = self._occlusion.get(cam.id)
+        if monitor is None:
+            return  # nothing ever tracked here; nothing to age out
+        ts = timestamp.replace(tzinfo=None)
+        monitor.feed((ts - _EPOCH).total_seconds(), [])
+        closed = monitor.pop_closed()
+        if not closed:
+            return
+        with self.Session() as session:
+            for episode in closed:
+                self._check_swap(session, cam, episode, ts)
             session.commit()
 
     def _rules_for(self, cam: CameraConfig) -> EventConfig:
@@ -393,6 +481,7 @@ class IngestService:
         crop_path: str | None,
         rules: EventConfig,
         detection: Detection | None = None,
+        occluded: bool = False,
     ) -> Event:
         """Second-pass identification on a detection crop (PRD §6.3/6.4).
 
@@ -414,6 +503,14 @@ class IngestService:
         # useless embedding — and every unresolved one mints a fresh
         # unknown identity, which is exactly the churn being gated out.
         if rules.identify_only_significant and not event.significant:
+            return event
+        if event.suspect_swap:
+            # A suspected mid-occlusion swap means this event's later
+            # crops may belong to the other subject. Until an operator
+            # rules, nothing is claimed and nothing is learned from it —
+            # a claim made on mixed evidence is CLD-97's fifteen wrong
+            # identities in miniature. Existing links stand; they were
+            # made before the suspicion arose.
             return event
         if det["confidence"] < rules.identify_min_confidence:
             return event
@@ -529,6 +626,10 @@ class IngestService:
                 # bounds per-event learning and what makes a `wrong`
                 # verdict stop further accretion mid-event (CLD-139).
                 event_id=event.id,
+                # A frame sampled while another subject's box sat over
+                # this one may match but never teaches or founds an
+                # identity — the resolver's occlusion gate.
+                occluded=occluded,
             )
             if resolution.identity is None:
                 # Quarantined (awaiting consistent sightings) or ambiguous
@@ -674,9 +775,169 @@ class IngestService:
                 "crop_jpeg": crop_jpeg,
             }
             event = self._identify(
-                session, cam, event, det, row.timestamp, row.crop_path, rules, row
+                session, cam, event, det, row.timestamp, row.crop_path, rules, row,
+                # The flag was measured when the frame was stored, so the
+                # replay applies the same refusal live ingest would have.
+                occluded=bool(row.occluded),
             )
         return event
+
+    def _check_swap(
+        self, session, cam: CameraConfig, episode: dict, ts: datetime
+    ) -> None:
+        """Did the tracker swap two subjects across this occlusion?
+
+        The one occlusion failure no other metric or gate can see: no
+        track goes dark (no bridge), none is born (no birth) — the
+        tracker just puts A's id on B when both boxes reappear, and the
+        event silently becomes two people. What a swap cannot fake is
+        appearance, so each event's crops from *before* the episode are
+        compared with its own track's first crops from *after* it, and
+        a track that resembles the other event's past more than its own
+        — by the margin CLD-41 demands of any contested claim — raises
+        `suspect_swap` on both events.
+
+        Flag only, by design: a false-positive here that *moved rows*
+        would manufacture exactly the mixed event it exists to catch,
+        and nothing downstream undoes a wrong merge. The flag freezes
+        further claims and learning on both events (`_identify`) and
+        asks an operator; their confirm feeds `multi_subject`, which is
+        the corpus loop. Skipped whenever a side has no usable frames —
+        no evidence is not evidence of no swap, and a suspicion that
+        cannot name its scores is not raised.
+
+        Cost: at most `SWAP_PROBE_FRAMES × 4` appearance embeddings via
+        the dispatcher (`appearance_only` — no OCR, no face pass), only
+        when an episode closes, which is rare.
+        """
+        if self.resolver is None or "identity" not in cam.modules:
+            return
+        track_a, track_b = episode["tracks"]
+        t_start = _EPOCH + timedelta(seconds=episode["t_start"])
+        t_end = _EPOCH + timedelta(seconds=episode["t_end"])
+        ev_a = self._event_for_track(session, cam.id, track_a, t_end)
+        ev_b = self._event_for_track(session, cam.id, track_b, t_end)
+        if ev_a is None or ev_b is None or ev_a.id == ev_b.id:
+            return  # merged already, or a side never made an event
+        if ev_a.suspect_swap or ev_b.suspect_swap:
+            return  # already awaiting an operator; one flag per pair
+        sides = {}
+        for name, event in (("a", ev_a), ("b", ev_b)):
+            pre = self._swap_probe_rows(session, event.id, before=t_start)
+            if not pre:
+                return  # nothing to compare a reappearance against
+            post = self._swap_probe_rows(session, event.id, after=t_end)
+            sides[f"pre_{name}"] = self._appearance_vectors(pre, event.class_name)
+            sides[f"post_{name}"] = self._appearance_vectors(post, event.class_name)
+            if not sides[f"pre_{name}"]:
+                return
+        # Both pre galleries are required — a cross-match needs both
+        # pasts — but ONE post side is enough: when a subject leaves
+        # during the overlap, only one track survives to cross, and the
+        # departing-subject swap (A's id landing on B while A walks off)
+        # is the most common presentation. `swap_evidence` treats an
+        # empty side as no verdict for that side, not as innocence.
+        if not sides["post_a"] and not sides["post_b"]:
+            return
+        evidence = swap_evidence(min_margin=self._swap_margin(ev_a.class_name), **sides)
+        if evidence is None:
+            return
+        note = json.dumps({
+            "episode": {
+                "t_start": t_start.isoformat(),
+                "t_end": t_end.isoformat(),
+            },
+            **evidence,
+        })
+        for role, event, other in (("a", ev_a, ev_b), ("b", ev_b, ev_a)):
+            event.suspect_swap = True
+            event.suspect_swap_at = ts
+            # `role` says which side of the scores this event is — both
+            # notes carry the same four numbers, and without it the
+            # badge could not say whether *this* event crossed.
+            event.suspect_swap_note = json.dumps(
+                {"other_event": other.id, "role": role, **json.loads(note)}
+            )
+        self._tick(cam.id, swap_suspects=1)
+        log.warning(
+            "suspect ID swap between events %s and %s on %s (%s)",
+            ev_a.id, ev_b.id, cam.id, evidence["crossed"],
+        )
+
+    def _event_for_track(
+        self, session, camera_id: str, track_id: int, around: datetime
+    ) -> Event | None:
+        event = (
+            session.query(Event)
+            .filter(Event.camera_id == camera_id, Event.track_id == track_id)
+            .order_by(Event.id.desc())
+            .first()
+        )
+        if event is None:
+            return None
+        if abs((around - event.last_seen).total_seconds()) > SWAP_EVENT_RECENCY_S:
+            return None
+        return event
+
+    @staticmethod
+    def _swap_probe_rows(
+        session, event_id: int,
+        before: datetime | None = None,
+        after: datetime | None = None,
+    ) -> list[Detection]:
+        """The crops nearest the episode on one side of it — never the
+        occluded ones, whose pixels are the mixture being untangled."""
+        query = session.query(Detection).filter(
+            Detection.event_id == event_id,
+            Detection.crop_path.isnot(None),
+            Detection.occluded.isnot(True),
+        )
+        if before is not None:
+            query = query.filter(Detection.timestamp < before).order_by(
+                Detection.timestamp.desc(), Detection.id.desc()
+            )
+        else:
+            query = query.filter(Detection.timestamp > after).order_by(
+                Detection.timestamp, Detection.id
+            )
+        return query.limit(SWAP_PROBE_FRAMES).all()
+
+    def _appearance_vectors(
+        self, rows: list[Detection], class_name: str
+    ) -> list[list[float]]:
+        vectors = []
+        for row in rows:
+            try:
+                crop = Path(row.crop_path).read_bytes()
+            except OSError as exc:
+                log.warning("swap probe crop unreadable %s: %s", row.crop_path, exc)
+                continue
+            result = self.dispatcher.submit_and_wait(Job(
+                module="identity",
+                payload={
+                    "crop_jpeg": crop,
+                    "class_name": class_name,
+                    "appearance_only": True,
+                },
+            ))
+            if not result.ok:
+                log.error("swap probe embedding failed: %s", result.error)
+                continue
+            for emb in result.result.get("embeddings", []):
+                if emb.get("identifier") == "_appearance" and emb.get("vector"):
+                    vectors.append(emb["vector"])
+        return vectors
+
+    def _swap_margin(self, class_name: str) -> float:
+        """The margin a cross-match must clear: the class's generic-algo
+        identifier's own `min_margin` where one exists — the number
+        already tuned to this embedding space — else the default. A
+        face identifier's margin never applies here: the probe vectors
+        are appearance embeddings, a different scale entirely."""
+        for ident in self.config.identity.identifiers.values():
+            if ident.algo == "generic" and class_name in ident.applies_to:
+                return ident.min_margin
+        return SWAP_DEFAULT_MARGIN
 
     def _note_plate_ocr(self, event_id: int, identifier: str, ts: datetime) -> None:
         """Remember when this visit last had an OCR attempt (CLD-130).
@@ -808,6 +1069,14 @@ class IngestService:
                 Event.camera_id == event.camera_id,
                 Event.id != event.id,
                 EventIdentity.identity_id == identity_id,
+                # A suspect-swap prior is frozen: folding a fresh
+                # fragment into it would make a new claim on it through
+                # the merge (link_claim below the caller) — the exact
+                # bypass of the freeze — and hand the fragment's clean
+                # rows to whatever verdict the operator later passes on
+                # the mixed event. The fragment stays its own event
+                # until the suspicion is ruled on.
+                Event.suspect_swap.is_(False),
                 # Interval distance ≤ gap, whichever event came first.
                 Event.last_seen >= event.first_seen - gap,
                 Event.first_seen <= event.last_seen + gap,
@@ -825,6 +1094,16 @@ class IngestService:
     ) -> None:
         """Move everything hanging off `source` onto `target`, combine the
         aggregates exactly, and delete the emptied source row."""
+        if source.suspect_swap and not target.suspect_swap:
+            # A suspicion follows the rows it is about. Belt-and-braces:
+            # today neither side can be suspect here (`_merge_with_prior`
+            # refuses suspect priors, and a suspect source is frozen
+            # before it can match) — but a future caller that merges a
+            # flagged event must not silently discard the flag with the
+            # row it hung on.
+            target.suspect_swap = True
+            target.suspect_swap_at = source.suspect_swap_at
+            target.suspect_swap_note = source.suspect_swap_note
         for row in (
             session.query(Detection).filter(Detection.event_id == source.id).all()
         ):
@@ -893,7 +1172,13 @@ class IngestService:
         session.flush()
 
     def _find_or_create_event(
-        self, session, camera_id: str, det: dict, ts: datetime, rules: EventConfig
+        self,
+        session,
+        camera_id: str,
+        det: dict,
+        ts: datetime,
+        rules: EventConfig,
+        suspect_birth: bool = False,
     ) -> Event:
         # Class groups absorb detector flapping (car↔truck mid-track):
         # any class in the group continues the event; per-frame truth is
@@ -916,7 +1201,16 @@ class IngestService:
                 and abs((ts - event.last_seen).total_seconds()) > rules.track_link_gap_s
             ):
                 event = None
-        if event is None:
+        if event is None and not (rules.occlusion_stitch and suspect_birth):
+            # A suspect birth — a track born inside or just after another
+            # subject's box — must not be stitched by IoU: its box
+            # overlaps the *occluder*, so the overlap vote hands the
+            # hidden subject's frames to the wrong event. It starts its
+            # own event instead, and the identity-aware merge below
+            # (`_merge_with_prior`) folds it into the right visit only
+            # if its embedding clears CLD-41's full gate — appearance
+            # evidence where position is exactly what lies. An ambiguous
+            # phantom stays a fragment: nothing undoes a wrong merge.
             event = self._stitch_event(session, camera_id, det, ts, group, rules)
         if event is None:
             event = Event(
@@ -968,6 +1262,13 @@ class IngestService:
             .filter(
                 Event.camera_id == camera_id,
                 Event.class_name.in_(group),
+                # A suspect-swap event is frozen while an operator rules
+                # on it; a stitch is a *guess*, and guessing rows into a
+                # possibly-mixed event hands them to whatever verdict it
+                # gets. (The track fast-path above is not a guess — the
+                # same track id really is the same track — so a frozen
+                # event still accumulates its own frames.)
+                Event.suspect_swap.is_(False),
                 Event.last_seen >= ts - gap,
                 Event.last_seen <= ts + gap,
             )

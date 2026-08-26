@@ -1996,6 +1996,61 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
             session.commit()
         return RedirectResponse(_safe_next(next_url, event_id), status_code=303)
 
+    @app.post("/events/{event_id}/swap-verdict")
+    def swap_verdict(
+        event_id: int,
+        verdict: str = Form(...),
+        next_url: str = Form("/"),
+    ):
+        """Rule on a machine-suspected ID swap (`ingest._check_swap`).
+
+        The suspicion froze identity claims on both events of the pair;
+        this is how the freeze ends, and it ends on both sides at once —
+        the question ("did the tracker swap these two?") is about the
+        pair, and answering it on one event while the other stays frozen
+        would leave half a verdict standing. Confirm promotes both to
+        `multi_subject`, the operator tracking-failure mark the corpus
+        reads (`track_ab.py suggest`) — a confirmed swap is exactly the
+        clip the next tracker change should be judged against. The note
+        keeps the scores either way, with the verdict appended: a
+        rejected suspicion is a measured false positive, which is the
+        precision data the auto-reconcile step (CLD-303) is gated on.
+
+        Known gap, deliberate for now (CLD-304): frames the freeze
+        skipped keep `identified_at` NULL, and a reject here does not
+        replay them — the marker makes that sweep trivial (same shape as
+        `_identify_backlog`), but it belongs to the ingest process, not
+        this endpoint.
+        """
+        if verdict not in ("confirm", "reject"):
+            raise HTTPException(400, "verdict must be confirm or reject")
+        with Session() as session:
+            event = session.get(Event, event_id)
+            if event is None or not event.suspect_swap:
+                raise HTTPException(404)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            pair = [event]
+            note = event.swap_note or {}
+            other = (
+                session.get(Event, note["other_event"])
+                if note.get("other_event")
+                else None
+            )
+            if other is not None and other.suspect_swap:
+                pair.append(other)
+            for ev in pair:
+                if verdict == "confirm":
+                    ev.multi_subject = True
+                    ev.multi_subject_at = ev.multi_subject_at or now
+                ev.suspect_swap = False
+                ev.suspect_swap_note = json.dumps({
+                    **(ev.swap_note or {}),
+                    "verdict": verdict,
+                    "ruled_at": now.isoformat(),
+                })
+            session.commit()
+        return RedirectResponse(_safe_next(next_url, event_id), status_code=303)
+
     @app.post("/events/{event_id}/identity/bulk")
     def bulk_identity_action(
         event_id: int,

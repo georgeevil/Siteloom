@@ -138,9 +138,24 @@ class IdentityResolver:
         camera_id: str | None = None,
         quality: float | None = None,
         event_id: int | None = None,
+        occluded: bool = False,
     ) -> Resolution:
         arr = np.asarray(vector, dtype=np.float32) if vector is not None else None
         ident_cfg = self.cfg.identifiers.get(identifier_key)
+        # An occluded frame — another track's box over this one when it
+        # was sampled — may *match* (recognising a half-hidden regular is
+        # the point of a gallery) but must never teach: a partial-box
+        # crop embeds whatever sliver was visible plus the occluder, and
+        # one such vector steals matches for every later visit. So it
+        # neither learns nor founds an identity; a would-be mint parks in
+        # the pending pool exactly like a budget refusal. Two evidence
+        # kinds are exempt: a plate is exact OCR with its own quality
+        # floors, and a face embedding only exists because YuNet found
+        # and scored an actual face — a hidden face yields no embedding
+        # at all, so the pollution risk is the appearance embedders'.
+        appearance_blocked = occluded and (
+            ident_cfg is None or ident_cfg.algo != "face"
+        )
 
         identity, similarity = self._match_plate(session, identifier_key, plate)
         matched_by = "plate" if identity is not None else None
@@ -182,6 +197,20 @@ class IdentityResolver:
                 ident_cfg.mint_max_per_event if ident_cfg else _DEFAULT_MINT_CAP
             )
             min_sightings = ident_cfg.min_sightings if ident_cfg else 1
+            if appearance_blocked and plate is None:
+                # Occluded and unknown: refused outright, NOT parked. A
+                # budget refusal parks because its vector is clean
+                # evidence awaiting corroboration; an occluded vector is
+                # the pollution itself, and the pool has no further gate
+                # — promotion would build the new identity's founding
+                # gallery out of exactly the partial-box crops this
+                # branch exists to keep out. The subject loses nothing
+                # durable: their next unoccluded frame parks or mints as
+                # normal.
+                return Resolution(
+                    identity=None, similarity=similarity, is_new=False,
+                    pending=True,
+                )
             if (
                 mint_cap > 0
                 and plate is None
@@ -279,9 +308,11 @@ class IdentityResolver:
         if learned_plate:
             identity.plate = plate  # visual match just learned its plate
             identity.plate_source = PLATE_SOURCE_LEARNED
-        if crop_path and not identity.best_crop_path:
+        if crop_path and not identity.best_crop_path and not appearance_blocked:
+            # The fallback cover must not be a partial-box crop: it is
+            # the face of the identity everywhere in the UI.
             identity.best_crop_path = crop_path
-        if arr is not None and self._may_learn(
+        if arr is not None and not appearance_blocked and self._may_learn(
             session, ident_cfg, identifier_key, identity, event_id, quality, max_vectors
         ):
             # `crop_path` is this vector's provenance (CLD-84): the live
