@@ -182,13 +182,15 @@ So `shipped` winning on this clip means *the shipped config is right for
 this camera*. It is evidence about a site only once the corpus covers
 several cameras that disagree with each other.
 
-**Detection settings are not per-camera yet** (CLD-99). `sample_fps`,
-event rules and identity thresholds already are; `detection.model`,
-`.confidence`, `.class_confidence` and `.tracker` are site-wide, so today
-the harness can only recommend one setting for all cameras and the best
-it can do is tell you which camera is paying for that. Until that lands,
-read a per-clip win as "this does not hurt here" rather than "adopt this
-everywhere".
+**Detection settings are per-camera since 2026-08-26** (CLD-101):
+`CameraConfig.detection` carries a `DetectionOverride` (confidence,
+class floors, tracker knobs, `track_buffer_s`, model), and the harness
+resolves each clip's camera's *effective* settings — so "shipped" on a
+clip means what that camera actually runs, and a per-camera win can be
+recorded as a per-camera override instead of a site-wide compromise.
+The `/detector` tuning lab is the operator surface for exactly that
+loop: sandboxed trials over NVR windows or clips, evidence frames,
+apply-as-minimal-override.
 
 The practical consequence for the corpus: **add clips from cameras that
 are unlike each other** before drawing a conclusion. Two clips from the

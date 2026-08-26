@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Trial {{ run_id }}{% endblock %}
+{% block subtitle %}what {{ report.source }} looks like under these settings{% endblock %}
+
+{#
+  One trial's evidence (CLD-102: the operator-facing output is the
+  annotated frames; the numbers are the tie-breaker behind them). The
+  moments strip leads with track births — each one is a claim the
+  operator can check with their own eyes.
+#}
+
+{% block content %}
+<style>
+  .tr-panel { border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel); padding: 14px 16px; margin-bottom: 14px; }
+  .tr-panel h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .tr-panel p { margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.6; max-width: 82ch; }
+  .tr-table { border-collapse: collapse; font-size: 12px; }
+  .tr-table th, .tr-table td { text-align: left; padding: 4px 12px 4px 0; border-bottom: 1px solid var(--hairline); }
+  .tr-table th { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+  .tr-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tr-strip figure { margin: 0; width: 220px; }
+  .tr-strip img { width: 100%; border-radius: 6px; border: 1px solid var(--hairline); }
+  .tr-strip figure.birth img { border-color: var(--accent); }
+  .tr-strip figcaption { font-size: 10.5px; color: var(--muted); padding-top: 2px; }
+  .tr-rec { border-left: 3px solid var(--hairline); padding: 4px 10px; margin: 0 0 8px; font-size: 12.5px; line-height: 1.6; }
+  .tr-rec.measured { border-color: var(--accent); }
+  .tr-rec .basis { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+  .tr-forms { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .tr-go { padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); }
+  code.tr-set { font-family: var(--font-mono); font-size: 11px; }
+</style>
+
+<div class="tr-panel">
+  <h3>Settings under trial</h3>
+  <p>
+    <code class="tr-set">model {{ report.settings.model }} · confidence {{ report.settings.confidence }}
+    · buffer {{ report.settings.track_buffer_s }}s · {{ report.sample_fps }} fps
+    {% if report.settings.class_confidence %} · class floors {{ report.settings.class_confidence }}{% endif %}</code><br>
+    <code class="tr-set">tracker: {{ report.settings.tracker }}</code>
+  </p>
+  <table class="tr-table">
+    <tr><th>group</th><th>tracks</th><th>det rate</th><th>step-IoU</th><th>bridges (implausible)</th><th>occl</th><th>births mid/post</th></tr>
+    {% for key, g in report.groups.items() %}
+    <tr>
+      <td>{{ key }}</td><td>{{ g.tracks }}</td><td>{{ (g.detection_rate * 100) | round }}%</td>
+      <td>{{ g.median_step_iou if g.median_step_iou is not none else '—' }}</td>
+      <td>{{ g.bridges }} ({{ g.implausible_bridges }})</td>
+      <td>{{ g.crossings }}</td>
+      <td>{{ g.mid_occlusion_births }}/{{ g.post_occlusion_births }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">nothing tracked in this clip</td></tr>
+    {% endfor %}
+  </table>
+  <p style="margin-top:8px">
+    Scene: {{ report.frames }} frames at {{ report.sample_fps }} fps
+    {% if report.scene.ir %} · <strong>reads as IR/grayscale</strong>{% endif %}
+    {% for cls, info in report.scene.classes.items() %}
+    · {{ cls }}: {{ info.count }} det, median {{ info.median_width_px }}px @ {{ info.median_confidence }}
+    {% endfor %}
+  </p>
+  {% if same_source %}
+  <form class="tr-forms" method="get" action="/detector/runs/{{ run_id }}">
+    <span style="font-size:12px">Compare against another trial of the same clip:</span>
+    <select name="versus">
+      {% for other in same_source %}<option value="{{ other }}" {% if other == versus %}selected{% endif %}>{{ other }}</option>{% endfor %}
+    </select>
+    <button class="tr-go">Compare</button>
+  </form>
+  {% endif %}
+  {% if comparison %}
+  <table class="tr-table" style="margin-top:8px">
+    <tr><th>group</th><th>verdict (them → this run)</th><th>switch-like</th><th>tracks</th></tr>
+    {% for key, v in comparison.items() %}
+    <tr>
+      <td>{{ key }}</td><td>{{ v.verdict }}</td>
+      <td>{% if v.switch_like %}{{ v.switch_like[0] }} → {{ v.switch_like[1] }}{% endif %}</td>
+      <td>{% if v.tracks %}{{ v.tracks[0] }} → {{ v.tracks[1] }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="tr-panel">
+  <h3>Suggestions</h3>
+  <p>Read off this trial. Proposals only — nothing applies itself.</p>
+  {% for rec in recommendations %}
+  <div class="tr-rec {{ rec.basis }}">
+    <span class="basis">{{ rec.basis }}</span>
+    {% if rec.field %}<strong>{{ rec.field }} → {{ rec.suggested }}</strong> · {% endif %}
+    {{ rec.reason }}
+  </div>
+  {% else %}
+  <p>Nothing to suggest — the trial looks clean at these settings.</p>
+  {% endfor %}
+</div>
+
+<div class="tr-panel">
+  <h3>Evidence</h3>
+  <p>Track <strong>births</strong> are outlined — each new id is a claim
+     worth checking (a phantom? a fragment? a real entrance?). The rest
+     is the clip's ordinary rhythm.</p>
+  <div class="tr-strip">
+    {% for m in report.moments %}
+    <figure class="{{ m.kind }}">
+      <img src="/media/tuning/{{ run_id }}/{{ m.file }}" loading="lazy">
+      <figcaption>t={{ m.t }}s · {{ m.kind }} · {{ m.detections }} det</figcaption>
+    </figure>
+    {% else %}
+    <p>No frames with detections.</p>
+    {% endfor %}
+  </div>
+  {% if report.video %}
+  <p style="margin-top:10px"><video src="/media/tuning/{{ run_id }}/{{ report.video }}" controls muted style="max-width:100%; border-radius:8px"></video></p>
+  {% endif %}
+</div>
+
+<div class="tr-panel">
+  <h3>Apply</h3>
+  <p>Snapshot first, revert from the Tuning page. Applying to a camera
+     writes the <em>minimal</em> override — only what differs from the
+     site — so later site-wide changes still reach it.</p>
+  <div class="tr-forms">
+    <form method="post" action="/detector/apply">
+      <input type="hidden" name="run_id" value="{{ run_id }}">
+      <input type="hidden" name="target" value="site">
+      <button class="tr-go">Apply to site</button>
+    </form>
+    <form method="post" action="/detector/apply" class="tr-forms">
+      <input type="hidden" name="run_id" value="{{ run_id }}">
+      <select name="target">
+        {% for cam in cameras %}<option value="{{ cam.id }}">{{ cam.name or cam.id }}</option>{% endfor %}
+      </select>
+      <button class="tr-go">Apply to camera</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

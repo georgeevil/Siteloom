@@ -100,7 +100,17 @@ def build_dispatcher(config: SiteConfig) -> JobDispatcher:
         dispatcher: JobDispatcher = LocalBackend()
     else:  # pragma: no cover — future backends
         raise ValueError(f"unknown backend {config.backend.kind!r}")
-    dispatcher.register("detection", DetectionModule(config.detection))
+    dispatcher.register("detection", DetectionModule(
+        config.detection,
+        # Effective per-camera settings (CLD-101), resolved here so the
+        # module keeps receiving plain DetectionConfigs. Only cameras
+        # that actually override anything get an entry.
+        per_camera={
+            cam.id: config.detection.for_camera(cam)
+            for cam in config.cameras
+            if cam.detection is not None
+        },
+    ))
     if config.identity.enabled:
         dispatcher.register(
             "identity", IdentityModule(config.identity, device=config.detection.device)

@@ -141,6 +141,39 @@ class CameraIdentityOverride(BaseModel):
         return values
 
 
+class DetectionOverride(BaseModel):
+    """Per-camera detection overrides (CLD-101) — only non-None apply.
+
+    The differences between cameras are not subtle: subject scale,
+    lighting, motion and clutter all vary by an order of magnitude, and
+    every confidence floor and tracker threshold is scale-dependent.
+    Same pattern as `EventRulesOverride`, resolved by
+    `DetectionConfig.for_camera`.
+
+    Deliberately absent, all for recorded reasons:
+    * `classes` — structural, like `class_groups`: it describes what the
+      site tracks, not how one camera sees it (CLD-101).
+    * `crop_margin` — not a setting but a migration: it changes the
+      embedding space, so varying it per camera would make one camera's
+      vectors incomparable with the rest of the site's (CLD-106).
+    * `device` — a property of the machine, never of a camera.
+
+    `model` IS overridable — the one hard camera that needs the larger
+    model is CLD-101's judgement call — but each distinct model is a
+    separately loaded network, so it costs memory per camera, not per
+    site.
+    """
+
+    model: str | None = None
+    confidence: float | None = None
+    class_confidence: dict[str, float] | None = None
+    #: Merged over the site tracker dict (which itself merges over
+    #: TRACKER_DEFAULTS) rather than replacing it — otherwise a camera
+    #: overriding one knob would silently drop the site's fuse_score.
+    tracker: dict[str, float | int | bool | str] | None = None
+    track_buffer_s: float | None = None
+
+
 class CameraConfig(BaseModel):
     id: str
     name: str = ""
@@ -163,6 +196,9 @@ class CameraConfig(BaseModel):
     events: "EventRulesOverride | None" = None
     # Per-camera identity gates — per-identifier similarity thresholds.
     identity: "CameraIdentityOverride | None" = None
+    # Per-camera detection overrides (CLD-101): confidence floors,
+    # tracker knobs, model. Resolved by DetectionConfig.for_camera.
+    detection: DetectionOverride | None = None
 
 
 class UniFiConfig(BaseModel):
@@ -243,6 +279,27 @@ class DetectionConfig(BaseModel):
         "cat",
         "bird",
     ]
+
+    def for_camera(self, camera: "CameraConfig") -> "DetectionConfig":
+        """Effective detection settings for one camera (CLD-101).
+
+        Site defaults + the camera's `DetectionOverride`; shared by the
+        live pipeline, the tuning lab and the tracker harness so no two
+        surfaces can disagree about what a camera actually runs.
+        `tracker` merges (over the site dict, which merges over
+        TRACKER_DEFAULTS); every other non-None field replaces.
+        """
+        if camera.detection is None:
+            return self
+        merged = self.model_copy(deep=True)
+        for field, value in camera.detection.model_dump().items():
+            if value is None:
+                continue
+            if field == "tracker":
+                merged.tracker = {**merged.tracker, **value}
+            else:
+                setattr(merged, field, value)
+        return merged
 
 
 class EventConfig(BaseModel):

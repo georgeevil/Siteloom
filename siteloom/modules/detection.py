@@ -122,25 +122,42 @@ def tracker_config_path(
 
 
 class DetectionModule:
-    def __init__(self, cfg: DetectionConfig | None = None):
+    def __init__(
+        self,
+        cfg: DetectionConfig | None = None,
+        per_camera: dict[str, DetectionConfig] | None = None,
+    ):
         self.cfg = cfg or DetectionConfig()
+        # Already-resolved effective configs for cameras that carry a
+        # DetectionOverride (CLD-101), keyed by camera id. Resolved by
+        # the caller (`DetectionConfig.for_camera`) rather than here, so
+        # this module keeps knowing nothing about CameraConfig — it
+        # receives plain DetectionConfigs either way.
+        self._per_camera = per_camera or {}
         # One YOLO instance per camera: ultralytics keeps ByteTrack state
         # on the predictor, so sharing one instance across cameras would
         # tangle their track IDs. The nano model is small enough that a
         # per-camera copy is cheap, and each stays warm-loaded (the Ray
-        # actor pattern, PRD §7).
+        # actor pattern, PRD §7) — which is also what makes a per-camera
+        # `model` override just another entry here rather than a special
+        # case.
         self._models: dict[str, Any] = {}
-        # Keyed by the payload's sample_fps: the buffer length is derived
-        # from it, so two cameras sampled at different rates need
-        # different materialized files. Constant per camera, so the path
-        # handed to model.track never changes under a live tracker.
-        self._tracker_paths: dict[float | None, Path] = {}
+        # Keyed by (camera, sample_fps): the buffer length is derived
+        # from the fps and the rest of the tracker dict may differ per
+        # camera. Constant per camera, so the path handed to model.track
+        # never changes under a live tracker. Distinct cameras with
+        # identical settings hash to the same file on disk.
+        self._tracker_paths: dict[tuple[str, float | None], Path] = {}
 
-    def _tracker_for(self, sample_fps: float | None) -> Path:
-        path = self._tracker_paths.get(sample_fps)
+    def _cfg_for(self, camera_id: str) -> DetectionConfig:
+        return self._per_camera.get(camera_id, self.cfg)
+
+    def _tracker_for(self, camera_id: str, sample_fps: float | None) -> Path:
+        key = (camera_id, sample_fps)
+        path = self._tracker_paths.get(key)
         if path is None:
-            path = tracker_config_path(self.cfg, sample_fps)
-            self._tracker_paths[sample_fps] = path
+            path = tracker_config_path(self._cfg_for(camera_id), sample_fps)
+            self._tracker_paths[key] = path
         return path
 
     def _model_for(self, camera_id: str):
@@ -148,7 +165,7 @@ class DetectionModule:
         if model is None:
             from ultralytics import YOLO
 
-            model = YOLO(self.cfg.model)
+            model = YOLO(self._cfg_for(camera_id).model)
             self._models[camera_id] = model
         return model
 
@@ -161,26 +178,27 @@ class DetectionModule:
             raise ValueError("could not decode image_jpeg")
 
         camera_id = payload["camera_id"]
+        cfg = self._cfg_for(camera_id)
         model = self._model_for(camera_id)
         # Run the detector at the lowest applicable threshold; per-class
         # minimums are applied to its output below. (YOLO's conf is a
         # single global floor.)
         floor = min(
-            [self.cfg.confidence, *self.cfg.class_confidence.values()]
+            [cfg.confidence, *cfg.class_confidence.values()]
         )
         results = model.track(
             image,
             persist=True,
             conf=floor,
-            device=self.cfg.device,
-            tracker=str(self._tracker_for(payload.get("sample_fps"))),
+            device=cfg.device,
+            tracker=str(self._tracker_for(camera_id, payload.get("sample_fps"))),
             verbose=False,
         )
 
         h, w = image.shape[:2]
         zones = payload.get("zones") or []
         require_zone = bool(payload.get("require_zone")) and bool(zones)
-        wanted = set(self.cfg.classes)
+        wanted = set(cfg.classes)
 
         detections: list[dict[str, Any]] = []
         result = results[0]
@@ -194,8 +212,8 @@ class DetectionModule:
             if class_name not in wanted:
                 continue
             confidence = float(boxes.conf[i])
-            if confidence < self.cfg.class_confidence.get(
-                class_name, self.cfg.confidence
+            if confidence < cfg.class_confidence.get(
+                class_name, cfg.confidence
             ):
                 continue
             x1, y1, x2, y2 = (float(v) for v in boxes.xyxy[i])
@@ -206,7 +224,7 @@ class DetectionModule:
                 continue
 
             cx1, cy1, cx2, cy2 = expand_box(
-                (x1, y1, x2, y2), self.cfg.crop_margin, w, h
+                (x1, y1, x2, y2), cfg.crop_margin, w, h
             )
             crop = image[cy1:cy2, cx1:cx2]
             crop_jpeg = None

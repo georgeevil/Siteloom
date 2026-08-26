@@ -2414,6 +2414,12 @@ def create_app(config: SiteConfig, recognition_service=None) -> FastAPI:
     app.state.live_hub = hub
     app.router.on_shutdown.append(hub.stop)
 
+    # Registered after the hub exists: the tuning lab's live preview
+    # draws candidate settings on the hub's shared reader.
+    from siteloom.web import detector_routes
+
+    detector_routes.register(app, templates, Session, config, hub)
+
     @app.get("/live", response_class=HTMLResponse)
     def live(request: Request):
         return templates.TemplateResponse(

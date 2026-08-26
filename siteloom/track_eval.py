@@ -288,20 +288,10 @@ def compare(baseline: TrackingReport, candidate: TrackingReport) -> dict[str, ob
             + len(r.post_occlusion_births)
         )
 
-    fewer_switches = switch_like(candidate) < switch_like(baseline)
-    no_worse_switches = switch_like(candidate) <= switch_like(baseline)
-    # 25% more tracks for the same footage is fragmentation, not nuance.
-    fragmented = candidate.tracks > baseline.tracks * 1.25
-    less_fragmented = candidate.tracks < baseline.tracks
-
-    if fragmented:
-        verdict = "rejected: bought it with fragmentation"
-    elif fewer_switches or (no_worse_switches and less_fragmented):
-        verdict = "better"
-    elif no_worse_switches and candidate.tracks == baseline.tracks:
-        verdict = "no change"
-    else:
-        verdict = "worse"
+    verdict = verdict_from_counts(
+        switch_like(baseline), baseline.tracks,
+        switch_like(candidate), candidate.tracks,
+    )
 
     return {
         "verdict": verdict,
@@ -316,3 +306,26 @@ def compare(baseline: TrackingReport, candidate: TrackingReport) -> dict[str, ob
         "tracks": (baseline.tracks, candidate.tracks),
         "detection_rate": (baseline.detection_rate, candidate.detection_rate),
     }
+
+
+def verdict_from_counts(
+    base_switch_like: int, base_tracks: int,
+    cand_switch_like: int, cand_tracks: int,
+) -> str:
+    """The verdict arithmetic, on bare counts — shared with the tuning
+    lab, which compares persisted report dicts rather than live
+    TrackingReports, so the two surfaces cannot rule differently on the
+    same numbers."""
+    fewer_switches = cand_switch_like < base_switch_like
+    no_worse_switches = cand_switch_like <= base_switch_like
+    # 25% more tracks for the same footage is fragmentation, not nuance.
+    fragmented = cand_tracks > base_tracks * 1.25
+    less_fragmented = cand_tracks < base_tracks
+
+    if fragmented:
+        return "rejected: bought it with fragmentation"
+    if fewer_switches or (no_worse_switches and less_fragmented):
+        return "better"
+    if no_worse_switches and cand_tracks == base_tracks:
+        return "no change"
+    return "worse"

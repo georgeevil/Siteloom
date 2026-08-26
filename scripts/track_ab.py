@@ -100,12 +100,18 @@ def fetch(corpus: dict, config_path: str) -> int:
 # -- run ------------------------------------------------------------------
 
 
-def detection_config(base_config: str, tracker: dict):
+def detection_config(base_config: str, tracker: dict, camera_id: str | None = None):
     from siteloom.config import load_config
 
-    cfg = load_config(base_config).detection
+    site = load_config(base_config)
+    # The clip's camera's *effective* settings (CLD-101): a per-camera
+    # override is part of what "shipped" means for that camera, and a
+    # harness that ignored it would grade a config no camera runs.
+    camera = next((c for c in site.cameras if c.id == camera_id), None)
+    cfg = site.detection.for_camera(camera) if camera else site.detection
     # fuse_score must stay off at our sampling rate (CLD-5) regardless of
     # what a variant sets, unless the variant is explicitly testing it.
+    cfg = cfg.model_copy(deep=True)
     cfg.tracker = {"fuse_score": False, **cfg.tracker, **tracker}
     return cfg
 
@@ -201,7 +207,7 @@ def run(corpus: dict, config_path: str, only: str | None, out_path: str | None) 
         for name, tracker in configs.items():
             try:
                 report = run_clip(
-                    clip, detection_config(config_path, tracker),
+                    clip, detection_config(config_path, tracker, clip["camera"]),
                     corpus.get("sample_fps", 5.0),
                     corpus.get("bridge_gap_s", 2.0),
                 )
@@ -258,7 +264,10 @@ def check(corpus: dict, config_path: str) -> int:
         if not expect:
             continue
         report = run_clip(
-            clip, detection_config(config_path, corpus["configs"]["shipped"]),
+            clip,
+            detection_config(
+                config_path, corpus["configs"]["shipped"], clip["camera"]
+            ),
             corpus.get("sample_fps", 5.0), corpus.get("bridge_gap_s", 2.0),
         )
         print(line(clip["id"], report))
