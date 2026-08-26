@@ -273,15 +273,28 @@
 {% if snapshots %}
 <div class="dt-panel">
   <h3>Config history</h3>
-  <p>Every apply and copy snapshots <code>site.yaml</code> first. Revert
-     restores the file whole and re-applies the detection settings live;
-     anything else the snapshot differs in takes effect on restart.</p>
-  {% for name in snapshots %}
-  <form method="post" action="/detector/revert" style="display:inline-block; margin: 0 8px 6px 0">
-    <input type="hidden" name="snapshot" value="{{ name }}">
-    <button title="restore this snapshot">{{ name }}</button>
-  </form>
-  {% endfor %}
+  <p>Every apply and copy snapshots <code>site.yaml</code> first, with
+     who, when and why. Revert restores the file whole and re-applies the
+     detection settings live; anything else the snapshot differs in takes
+     effect on restart.</p>
+  <table class="dt-table">
+    <tr><th>snapshot</th><th>who</th><th>what changed after it</th><th>why</th><th></th></tr>
+    {% for snap in snapshots %}
+    <tr>
+      <td>{{ snap.name }}</td>
+      <td>{{ snap.meta.actor if snap.meta else '—' }}</td>
+      <td>{{ snap.meta.summary if snap.meta else '(pre-history snapshot)' }}</td>
+      <td>{{ snap.meta.reason if snap.meta and snap.meta.reason else '—' }}</td>
+      <td>
+        <form method="post" action="/detector/revert" style="display:flex; gap:6px">
+          <input type="hidden" name="snapshot" value="{{ snap.name }}">
+          <input name="reason" placeholder="why revert? (optional)" size="18" style="font-size:11px">
+          <button title="restore the config as it was before this change">revert to this</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
 </div>
 {% endif %}
 {% endblock %}

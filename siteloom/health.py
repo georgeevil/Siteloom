@@ -341,6 +341,50 @@ def check_vector_store(report: Report, config) -> None:
         report.add("vector store", FAIL, f"{path}: {type(exc).__name__}: {exc}")
 
 
+def check_embedding_space(report: Report, config) -> None:
+    """Do the stored vectors match the space the config would embed into?
+
+    A poisoning change (crop_margin, the face projection, an embedder
+    dimension — CLD-106) makes old and new vectors incomparable with no
+    error anywhere; the stamp inside the vector store dir is what makes
+    the drift visible. File reads only — no store client, no model
+    loads — so it is safe beside a running serve.
+    """
+    if not config.identity.enabled:
+        report.add("embedding space", OK, "identity disabled")
+        return
+    from siteloom.identity.space import compute_stamp, read_stamp, stamp_diff
+
+    recorded = read_stamp(config.identity.vector_db_path)
+    current = compute_stamp(config)
+    if recorded is None:
+        # Pre-stamp stores exist (every store predating CLD-106); their
+        # provenance is unknown, which is a warning, not a failure — and
+        # an empty/new store just hasn't been written to yet.
+        report.add(
+            "embedding space",
+            WARN,
+            "no embedding-space stamp — the vectors' settings provenance "
+            "is unknown",
+            "run `siteloom identity rebuild` (or /train's Vector store "
+            "panel) once to re-embed and stamp the store",
+        )
+        return
+    drifted = stamp_diff(recorded, current)
+    if drifted:
+        report.add(
+            "embedding space",
+            WARN,
+            "config no longer matches the space the vectors were built "
+            "in: " + "; ".join(drifted),
+            "new and stored vectors are incomparable — run `siteloom "
+            "identity rebuild` to re-embed from the stored crops "
+            "(labels survive; recognition is degraded until it finishes)",
+        )
+        return
+    report.add("embedding space", OK, "vectors match the configured settings")
+
+
 def check_detection_model(report: Report, config) -> None:
     model = Path(config.detection.model)
     if model.exists():
@@ -608,6 +652,7 @@ CHECKS = [
     check_database,
     check_media_dir,
     check_vector_store,
+    check_embedding_space,
     check_detection_model,
     check_face_models,
     check_plate_ocr,

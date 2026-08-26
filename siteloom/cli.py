@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 
 from siteloom.cli_users import users_app
+from siteloom.cli_identity import identity_app
 from siteloom.cli_lab import lab_app
 from siteloom.cli_service import service_app
 from siteloom.cli_library import (
@@ -29,6 +30,7 @@ app.add_typer(jobs_app, name="jobs")
 app.add_typer(users_app, name="users")
 app.add_typer(service_app, name="service")
 app.add_typer(lab_app, name="lab")
+app.add_typer(identity_app, name="identity")
 
 events_app = typer.Typer(help="Event maintenance.")
 app.add_typer(events_app, name="events")

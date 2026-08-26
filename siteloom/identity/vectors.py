@@ -351,6 +351,35 @@ class VectorStore:
             self._client.delete_collection(collection)
 
     @_locked
+    def collection_names(self) -> list[str]:
+        """Every collection in the store — the rebuild's worklist. The
+        store, not the config, is the authority on what exists: auto-
+        added classes and pending pools are collections no config lists."""
+        return sorted(c.name for c in self._client.get_collections().collections)
+
+    @_locked
+    def scroll_all(self, collection: str) -> list:
+        """Every point in a collection, payloads included — the
+        embedding-space rebuild's provenance read (CLD-106). Paged, so a
+        collection larger than one scroll window is read whole rather
+        than silently truncated."""
+        if not self._client.collection_exists(collection):
+            return []
+        points: list = []
+        offset = None
+        while True:
+            batch, offset = self._client.scroll(
+                collection_name=collection,
+                limit=1024,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points.extend(batch)
+            if offset is None:
+                return points
+
+    @_locked
     def delete_identity(self, collection: str, identity_id: int) -> None:
         """Remove every vector belonging to an identity — used when
         identities are merged or split."""

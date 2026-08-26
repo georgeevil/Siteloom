@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Rebuild vectors{% endblock %}
+{% block subtitle %}the warning before the change, with the honest numbers{% endblock %}
+
+{#
+  CLD-106's confirm step: the operator sees exactly what a rebuild costs
+  — including what cannot come back — BEFORE anything is dropped.
+#}
+
+{% block content %}
+<style>
+  .rb-panel { background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; max-width: 86ch; }
+  .rb-panel h3 { margin: 0 0 6px; font-size: 13px; }
+  .rb-panel p { font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+  .rb-num { font-size: 15px; color: var(--text); font-weight: 600; }
+  .rb-go { padding: 8px 16px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; border: 1px solid transparent; background: oklch(0.55 0.15 30); color: white; }
+</style>
+
+<div class="rb-panel">
+  <h3>What a rebuild does</h3>
+  <p>
+    Drops <span class="rb-num">{{ plan.total_points }}</span> vectors
+    across <span class="rb-num">{{ plan.identities }}</span> identities,
+    then re-embeds <span class="rb-num">{{ plan.recoverable_points }}</span>
+    of them from their stored crops under the current settings.
+    <span class="rb-num">{{ plan.unrecoverable_points }}</span> vectors
+    have no crop on disk anywhere (API-enrolled, or predating crop
+    provenance) and <strong>cannot be recovered</strong>.
+  </p>
+  <p>
+    Names, identities and crops all survive — vectors are derived data.
+    While the rebuild runs, identities read as unenrolled and recognition
+    is degraded; an interrupted rebuild resumes
+    (<code>siteloom identity rebuild --resume</code>) and never leaves a
+    mixed-space gallery behind.
+  </p>
+  {% if drifted %}
+  <p>Rebuilding because the configuration drifted from the stored space:
+     {{ drifted | join('; ') }}.</p>
+  {% elif not stamped %}
+  <p>Rebuilding to stamp a store whose settings provenance is unknown.</p>
+  {% else %}
+  <p>The store already matches the configuration — a rebuild now changes
+     vectors' provenance stamp only. Usually unnecessary.</p>
+  {% endif %}
+</div>
+
+<div class="rb-panel">
+  {% if running %}
+  <p>Another training job is running — wait for it on <a href="/jobs">Jobs</a>.</p>
+  {% else %}
+  <form method="post" action="/train/rebuild-vectors">
+    <button class="rb-go">Drop and rebuild {{ plan.total_points }} vectors</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

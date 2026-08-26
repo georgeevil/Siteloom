@@ -249,3 +249,38 @@ def test_the_run_review_says_what_would_change(env):
     assert "Nothing was detected" in body            # plain summary, empty run
     assert "would change" in body
     assert "0.9" in body and "0.4" in body           # after and now
+
+
+# -- history metadata (CLD-106) --------------------------------------------
+
+
+def test_every_config_change_records_who_what_and_why(env):
+    run_id = fake_run(env, confidence=0.9)
+    env.post("/detector/apply",
+             data={"run_id": run_id, "target": "cam-a",
+                   "reason": "driveway churned all week"},
+             follow_redirects=False)
+    history = env.config_path.parent / "config-history"
+    metas = sorted(history.glob("site-*.meta.json"))
+    assert metas
+    meta = json.loads(metas[-1].read_text())
+    assert meta["actor"] == "(open)"          # the audit convention
+    assert meta["reason"] == "driveway churned all week"
+    assert "cam-a" in meta["summary"]
+    assert "confidence" in meta["summary"]    # the diff rides in the summary
+
+
+def test_a_revert_is_itself_a_recorded_revertable_change(env):
+    run_id = fake_run(env, confidence=0.9)
+    env.post("/detector/apply", data={"run_id": run_id, "target": "site"},
+             follow_redirects=False)
+    history = env.config_path.parent / "config-history"
+    first = sorted(p.name for p in history.glob("site-*.yaml"))[-1]
+    env.post("/detector/revert", data={"snapshot": first, "reason": "nope"},
+             follow_redirects=False)
+    metas = [json.loads(p.read_text())
+             for p in sorted(history.glob("site-*.meta.json"))]
+    assert any("reverted to" in m["summary"] for m in metas)
+    # The history panel shows the trail.
+    body = env.get("/detector").text
+    assert "reverted to" in body

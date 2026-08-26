@@ -593,6 +593,18 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
             backlog = enrolment_backlog(session)
             runs = run_rows(session, config)
             detector = detector_readiness(session)
+        # The embedding-space stamp (CLD-106): file reads only, so the
+        # page stays cheap — the plan's full counts live on the confirm
+        # step, which may legitimately 503 while the store is held.
+        from siteloom.identity.space import compute_stamp, read_stamp, stamp_diff
+
+        recorded = read_stamp(config.identity.vector_db_path)
+        space = {
+            "stamped": recorded is not None,
+            "drifted": (
+                stamp_diff(recorded, compute_stamp(config)) if recorded else []
+            ),
+        }
         return templates.TemplateResponse(
             request,
             "train.html",
@@ -601,6 +613,7 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
                 backlog=backlog,
                 runs=runs,
                 detector=detector,
+                space=space,
                 projection=active_projection(config),
                 face_threshold=_face_threshold(),
                 max_vectors=_max_vectors(),
@@ -615,6 +628,70 @@ def register(app, templates, Session, config) -> None:  # noqa: C901 — route t
                 started=started if started in ("enrolment", "fine-tune") else None,
             ),
         )
+
+    @app.get("/train/rebuild-vectors")
+    def rebuild_confirm(request: Request):
+        """The warning BEFORE the change, with the honest numbers
+        (CLD-106): how many vectors across how many identities, and how
+        many have no crop anywhere and cannot come back."""
+        from siteloom.identity.rebuild import plan_rebuild
+        from siteloom.identity.space import compute_stamp, read_stamp, stamp_diff
+        from siteloom.web.identity_ops import shared_store
+
+        vectors = shared_store(config, "vector rebuild")
+        with Session() as session:
+            plan = plan_rebuild(session, vectors, config)
+        recorded = read_stamp(config.identity.vector_db_path)
+        return templates.TemplateResponse(
+            request, "train_rebuild.html", ctx(
+                plan=plan,
+                drifted=(
+                    stamp_diff(recorded, compute_stamp(config))
+                    if recorded else []
+                ),
+                stamped=recorded is not None,
+                running=_busy(),
+            ),
+        )
+
+    @app.post("/train/rebuild-vectors")
+    def start_rebuild():
+        """Reset-and-re-embed, in the serving process (CLD-106).
+
+        The store is resolved here, in the request, never in the worker
+        — the shared_store rule. One long job at a time, observed
+        through OperationRun like every other."""
+        from siteloom.web.identity_ops import shared_store
+
+        _refuse_if_busy()
+        vectors = shared_store(config, "vector rebuild")
+
+        def work():
+            from siteloom.identity.rebuild import run_rebuild
+            from siteloom.progress import ProgressReporter
+
+            try:
+                with ProgressReporter(
+                    Session,
+                    "identity-rebuild",
+                    target=str(config.identity.vector_db_path),
+                    bar=False,
+                    resume_command="siteloom identity rebuild --resume",
+                ) as progress:
+                    run_rebuild(
+                        Session, vectors, config, progress=progress
+                    )
+            except Exception:  # pragma: no cover — surfaced via OperationRun
+                log.exception("vector rebuild failed")
+            finally:
+                _train_state["thread"] = None
+
+        thread = threading.Thread(
+            target=work, name="siteloom-vector-rebuild", daemon=True
+        )
+        _train_state.update({"thread": thread, "kind": "vector rebuild"})
+        thread.start()
+        return RedirectResponse("/train", status_code=303)
 
     @app.post("/train/enroll")
     def start_enrolment():

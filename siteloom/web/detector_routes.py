@@ -334,30 +334,61 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         effective = type(base).model_validate(effective.model_dump())
         return effective, sample_fps, (", ".join(pieces) or "current settings")
 
-    def _snapshot() -> str | None:
-        """Copy site.yaml into config-history/ before a write â€” the
-        revertable record CLD-106 asks for. None when the config has no
-        file behind it (tests)."""
+    def _actor(request: Request | None) -> str:
+        """Who is acting â€” the audit trail's convention: the username,
+        or "(open)" in open single-operator mode."""
+        user = getattr(request.state, "user", None) if request else None
+        return user.username if user else "(open)"
+
+    def _snapshot(
+        request: Request | None = None, reason: str = "", summary: str = ""
+    ) -> str | None:
+        """Copy site.yaml into config-history/ before a write, with a
+        metadata sidecar â€” who, when, why, and what (CLD-106's history
+        rung). None when the config has no file behind it (tests)."""
         source = getattr(config, "_source_path", None)
         if not source or not Path(source).is_file():
             return None
         history = Path(source).parent / "config-history"
         history.mkdir(exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        # Microseconds in the name: two changes in the same second are
+        # two snapshots â€” a revert snapshots the pre-revert state, and a
+        # same-second collision would overwrite the very file being
+        # restored.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
         name = f"site-{stamp}.yaml"
         shutil.copy2(source, history / name)
+        (history / f"site-{stamp}.meta.json").write_text(json.dumps({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "actor": _actor(request),
+            "reason": (reason or "").strip(),
+            "summary": summary,
+        }, indent=2))
+        # Trimmed in pairs: a snapshot without its meta says "someone
+        # changed something", which is the state this sidecar removes.
         for stale in sorted(history.glob("site-*.yaml"))[:-SNAPSHOT_KEEP]:
             stale.unlink()
+            (history / f"{stale.stem}.meta.json").unlink(missing_ok=True)
         return name
 
-    def _snapshots() -> list[str]:
+    def _snapshots() -> list[dict]:
         source = getattr(config, "_source_path", None)
         if not source:
             return []
         history = Path(source).parent / "config-history"
         if not history.is_dir():
             return []
-        return sorted((p.name for p in history.glob("site-*.yaml")), reverse=True)
+        rows = []
+        for path in sorted(history.glob("site-*.yaml"), reverse=True):
+            meta = None
+            meta_path = history / f"{path.stem}.meta.json"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                except ValueError:
+                    meta = None
+            rows.append({"name": path.name, "meta": meta})
+        return rows
 
     def _persist() -> str | None:
         try:
@@ -678,12 +709,25 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
     # -- applying settings -------------------------------------------------
 
     @app.post("/detector/apply")
-    def apply_settings(run_id: str = Form(...), target: str = Form(...)):
+    def apply_settings(
+        request: Request,
+        run_id: str = Form(...),
+        target: str = Form(...),
+        reason: str = Form(""),
+    ):
         """Adopt a trial's settings â€” to the site, or as one camera's
         minimal override. Snapshot first, so it is revertable."""
         report = _run(run_id)
         settings = report.get("settings") or {}
-        _snapshot()
+        cam_for_diff = next(
+            (c for c in config.cameras if c.id == target), None
+        )
+        changed = [r["field"] for r in _settings_diff(settings, cam_for_diff)]
+        _snapshot(
+            request, reason,
+            f"applied trial {run_id} to {target}"
+            + (f" (changed: {', '.join(changed)})" if changed else " (no diff)"),
+        )
         if target == "site":
             det = config.detection
             det.model = settings.get("model", det.model)
@@ -707,9 +751,11 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
 
     @app.post("/detector/copy")
     def copy_settings(
+        request: Request,
         from_camera: str = Form(...),
         to_camera: str = Form(...),
         include_sample_fps: str = Form("0"),
+        reason: str = Form(""),
     ):
         """Carry one tuned camera's override to a sibling (CLD-106).
 
@@ -722,7 +768,11 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         dst = next((c for c in config.cameras if c.id == to_camera), None)
         if src is None or dst is None or src is dst:
             raise HTTPException(400, "pick two different configured cameras")
-        _snapshot()
+        _snapshot(
+            request, reason,
+            f"copied {from_camera}'s detection override to {to_camera}"
+            + (" with sample_fps" if include_sample_fps == "1" else ""),
+        )
         dst.detection = (
             src.detection.model_copy(deep=True) if src.detection else None
         )
@@ -732,17 +782,21 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         return RedirectResponse("/detector", status_code=303)
 
     @app.post("/detector/reset-camera")
-    def reset_camera(camera: str = Form(...)):
+    def reset_camera(
+        request: Request, camera: str = Form(...), reason: str = Form("")
+    ):
         cam = next((c for c in config.cameras if c.id == camera), None)
         if cam is None:
             raise HTTPException(400, f"{camera!r} is not a configured camera")
-        _snapshot()
+        _snapshot(request, reason, f"reset {camera} to the site defaults")
         cam.detection = None
         _persist()
         return RedirectResponse("/detector", status_code=303)
 
     @app.post("/detector/revert")
-    def revert(snapshot: str = Form(...)):
+    def revert(
+        request: Request, snapshot: str = Form(...), reason: str = Form("")
+    ):
         """Restore a config-history snapshot.
 
         The file is restored whole; the live process re-applies the
@@ -761,6 +815,9 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 â
         from siteloom.config import load_config
 
         restored = load_config(target)  # validated before anything applies
+        # Reverting is itself a change worth reverting â€” snapshot the
+        # pre-revert state before overwriting it.
+        _snapshot(request, reason, f"reverted to {target.name}")
         shutil.copy2(target, source)
         config.detection = restored.detection
         by_id = {c.id: c for c in restored.cameras}

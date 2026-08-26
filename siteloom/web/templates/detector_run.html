@@ -142,16 +142,18 @@
      writes the <em>minimal</em> override — only what differs from the
      site — so later site-wide changes still reach it.</p>
   <div class="tr-forms">
-    <form method="post" action="/detector/apply">
+    <form method="post" action="/detector/apply" class="tr-forms">
       <input type="hidden" name="run_id" value="{{ run_id }}">
       <input type="hidden" name="target" value="site">
+      <input name="reason" placeholder="why? (optional, kept in history)" size="24">
       <button class="tr-go">Apply to site</button>
     </form>
     <form method="post" action="/detector/apply" class="tr-forms">
       <input type="hidden" name="run_id" value="{{ run_id }}">
       <select name="target">
-        {% for cam in cameras %}<option value="{{ cam.id }}">{{ cam.name or cam.id }}</option>{% endfor %}
+        {% for cam in cameras %}<option value="{{ cam.id }}" {% if report_camera and report_camera.id == cam.id %}selected{% endif %}>{{ cam.name or cam.id }}</option>{% endfor %}
       </select>
+      <input name="reason" placeholder="why? (optional, kept in history)" size="24">
       <button class="tr-go">Apply to camera</button>
     </form>
   </div>
