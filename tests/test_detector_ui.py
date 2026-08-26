@@ -319,3 +319,48 @@ def test_resetting_the_night_profile_leaves_the_day_override(env):
              follow_redirects=False)
     assert env.config.cameras[0].night is None
     assert env.config.cameras[0].detection.confidence == 0.6
+
+
+# -- the settings search (CLD-102) -----------------------------------------
+
+
+def test_the_search_confirm_states_the_budget(env):
+    body = env.get("/detector/search?camera=cam-a").text
+    # No clips saved for this camera yet: the page says what to do, not
+    # a form error.
+    assert "needs clips" in body
+    body = env.get("/detector/search").text
+    assert "cam-a" in body  # camera picker
+
+
+def test_a_search_with_no_clips_is_refused(env):
+    resp = env.post("/detector/search", data={"camera": "cam-a"})
+    assert resp.status_code == 400
+    assert "at least one clip" in resp.text
+
+
+def test_a_proposal_page_shows_evidence_links_and_the_apply(env):
+    root = Path(env.config.storage.media_dir) / "tuning"
+    prop_dir = root / "proposals" / "cam-a" / "20260826-000000"
+    prop_dir.mkdir(parents=True)
+    (prop_dir / "proposal.json").write_text(json.dumps({
+        "camera": "cam-a", "clips": ["clip-a"],
+        "baseline_trials": {"clip-a": "run-base"},
+        "rounds": [{"round": 1, "clips": ["clip-a"], "standings": [
+            {"name": "preset:garden-foliage", "total": 1, "kept": True},
+        ]}],
+        "winner": {"name": "preset:garden-foliage",
+                   "overrides": {"confidence": 0.5}, "total": 1,
+                   "scores": {"clip-a": 1}, "trials": {"clip-a": "run-win"}},
+    }))
+    body = env.get("/detector/proposals/cam-a/20260826-000000").text
+    assert "preset:garden-foliage" in body
+    assert "/detector/runs/run-win?versus=run-base" in body  # evidence first
+    assert "Apply the proposal" in body
+    # ... and the hub lists it as waiting for review.
+    assert "Proposals waiting" in env.get("/detector").text
+
+
+def test_search_mutations_sit_on_the_admin_floor():
+    assert required_role("POST", "/detector/search") == "admin"
+    assert required_role("GET", "/detector/proposals/x/y") == "restricted"

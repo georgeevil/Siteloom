@@ -96,7 +96,20 @@
       <span>Open past runs, compare two over the same footage, and apply
         the one that looks right.</span>
     </a>
+    <a class="dt-card" href="/detector/search">
+      <strong>Search for better settings</strong>
+      <span>Try every named bundle against a camera's saved clips —
+        overnight-sized, cancellable, and it only ever <em>proposes</em>.</span>
+    </a>
   </div>
+  {% if proposals %}
+  <p style="margin-top:10px">
+    Proposals waiting for review:
+    {% for p in proposals %}
+    <a href="/detector/proposals/{{ p.camera }}/{{ p.stamp }}">{{ p.camera }} · {{ p.stamp }}{% if p.winner %} → {{ p.winner }}{% else %} (no winner){% endif %}</a>{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
 </div>
 
 <details class="dt-panel">

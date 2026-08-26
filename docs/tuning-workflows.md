@@ -68,6 +68,33 @@ export (see below).
 | "footage reads as night (IR)" | Colour-based recognition is weak here; the "Car park at night" card is the honest starting bundle. |
 | *measured* vs *heuristic* on a suggestion | *Measured* rules were proven on this site's own footage; *heuristic* ones are reasoned starting points. |
 
+## Workflow 4 — a camera that goes infrared at night
+
+Cameras look completely different in IR — colour vanishes, and the
+settings that win in daylight aren't the ones that win at night. If a
+trial's report says *"footage reads as night (IR)"*:
+
+1. Apply that trial to the camera's **night profile** (the apply
+   dropdown has a "— night profile" entry). Daytime settings stay
+   untouched.
+2. From then on the camera switches automatically: the system measures
+   each frame's colour and flips profiles when the footage actually goes
+   IR — never by the clock, so re-processing old footage stays correct.
+3. The "Car park at night" scene card is the honest starting bundle for
+   a night trial.
+
+## Workflow 5 — let the search look for you
+
+When you don't know which scene card fits: Tuning → **Search for better
+settings** → pick the camera and a few saved clips showing real
+activity. Every named bundle is tried; losers are dropped after one
+clip, survivors earn more, and the winner — if anything actually beats
+the current settings — appears under *Proposals waiting for review*
+with side-by-side evidence pictures. **It never applies itself**; "no
+winner" is a real answer meaning the camera is as tuned as those clips
+can show. Budget: expect an hour-plus of detector time, cancellable
+from Jobs.
+
 ## When the recorder refuses to export
 
 If a trial fails with a message about the NVR refusing the export: this

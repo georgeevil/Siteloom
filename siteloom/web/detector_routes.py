@@ -422,6 +422,7 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 �
             "site_detection": config.detection,
             "running": thread is not None and thread.is_alive(),
             "last": _state["last"],
+            "proposals": _proposals(),
             "preview": preview if preview and not _preview_expired(preview) else None,
             "snapshots": _snapshots()[:10],
             "error": None,
@@ -868,6 +869,176 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 �
                 cam.detection = by_id[cam.id].detection
                 cam.sample_fps = by_id[cam.id].sample_fps
         return RedirectResponse("/detector", status_code=303)
+
+    # -- the overnight search (CLD-102) ------------------------------------
+
+    def _proposals() -> list[dict]:
+        root = tuning_root / "proposals"
+        rows = []
+        if root.is_dir():
+            for path in root.glob("*/*/proposal.json"):
+                try:
+                    data = json.loads(path.read_text())
+                except ValueError:
+                    continue
+                rows.append({
+                    "camera": path.parent.parent.name,
+                    "stamp": path.parent.name,
+                    "winner": (data.get("winner") or {}).get("name"),
+                    "verdict": data.get("verdict"),
+                })
+        rows.sort(key=lambda r: r["stamp"], reverse=True)
+        return rows[:20]
+
+    @app.get("/detector/search")
+    def search_confirm(request: Request, camera: str = ""):
+        """The budget statement before the button: which clips, how many
+        trials, roughly how long — a search is hours of GPU an operator
+        should spend knowingly, not discover."""
+        cam = next((c for c in config.cameras if c.id == camera), None)
+        clips = [
+            name for name in _sources()
+            if cam is not None and name.startswith(f"{cam.id}-")
+        ]
+        cand_count = 0
+        if cam is not None:
+            from siteloom.tuning_search import candidates as _candidates
+
+            cand_count = len(_candidates(config.detection.for_camera(cam)))
+        # baselines + round1(all) + round2(half × 2 clips) + finals.
+        est_trials = (
+            len(clips) + cand_count + (cand_count // 2) * min(2, max(0, len(clips) - 1))
+            + max(1, cand_count // 4) * max(0, len(clips) - 3)
+        )
+        return templates.TemplateResponse(
+            request, "detector_search.html", {
+                "site_name": config.site_name or config.site_id,
+                "camera": cam,
+                "cameras": config.cameras,
+                "clips": clips,
+                "cand_count": cand_count,
+                "est_trials": est_trials,
+                "est_minutes": max(1, est_trials // 2),
+                "running": _state["thread"] is not None
+                and _state["thread"].is_alive(),
+            },
+        )
+
+    @app.post("/detector/search")
+    async def start_search(request: Request, camera: str = Form(...)):
+        """Run the propose-only search over this camera's clips.
+
+        Shares the trial slot — a search IS trials, and the GPU has one
+        consumer. Cancellable from /jobs; an interrupted search leaves
+        its trials (reusable evidence) and no proposal file — never a
+        half-claim."""
+        form = await request.form()
+        thread = _state["thread"]
+        if thread is not None and thread.is_alive():
+            return page(request, 409,
+                        error="A trial is already running. Wait for it to finish.")
+        cam = next((c for c in config.cameras if c.id == camera), None)
+        if cam is None:
+            raise HTTPException(400, f"{camera!r} is not a configured camera")
+        chosen = form.getlist("clips")
+        clip_paths = [_source_path(name) for name in chosen]
+        if not clip_paths:
+            raise HTTPException(
+                400,
+                "pick at least one clip — pull an NVR window or upload "
+                "footage from this camera first",
+            )
+        from siteloom.tuning_search import candidates as _candidates
+        from siteloom.tuning_search import successive_halving
+
+        base = config.detection.for_camera(cam)
+        cands = _candidates(base)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        out_dir = tuning_root / "proposals" / cam.id / stamp
+        _state["last"] = {
+            "run_id": None, "status": "running",
+            "summary": f"settings search, {len(cands)} candidates",
+            "source": f"{len(clip_paths)} clip(s) from {cam.id}",
+        }
+
+        def work():
+            from siteloom.progress import ProgressReporter
+
+            last = _state["last"]
+            seq = {"n": 0}
+            try:
+                with ProgressReporter(
+                    Session, "detector-search", target=cam.id,
+                    resume_command="(re-run from /detector/search)", bar=False,
+                ) as reporter:
+                    with reporter.phase("Searching"):
+                        def runner(clip, overrides, tag):
+                            seq["n"] += 1
+                            rid = f"{stamp}-search-{seq['n']:02d}"
+                            report = run_trial(
+                                clip, apply_overrides(base, overrides),
+                                cam.sample_fps, tuning_root / rid,
+                                group_for=config.events.group_for,
+                                label={"camera": cam.id, "profile": "day",
+                                       "candidate": tag, "search": stamp},
+                            )
+                            reporter.advance(trials=1)
+                            return rid, report
+
+                        proposal = successive_halving(
+                            clip_paths, cands, runner,
+                            check_interrupt=reporter.check_interrupt,
+                            log_round=lambda msg: reporter.bump(),
+                        )
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    (out_dir / "proposal.json").write_text(json.dumps({
+                        "camera": cam.id,
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "candidates": [c["name"] for c in cands],
+                        **proposal,
+                    }, indent=2))
+                last.update(status="complete")
+            except Exception as exc:  # pragma: no cover — via OperationRun
+                log.exception("settings search failed")
+                raw = f"{type(exc).__name__}: {exc}"
+                last.update(status="failed", error=raw,
+                            friendly=friendly_error(raw))
+            finally:
+                if last.get("status") == "running":
+                    last["status"] = "stopped"
+                _state["thread"] = None
+
+        thread = threading.Thread(
+            target=work, name="detector-search", daemon=True
+        )
+        _state["thread"] = thread
+        thread.start()
+        return RedirectResponse("/detector", status_code=303)
+
+    @app.get("/detector/proposals/{camera_id}/{stamp}")
+    def proposal_detail(request: Request, camera_id: str, stamp: str):
+        path = (
+            tuning_root / "proposals" / _safe_name(camera_id)
+            / _safe_name(stamp) / "proposal.json"
+        ).resolve()
+        if not path.is_relative_to(tuning_root.resolve()) or not path.is_file():
+            raise HTTPException(404)
+        proposal = json.loads(path.read_text())
+        winner = proposal.get("winner")
+        winner_run = None
+        if winner and winner.get("trials"):
+            winner_run = sorted(winner["trials"].values())[0]
+        cam = next((c for c in config.cameras if c.id == camera_id), None)
+        return templates.TemplateResponse(
+            request, "detector_proposal.html", {
+                "site_name": config.site_name or config.site_id,
+                "proposal": proposal,
+                "camera": cam,
+                "camera_id": camera_id,
+                "stamp": stamp,
+                "winner_run": winner_run,
+            },
+        )
 
     # -- live preview ------------------------------------------------------
 
