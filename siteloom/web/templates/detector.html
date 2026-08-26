@@ -43,24 +43,68 @@
   .dt-preview img { max-width: 100%; border-radius: 8px; border: 1px solid var(--hairline); }
 </style>
 
+<style>
+  .dt-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .dt-card { display: block; border: 1px solid var(--control-border); border-radius: 8px; padding: 14px 16px; text-decoration: none; color: inherit; font-size: 12.5px; line-height: 1.6; }
+  .dt-card:hover { border-color: var(--accent); }
+  .dt-card strong { display: block; font-size: 13.5px; margin-bottom: 4px; }
+  .dt-card span { color: var(--muted); }
+  .dt-fail { border-left: 3px solid oklch(0.6 0.15 30); padding: 6px 12px; font-size: 12.5px; line-height: 1.6; margin: 8px 0; }
+  .dt-fail details { margin-top: 4px; }
+  .dt-fail summary { font-size: 11px; color: var(--faint); cursor: pointer; }
+  .dt-fail pre { font-size: 10.5px; white-space: pre-wrap; color: var(--muted); }
+</style>
+
 <div class="dt-panel">
-  <h3>Run a trial</h3>
+  <h3>What do you want to do?</h3>
   <p>
-    Sandboxed: a trial reads footage, runs the detector+tracker with the
-    settings below, and writes a report with annotated evidence frames.
-    It creates no events, identifies nobody, and teaches nothing —
-    nothing changes until you apply a result.
+    Everything here is a rehearsal: trials read footage, draw what was
+    tracked, and change nothing — settings only move when you apply a
+    reviewed result. The <a href="/detector/help">workflow guide</a> has
+    worked examples.
   </p>
   {% if running %}
   <p><strong>A trial is running</strong> — watch it on <a href="/jobs">Jobs</a>.</p>
   {% endif %}
   {% if last and not running %}
-  <p>
-    Last trial: <strong>{{ last.status }}</strong> — {{ last.source }} ({{ last.summary }})
-    {% if last.status == 'complete' %}· <a href="/detector/runs/{{ last.run_id }}">open the report</a>{% endif %}
-    {% if last.error %}· {{ last.error }}{% endif %}
-  </p>
+    {% if last.status == 'failed' %}
+    <div class="dt-fail">
+      The last trial ({{ last.source }}) did not finish.
+      {% if last.friendly %}{{ last.friendly }}{% endif %}
+      <details><summary>technical detail</summary><pre>{{ last.error }}</pre></details>
+    </div>
+    {% else %}
+    <p>
+      Last trial: <strong>{{ last.status }}</strong> — {{ last.source }} ({{ last.summary }})
+      {% if last.status == 'complete' %}· <a href="/detector/runs/{{ last.run_id }}">open the report</a>{% endif %}
+    </p>
+    {% endif %}
   {% endif %}
+  <div class="dt-cards">
+    <a class="dt-card" href="/detector/tune">
+      <strong>Tune a camera from its own footage</strong>
+      <span>Pick a camera, a ten-minute window, and a scene description —
+        the trial shows what those settings would have tracked.</span>
+    </a>
+    <a class="dt-card" href="/detector/upload">
+      <strong>Try settings on a downloaded clip</strong>
+      <span>For a camera that isn't set up yet, or when the recorder
+        won't export — upload an MP4 and test against it.</span>
+    </a>
+    <a class="dt-card" href="#trials">
+      <strong>Review &amp; compare trials</strong>
+      <span>Open past runs, compare two over the same footage, and apply
+        the one that looks right.</span>
+    </a>
+  </div>
+</div>
+
+<details class="dt-panel">
+  <summary style="cursor:pointer; font-size:13px; font-weight:600">Advanced: run a trial with explicit settings</summary>
+  <p style="margin-top:8px">
+    The raw knobs, for when you know exactly what to try. Same sandbox,
+    same report.
+  </p>
   <form class="dt-form" method="post" action="/detector/run" enctype="multipart/form-data">
     <div class="dt-field">
       <span>source</span>
@@ -123,7 +167,7 @@
     <button class="dt-go" {% if running %}disabled{% endif %}>Run trial</button>
   </form>
   {% if error %}<p class="dt-error">{{ error }}</p>{% endif %}
-</div>
+</details>
 
 <div class="dt-panel" id="preview">
   <h3>Live preview</h3>
@@ -161,7 +205,7 @@
   {% endif %}
 </div>
 
-<div class="dt-panel">
+<div class="dt-panel" id="trials">
   <h3>Trials</h3>
   {% if runs %}
   <table class="dt-table">

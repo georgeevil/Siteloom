@@ -178,3 +178,74 @@ def test_run_detail_refuses_cross_source_comparison(env):
     resp = env.get(f"/detector/runs/{a}?versus=20260826-000002-b")
     assert resp.status_code == 400
     assert "same source" in resp.text
+
+
+# -- the guided workflows (W1) ---------------------------------------------
+
+
+def test_the_wizard_opens_on_camera_cards(env):
+    body = env.get("/detector/tune").text
+    assert "Which camera?" in body
+    assert "cam-a" in body
+    assert "runs the site defaults" in body  # provenance at the first step
+
+
+def test_a_non_unifi_camera_is_pointed_at_upload_not_a_form_error(env):
+    body = env.get("/detector/tune?camera=cam-a").text
+    assert "not a UniFi camera" in body
+    assert "/detector/upload" in body
+
+
+def test_the_settings_step_carries_the_footage_choice(env):
+    body = env.get(
+        "/detector/tune?camera=cam-a&step=settings&source_kind=clip&clip=x.mp4"
+    ).text
+    assert 'name="clip" value="x.mp4"' in body      # hidden field for the POST
+    assert "reasoned starting point" in body         # honest preset badges
+    assert "site default" in body                    # provenance table
+    assert "Lost-track patience" in body             # words, not track_buffer_s
+
+
+def test_the_upload_workflow_is_one_page(env):
+    body = env.get("/detector/upload").text
+    assert 'name="upload"' in body
+    assert "this footage is from" in body
+    assert "Keep current settings" in body
+
+
+def test_the_help_page_renders_the_workflow_doc(env):
+    body = env.get("/detector/help").text
+    assert "A trial changes nothing" in body
+    assert "Workflow 3" in body
+
+
+def test_a_failed_trial_shows_guidance_with_the_raw_behind_it(env):
+    from siteloom.web import detector_routes
+
+    raw = ("BadRequest: Request failed: https://x/proxy/protect/api/video/"
+           "export?camera=y - Status: 404 - Reason: 502")
+    old = detector_routes._state["last"]
+    detector_routes._state["last"] = {
+        "run_id": "x", "status": "failed", "summary": "s",
+        "source": "clip.mp4", "error": raw,
+        "friendly": __import__("siteloom.tuning", fromlist=["friendly_error"])
+        .friendly_error(raw),
+    }
+    try:
+        body = env.get("/detector").text
+        assert "restarting the UniFi Protect console" in body  # the guidance
+        assert "technical detail" in body                      # raw kept behind
+    finally:
+        detector_routes._state["last"] = old
+
+
+def test_the_run_review_says_what_would_change(env):
+    run_id = fake_run(env, confidence=0.9)
+    run_dir = Path(env.config.storage.media_dir) / "tuning" / run_id
+    report = json.loads((run_dir / "report.json").read_text())
+    report["camera"] = "cam-a"
+    (run_dir / "report.json").write_text(json.dumps(report))
+    body = env.get(f"/detector/runs/{run_id}").text
+    assert "Nothing was detected" in body            # plain summary, empty run
+    assert "would change" in body
+    assert "0.9" in body and "0.4" in body           # after and now

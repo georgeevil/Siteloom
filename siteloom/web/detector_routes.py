@@ -38,7 +38,7 @@ import re
 import shutil
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -51,6 +51,9 @@ from siteloom.tuning import (
     PRESETS,
     apply_overrides,
     compare_reports,
+    friendly_error,
+    plain_comparison,
+    plain_summary,
     recommend,
     run_trial,
 )
@@ -172,6 +175,80 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 �
             rows.append({
                 "camera": cam, "effective": eff, "overridden": overridden,
             })
+        return rows
+
+    #: The wizard's field vocabulary: label + plain meaning, in display
+    #: order. One list, so every screen names things the same way.
+    FIELD_WORDS = (
+        ("confidence", "Detection floor",
+         "how sure the detector must be before a box counts at all"),
+        ("sample_fps", "Frames per second",
+         "how often the stream is looked at — faster subjects need more"),
+        ("track_buffer_s", "Lost-track patience (seconds)",
+         "how long a subject may vanish before their track is given up"),
+        ("model", "Detector model",
+         "the network doing the looking; bigger sees smaller subjects"),
+    )
+
+    def field_provenance(cam) -> list[dict]:
+        """Each tunable field with its current value and where that
+        value comes from — the wizard's 'defaults to X from Y' labels.
+        Camera-agnostic when cam is None (the site row)."""
+        site = config.detection
+        eff = site.for_camera(cam) if cam is not None else site
+        overridden = (
+            {k for k, v in cam.detection.model_dump().items() if v is not None}
+            if cam is not None and cam.detection
+            else set()
+        )
+        where = (
+            f"override on {cam.name or cam.id}" if cam is not None else None
+        )
+        rows = []
+        for field, label, meaning in FIELD_WORDS:
+            if field == "sample_fps":
+                value = cam.sample_fps if cam is not None else 5.0
+                origin = (
+                    f"set on {cam.name or cam.id}" if cam is not None
+                    else "the usual default"
+                )
+            else:
+                value = getattr(eff, field)
+                origin = where if field in overridden else "site default"
+            rows.append({
+                "field": field, "label": label, "meaning": meaning,
+                "value": value, "origin": origin,
+            })
+        # The deliberately untunable ones, greyed out with their reason.
+        rows.append({
+            "field": None, "label": "Crop margin / classes / device",
+            "meaning": "not tunable here: crop margin changes the "
+                       "recognition vector space (a re-enrol event), and "
+                       "classes/device describe the site and the machine",
+            "value": None, "origin": "fixed",
+        })
+        return rows
+
+    def _settings_diff(settings: dict, cam) -> list[dict]:
+        """What applying a trial would actually change, against the
+        camera's (or site's) current effective values."""
+        site = config.detection
+        eff = site.for_camera(cam) if cam is not None else site
+        rows = []
+        for field in ("model", "confidence", "class_confidence",
+                      "track_buffer_s"):
+            new = settings.get(field)
+            cur = getattr(eff, field)
+            if new is not None and new != cur:
+                rows.append({"field": field, "current": cur, "new": new})
+        new_tracker = settings.get("tracker") or {}
+        for key, value in new_tracker.items():
+            if eff.tracker.get(key) != value:
+                rows.append({
+                    "field": f"tracker.{key}",
+                    "current": eff.tracker.get(key, "(library default)"),
+                    "new": value,
+                })
         return rows
 
     def parse_settings(form: dict, base) -> tuple:
@@ -319,6 +396,105 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 �
     def detector_page(request: Request):
         return page(request)
 
+    @app.get("/detector/tune")
+    def tune_wizard(
+        request: Request,
+        camera: str = "",
+        step: str = "",
+        source_kind: str = "nvr",
+        start: str = "",
+        end: str = "",
+        clip: str = "",
+    ):
+        """The guided path: camera → footage → settings, state in the
+        URL (bookmarkable, refresh-safe — the import-wizard rule). All
+        three steps submit to the existing POST /detector/run; the
+        wizard adds no mutation surface of its own."""
+        cam = next((c for c in config.cameras if c.id == camera), None)
+        if cam is None:
+            step = "camera"
+        elif step != "settings":
+            step = "footage"
+        camera_clips = [
+            name for name in _sources()
+            if cam is not None and name.startswith(f"{cam.id}-")
+        ]
+        from siteloom.localtime import site_zone
+
+        zone = site_zone(config)
+        now = datetime.now(timezone.utc)
+        now_local = now.astimezone(zone) if zone else now
+        return templates.TemplateResponse(
+            request, "detector_tune.html", {
+                "site_name": config.site_name or config.site_id,
+                "step": step,
+                "camera": cam,
+                "cameras": config.cameras,
+                "effective": _effective_rows(),
+                "presets": PRESETS,
+                "provenance": field_provenance(cam),
+                "camera_clips": camera_clips,
+                # Pre-filled "ten minutes, ending two minutes ago", in
+                # site wall time — the zone every datetime-local input on
+                # this site speaks (CLD-100). Not up-to-now: Protect
+                # often cannot export the newest minute or two.
+                "default_start": (now_local - timedelta(minutes=12))
+                .strftime("%Y-%m-%dT%H:%M:00"),
+                "default_end": (now_local - timedelta(minutes=2))
+                .strftime("%Y-%m-%dT%H:%M:00"),
+                # The footage step's choices, carried into the settings
+                # step as hidden fields for the final POST.
+                "chosen": {
+                    "source_kind": source_kind, "start": start,
+                    "end": end, "clip": clip,
+                },
+                "running": _state["thread"] is not None
+                and _state["thread"].is_alive(),
+            },
+        )
+
+    @app.get("/detector/help")
+    def workflow_guide(request: Request):
+        """The workflow reference, rendered from docs/tuning-workflows.md
+        — one source of truth for operators and the repo alike."""
+        from markdown_it import MarkdownIt
+
+        doc = Path(__file__).resolve().parents[2] / "docs" / "tuning-workflows.md"
+        if doc.is_file():
+            body = MarkdownIt().render(doc.read_text())
+        else:  # pragma: no cover — packaging without docs/
+            body = "<p>The workflow guide ships in docs/tuning-workflows.md.</p>"
+        return templates.TemplateResponse(
+            request, "detector_help.html", {
+                "site_name": config.site_name or config.site_id,
+                "body": body,
+            },
+        )
+
+    @app.get("/detector/upload")
+    def upload_wizard(request: Request, camera: str = ""):
+        """The downloaded-clip path: pick the file, say which camera the
+        footage came from (that choice is the settings base and the
+        later apply target), pick a scene, run."""
+        cam = next((c for c in config.cameras if c.id == camera), None)
+        return templates.TemplateResponse(
+            request, "detector_tune.html", {
+                "site_name": config.site_name or config.site_id,
+                "step": "upload",
+                "camera": cam,
+                "cameras": config.cameras,
+                "effective": _effective_rows(),
+                "presets": PRESETS,
+                "provenance": field_provenance(cam),
+                "camera_clips": [],
+                "default_start": "", "default_end": "",
+                "chosen": {"source_kind": "upload", "start": "", "end": "",
+                           "clip": ""},
+                "running": _state["thread"] is not None
+                and _state["thread"].is_alive(),
+            },
+        )
+
     @app.get("/detector/runs/{run_id}")
     def run_detail(request: Request, run_id: str, versus: str = ""):
         report = _run(run_id)
@@ -332,11 +508,22 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 �
                     "different footage answers a different question",
                 )
             comparison = compare_reports(other, report)
+        report_cam = next(
+            (c for c in config.cameras if c.id == report.get("camera")), None
+        )
         return templates.TemplateResponse(
             request, "detector_run.html", {
                 "site_name": config.site_name or config.site_id,
                 "run_id": run_id,
                 "report": report,
+                "summary": plain_summary(report),
+                "comparison_words": (
+                    plain_comparison(comparison) if comparison else None
+                ),
+                "would_change": _settings_diff(
+                    report.get("settings") or {}, report_cam
+                ),
+                "report_camera": report_cam,
                 "recommendations": recommend(report, report["sample_fps"]),
                 "cameras": config.cameras,
                 "same_source": [
@@ -465,12 +652,19 @@ def register(app, templates, Session, config, hub=None) -> None:  # noqa: C901 �
                             source, det_cfg, sample_fps, out_dir,
                             group_for=config.events.group_for,
                             progress=tick,
+                            label={"camera": cam.id if cam else None},
                         )
                 last.update(status="complete", frames=report["frames"],
                             groups=len(report["groups"]))
             except Exception as exc:  # pragma: no cover — via OperationRun
                 log.exception("detector trial failed")
-                last.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+                raw = f"{type(exc).__name__}: {exc}"
+                # The operator-facing sentence first; the raw text rides
+                # along behind a disclosure. A tuning-lab user is exactly
+                # who a bare uiprotect BadRequest means nothing to.
+                last.update(
+                    status="failed", error=raw, friendly=friendly_error(raw)
+                )
             finally:
                 if last.get("status") == "running":
                     last["status"] = "stopped"

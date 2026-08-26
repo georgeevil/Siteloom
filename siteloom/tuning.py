@@ -223,6 +223,7 @@ def run_trial(
     module: Any | None = None,
     group_for: Callable[[str], list[str]] | None = None,
     progress: Callable[[int, int], None] | None = None,
+    label: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one detector configuration over one video, sandboxed.
 
@@ -384,9 +385,136 @@ def run_trial(
         },
         "moments": moments,
         "video": video_out,
+        # Caller-supplied context the trial itself cannot know — the
+        # camera whose settings-base this was, chiefly, so the review
+        # page can diff against that camera's current config.
+        **(label or {}),
     }
     (out / "report.json").write_text(json.dumps(report, indent=2))
     return report
+
+
+#: Known failure texts → operator guidance. The raw text stays available
+#: behind a disclosure; this is the sentence that says what to *do*.
+#: Matched with re.search, case-insensitive, first hit wins.
+_FRIENDLY_ERRORS: tuple[tuple[str, str], ...] = (
+    (r"video/export.*Status:\s*404",
+     "The NVR refused to export this footage. In practice this clears "
+     "after restarting the UniFi Protect console; until then, download "
+     "the clip from Protect yourself and use the Upload workflow."),
+    (r"NotAuthorized|401|credentials|login",
+     "The NVR rejected the configured credentials — check the unifi "
+     "username/password in the site settings."),
+    (r"Connection refused|Cannot connect|timed out|TimeoutError|ClientConnectorError",
+     "Could not reach the NVR. Check that the Protect console is powered "
+     "on and reachable at the configured unifi host."),
+    (r"cannot open video",
+     "The video file could not be read — it may be a corrupt download or "
+     "a format this build cannot decode. Re-export it from Protect as "
+     "MP4 and upload again."),
+)
+
+
+def friendly_error(text: str) -> str | None:
+    """Operator guidance for a known failure, or None for the unknown.
+
+    The tuning lab's users are exactly the people a raw
+    `uiprotect.exceptions.BadRequest: ... Status: 404 - Reason: 502`
+    means nothing to — one of them hit that verbatim. The raw text is
+    never discarded (it goes behind a disclosure); this adds the
+    sentence that says what to do about it.
+    """
+    import re
+
+    for pattern, guidance in _FRIENDLY_ERRORS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return guidance
+    return None
+
+
+def _group_label(key: str, count: int) -> str:
+    """A class-group key as words: 'person' → people, the vehicle group
+    → vehicles, anything else as itself."""
+    if key == "person":
+        return "person" if count == 1 else "people"
+    if "car" in key.split("|"):
+        return "vehicle" if count == 1 else "vehicles"
+    base = key.replace("|", "/")
+    return base if count == 1 else f"{base}s"
+
+
+def plain_summary(report: dict[str, Any]) -> str:
+    """One sentence a non-technical operator can act on (CLD-102: the
+    numbers are the tie-breaker, not the message)."""
+    groups = report.get("groups", {})
+    scene = report.get("scene", {})
+    fps = report.get("sample_fps") or 1.0
+    seconds = round(report.get("frames", 0) / fps) if fps else 0
+
+    if not groups:
+        return (
+            f"Nothing was detected and tracked in this {seconds} s of "
+            "footage — either the scene was empty, or the confidence "
+            "floor is set above everything in it."
+        )
+
+    parts = []
+    for key, g in groups.items():
+        parts.append(f"{g['tracks']} {_group_label(key, g['tracks'])}")
+    sentence = f"Tracked {' and '.join(parts)} over {seconds} s"
+
+    issues = []
+    merged = sum(g["implausible_bridges"] for g in groups.values())
+    if merged:
+        issues.append(
+            f"{merged} place{'s' if merged != 1 else ''} where two "
+            "subjects may have been merged into one"
+        )
+    births = sum(
+        g["mid_occlusion_births"] + g["post_occlusion_births"]
+        for g in groups.values()
+    )
+    if births:
+        issues.append(
+            f"{births} place{'s' if births != 1 else ''} where one "
+            "subject may have been split or a phantom track appeared"
+        )
+    slow = [
+        key for key, g in groups.items()
+        if g["median_step_iou"] is not None and g["median_step_iou"] < 0.5
+    ]
+    if slow:
+        issues.append("the sampling looks too slow for how fast subjects move")
+    if issues:
+        sentence += "; " + "; ".join(issues)
+    else:
+        sentence += " with no tracking problems visible"
+    if scene.get("ir"):
+        sentence += ". The footage reads as night (IR)"
+    return sentence + "."
+
+
+_VERDICT_WORDS = {
+    "better": "does better (fewer mix-ups or fragments)",
+    "no change": "performs the same",
+    "worse": "does worse",
+    "rejected: bought it with fragmentation":
+        "only looks cleaner by splitting subjects into more tracks — rejected",
+    "only in one run": "only appears in one of the runs",
+}
+
+
+def plain_comparison(comparison: dict[str, Any]) -> str:
+    """The comparison verdicts as a sentence."""
+    if not comparison:
+        return "Neither run tracked anything, so there is nothing to compare."
+    parts = []
+    for key, v in comparison.items():
+        count = v.get("tracks", (0, 0))[-1] if v.get("tracks") else 2
+        label = _group_label(key, count)
+        words = _VERDICT_WORDS.get(v["verdict"], v["verdict"])
+        parts.append(f"for {label}, this run {words}")
+    return ("Compared with the other run: " + "; ".join(parts) + ".")
 
 
 def compare_reports(baseline: dict, candidate: dict) -> dict[str, Any]:

@@ -14,6 +14,9 @@ from siteloom.config import DetectionConfig
 from siteloom.tuning import (
     AXIS,
     PRESETS,
+    friendly_error,
+    plain_comparison,
+    plain_summary,
     apply_overrides,
     axis_overrides,
     compare_reports,
@@ -192,3 +195,60 @@ def test_compare_reports_uses_the_harness_verdict():
     assert compare_reports(base, fragmented)["person"]["verdict"].startswith(
         "rejected"
     )
+
+
+# -- operator-facing words -------------------------------------------------
+
+
+def test_the_nvr_export_failure_gets_guidance():
+    raw = ("BadRequest: Request failed: https://192.168.1.77/proxy/protect/"
+           "api/video/export?camera=x&start=1&end=2&channel=0 - "
+           "Status: 404 - Reason: 502")
+    words = friendly_error(raw)
+    assert words is not None
+    assert "Upload" in words  # the workaround, not just the diagnosis
+
+
+def test_unknown_failures_stay_unknown():
+    assert friendly_error("ZeroDivisionError: division by zero") is None
+
+
+def test_unreachable_nvr_names_the_host_setting():
+    assert "unifi" in friendly_error("ClientConnectorError: Connection refused")
+
+
+def test_plain_summary_reads_like_a_sentence():
+    words = plain_summary(report_with(
+        {"person": group(tracks=2), "car|truck": group(tracks=1)},
+    ))
+    assert "2 people" in words
+    assert "1 vehicle" in words
+    assert "no tracking problems" in words
+
+
+def test_plain_summary_names_the_failures_not_the_metrics():
+    r = report_with({"person": group(births=(1, 1))})
+    r["groups"]["person"]["implausible_bridges"] = 1
+    words = plain_summary(r)
+    assert "merged" in words and "split" in words
+    assert "bridge" not in words  # jargon stays out of the sentence
+
+
+def test_plain_summary_flags_ir_and_emptiness():
+    assert "night (IR)" in plain_summary(
+        report_with({"person": group()}, ir=True)
+    )
+    empty = plain_summary({"groups": {}, "scene": {}, "sample_fps": 5.0,
+                           "frames": 50})
+    assert "Nothing was detected" in empty
+
+
+def test_plain_comparison_translates_verdicts():
+    words = plain_comparison({
+        "person": {"verdict": "better", "tracks": (3, 2),
+                   "switch_like": (2, 0)},
+        "car|truck": {"verdict": "rejected: bought it with fragmentation",
+                      "tracks": (2, 9), "switch_like": (0, 0)},
+    })
+    assert "does better" in words
+    assert "splitting subjects into more tracks" in words

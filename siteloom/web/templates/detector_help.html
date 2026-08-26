@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Tuning guide{% endblock %}
+{% block subtitle %}worked workflows for tuning a camera, no jargon required{% endblock %}
+{% block content %}
+<style>
+  .th-doc { max-width: 86ch; font-size: 13px; line-height: 1.7; }
+  .th-doc h1 { font-size: 17px; margin: 0 0 10px; }
+  .th-doc h2 { font-size: 14.5px; margin: 22px 0 8px; }
+  .th-doc h3 { font-size: 13px; margin: 16px 0 6px; }
+  .th-doc p, .th-doc li { color: var(--muted); }
+  .th-doc strong { color: var(--text); }
+  .th-doc code { font-family: var(--font-mono); font-size: 11.5px; background: var(--raised); padding: 1px 5px; border-radius: 4px; }
+  .th-doc table { border-collapse: collapse; font-size: 12px; }
+  .th-doc th, .th-doc td { border-bottom: 1px solid var(--hairline); padding: 5px 12px 5px 0; text-align: left; }
+</style>
+<div class="th-doc">{{ body | safe }}</div>
+{% endblock %}

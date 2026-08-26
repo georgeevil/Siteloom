@@ -31,6 +31,25 @@
 </style>
 
 <div class="tr-panel">
+  <h3>What happened</h3>
+  <p style="font-size:13.5px; color:var(--text); max-width:86ch">{{ summary }}</p>
+  {% if would_change %}
+  <p>Applying this trial to
+     <strong>{{ report_camera.name or report_camera.id if report_camera else "the site" }}</strong>
+     would change:</p>
+  <table class="tr-table">
+    <tr><th>setting</th><th>now</th><th>after</th></tr>
+    {% for row in would_change %}
+    <tr><td>{{ row.field }}</td><td>{{ row.current }}</td><td><strong>{{ row.new }}</strong></td></tr>
+    {% endfor %}
+  </table>
+  {% elif report_camera %}
+  <p>These are {{ report_camera.name or report_camera.id }}'s current
+     settings — applying would change nothing.</p>
+  {% endif %}
+</div>
+
+<div class="tr-panel">
   <h3>Settings under trial</h3>
   <p>
     <code class="tr-set">model {{ report.settings.model }} · confidence {{ report.settings.confidence }}
@@ -69,6 +88,7 @@
   </form>
   {% endif %}
   {% if comparison %}
+  <p style="margin-top:8px; font-size:13px; color:var(--text)">{{ comparison_words }}</p>
   <table class="tr-table" style="margin-top:8px">
     <tr><th>group</th><th>verdict (them → this run)</th><th>switch-like</th><th>tracks</th></tr>
     {% for key, v in comparison.items() %}
