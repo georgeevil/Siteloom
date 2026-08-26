@@ -144,7 +144,10 @@ def register(app, templates, Session, config) -> None:
     from siteloom.localtime import site_zone
     from siteloom.web.app import _triage_url
 
-    nav.add("/bookings", "Bookings", "GB", after="/noise")
+    # A tab of Events, beside Noise: expected arrivals are context for
+    # the event stream, on the same read floor (what a restricted viewer
+    # may see of a booking is redaction's business, not the sidebar's).
+    nav.add("/bookings", "Bookings", "GB", tab_of="/")
 
     def _rows(session, bookings: list[Booking]) -> list[dict]:
         out = []

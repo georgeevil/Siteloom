@@ -38,41 +38,93 @@ class NavItem:
     label: str
     #: Two-letter code shown in the collapsed rail and on phones.
     code: str
+    #: The entry's screens as in-page sub-tabs, (href, label) pairs with
+    #: the entry's own screen among them. One sidebar row can own several
+    #: screens (Training owns labelling, the library, classes and
+    #: models); base.html renders the strip from this, once, instead of
+    #: every member template carrying its own copy. Empty means a
+    #: single-screen entry and no strip. Every tab must share the entry's
+    #: read floor — `items()` filters by the entry's href alone, so a tab
+    #: on a different floor would be advertised to a viewer whose floor
+    #: was never checked.
+    tabs: tuple[tuple[str, str], ...] = ()
+
+    @staticmethod
+    def owns(href: str, path: str) -> bool:
+        """Whether `path` is inside the section rooted at `href`.
+
+        "/" would prefix-match everything, so the root section owns
+        exactly the event screens instead. Every other section owns its
+        own path and anything beneath it — `/library/import` is inside
+        `/library`.
+        """
+        if href == "/":
+            return path == "/" or path.startswith("/events")
+        return path == href or path.startswith(href + "/")
 
     def active_for(self, path: str) -> bool:
-        """Whether `path` is inside this entry's section.
-
-        "/" would prefix-match everything, so the root entry owns exactly
-        the event screens instead. Every other entry owns its own path
-        and anything beneath it — `/library/import` lights up Library.
-        """
-        if self.href == "/":
-            return path == "/" or path.startswith("/events")
-        return path == self.href or path.startswith(self.href + "/")
+        """Whether `path` is inside this entry's section or any tab's."""
+        return self.owns(self.href, path) or any(
+            self.owns(href, path) for href, _ in self.tabs
+        )
 
 
-#: The screens the console shipped with, in sidebar order. Route modules
-#: split out of app.py append to this via `add()`.
+#: The screens the console shipped with, in sidebar order — grouped into
+#: workflow entries, not one row per screen (fourteen rows was a table of
+#: contents, not a navigation). Route modules split out of app.py attach
+#: their screens via `add()`, either as rows or as tabs of these.
 NAV: list[NavItem] = [
-    NavItem("/", "Events", "EV"),
+    NavItem(
+        "/",
+        "Events",
+        "EV",
+        tabs=(("/", "Events"), ("/noise", "Noise")),
+    ),
     NavItem("/live", "Live view", "LV"),
-    NavItem("/library", "Media library", "MD"),
     NavItem("/identities", "Identities", "ID"),
-    NavItem("/classes", "Classes", "CL"),
-    NavItem("/training", "Training data", "TR"),
+    NavItem(
+        "/training",
+        "Training",
+        "TR",
+        tabs=(
+            ("/training", "Training data"),
+            ("/library", "Media library"),
+            ("/classes", "Classes"),
+        ),
+    ),
     NavItem("/stats", "Accuracy", "AC"),
     NavItem("/jobs", "Jobs", "JB"),
-    NavItem("/noise", "Noise", "NO"),
 ]
 
 
-def add(href: str, label: str, code: str, after: str | None = None) -> None:
+def add(
+    href: str,
+    label: str,
+    code: str,
+    after: str | None = None,
+    tab_of: str | None = None,
+) -> None:
     """Register a screen in the sidebar, or update one already there.
 
     `after` names an existing href to sit behind; an unknown one (or
     None) appends, so an entry never vanishes because the screen it
     wanted to follow was removed.
+
+    `tab_of` names an entry to join as an in-page tab instead of taking a
+    row — the screen appends to that entry's strip (idempotently, for the
+    many apps one test process builds) and any row it held on its own is
+    dropped. The tab must share the entry's read floor (see
+    `NavItem.tabs`). An unknown parent falls through to a plain row,
+    for the same reason `after` does.
     """
+    if tab_of is not None:
+        for i, entry in enumerate(NAV):
+            if entry.href == tab_of:
+                tabs = entry.tabs or ((entry.href, entry.label),)
+                tabs = tuple(t for t in tabs if t[0] != href) + ((href, label),)
+                NAV[i] = NavItem(entry.href, entry.label, entry.code, tabs)
+                NAV[:] = [e for e in NAV if e.href != href]
+                return
     item = NavItem(href, label, code)
     existing = [i for i, e in enumerate(NAV) if e.href == href]
     if existing:

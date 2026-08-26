@@ -96,13 +96,30 @@
     flex: 0 0 122px; min-width: 0; padding: 4px; border-radius: 7px;
     border: 1px solid transparent; outline: none;
   }
+  /* A link is a claim about two images — the visit and the identity it
+     was matched to — so its tile holds both, side by side. Judging one
+     crop against a name was the old, unusable shape (a truncated
+     "unknown-pers…" answers nothing). */
+  .q-item.qlink { flex: 0 0 236px; }
   .q-item.q-cur, .q-item:focus { border-color: var(--accent); }
   .q-item .tile { cursor: pointer; }
+  .q-pair { display: flex; gap: 4px; }
+  .q-pair > * { flex: 1 1 0; min-width: 0; }
   .qlink figure {
     position: relative; margin: 0; aspect-ratio: 1; border-radius: 5px;
     overflow: hidden; background: oklch(0.2 0.008 250);
   }
   .qlink figure img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .q-tag {
+    position: absolute; top: 3px; left: 3px; padding: 1px 5px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 8.5px; text-transform: uppercase;
+    letter-spacing: .05em; background: oklch(0.16 0.01 250 / .72); color: var(--muted);
+  }
+  .q-noref {
+    display: flex; align-items: center; justify-content: center; height: 100%;
+    padding: 6px; text-align: center; font-size: 9.5px; color: var(--faint);
+    line-height: 1.4;
+  }
   .q-sim {
     position: absolute; bottom: 3px; left: 3px; font-family: var(--font-mono);
     font-size: 8.5px; color: var(--text);
@@ -373,6 +390,7 @@
   </aside>
 
   <section class="crops size-{{ view.size }}">
+    {% if not library_empty %}
     <div class="cropbar">
       <div class="chipstrip">
         {% for key, label in crop_filters.items() %}
@@ -396,6 +414,7 @@
         </span>
       </div>
     </div>
+    {% endif %}
 
     <div class="gridwrap" id="gridwrap">
       {# Today's queue (CLD-8). Selection lives in
@@ -429,11 +448,28 @@
             {% if it.kind == 'link' %}
             <div class="q-item qlink" data-qkind="link" tabindex="0"
                  data-event="{{ it.link.event_id }}" data-link="{{ it.link.id }}">
-              <figure>
-                <img src="/media/{{ it.link.event.best_crop_path }}" alt="" loading="lazy">
-                <span class="q-sim">sim {{ '%.2f' | format(it.link.similarity) }} &middot; thr {{ '%.2f' | format(it.threshold) }}</span>
-              </figure>
-              <div class="cap">
+              <div class="q-pair">
+                <a href="/events/{{ it.link.event_id }}" target="_blank" rel="noopener"
+                   title="Open event #{{ it.link.event_id }} in a new tab">
+                  <figure>
+                    <img src="/media/{{ it.link.event.best_crop_path }}" alt="" loading="lazy">
+                    <span class="q-tag">visit</span>
+                    <span class="q-sim">sim {{ '%.2f' | format(it.link.similarity) }} &middot; thr {{ '%.2f' | format(it.threshold) }}</span>
+                  </figure>
+                </a>
+                <a href="/identities/{{ it.link.identity_id }}" target="_blank" rel="noopener"
+                   title="Open {{ identity_name(it.link.identity) }} in a new tab">
+                  <figure>
+                    {% if it.ref_crop %}
+                    <img src="/media/{{ it.ref_crop }}" alt="" loading="lazy">
+                    {% else %}
+                    <span class="q-noref">no other sighting</span>
+                    {% endif %}
+                    <span class="q-tag">match</span>
+                  </figure>
+                </a>
+              </div>
+              <div class="cap" title="Event #{{ it.link.event_id }} matched to {{ identity_name(it.link.identity) }}">
                 <a href="/events/{{ it.link.event_id }}">#{{ it.link.event_id }}</a>
                 &middot; {{ identity_name(it.link.identity) }}
               </div>
@@ -504,10 +540,23 @@
           {% endif %}
         {% else %}
           <p class="empty">
-            No crops match this filter.
-            {% if view.show == 'needs_review' %}
+            {% if library_empty %}
+              {# Not a broken screen — this deployment simply has no photo
+                 library. Its training signal is the queue above and the
+                 identity screens, and saying so beats a filter bar over
+                 nothing. #}
+              This site has no imported photo library, so there are no
+              crops to review here — the grid, and the import workflow
+              behind it, light up after
+              <code>siteloom library add &lt;path&gt;</code> or a Takeout
+              import. Until then the training work on this site is the
+              queue above (borderline matches from the live cameras) and
+              naming people on <a href="/identities">Identities</a>.
+            {% elif view.show == 'needs_review' %}
+              No crops match this filter.
               Nothing is waiting on review here — try <a href="{{ nav_url(show='all') }}">All</a>.
             {% else %}
+              No crops match this filter.
               Index a library source to produce crops:
               <code>siteloom library scan</code> then <code>siteloom library index</code>.
             {% endif %}
@@ -541,6 +590,7 @@
     </div>
   </section>
 
+  {% if not library_empty %}
   <aside class="inspector" id="inspector" hidden>
     <div class="insp-head">
       <h2><span id="sel-count">0</span> selected</h2>
@@ -599,6 +649,7 @@
       </div>
     </div>
   </aside>
+  {% endif %}
 </div>
 
 <script>

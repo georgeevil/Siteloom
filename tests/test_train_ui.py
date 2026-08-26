@@ -616,12 +616,19 @@ def test_the_page_survives_an_empty_install(env):
     assert "base SFace" in body
 
 
-def test_models_is_its_own_sidebar_entry_beside_training_data(env):
+def test_models_shares_the_training_sidebar_entry(env):
+    """One sidebar entry, two screens (the CLD-94 split lives in the
+    routes, not in a second nav row). The entry stays lit on both pages,
+    and each page carries the in-page tab to the other."""
     body = env.client.get("/train").text
-    assert '<span class="sl-label">Models</span>' in body
-    # The labelling screen keeps its own name; conflating the two is what
-    # the split is for.
-    assert '<span class="sl-label">Training data</span>' in body
+    assert '<span class="sl-label">Training</span>' in body
+    # No separate Models entry any more.
+    assert '<span class="sl-label">Models</span>' not in body
+    # The Training entry is the active one while on /train.
+    assert 'class="sl-nav-item active"' in body
+    # Cross-links both ways.
+    assert 'href="/training"' in body
+    assert 'href="/train"' in env.client.get("/training").text
 
 
 # -- roles -----------------------------------------------------------------

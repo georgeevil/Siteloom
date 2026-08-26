@@ -391,3 +391,84 @@ def test_the_target_is_a_small_constant():
     """~20 is the ten-minute number the issue decided on; a config knob
     here would be an invitation to turn the habit into a shift."""
     assert DAILY_QUEUE_TARGET == 20
+
+
+# -- the reference crop: judging is a comparison ----------------------------
+
+
+def test_a_link_shows_the_identity_from_another_event(env):
+    """A link is a claim about two images. The visit's own crop cannot
+    answer for both sides of the comparison, so the entry carries a
+    reference crop of the claimed identity from a *different* event —
+    confirmed sightings first, and never one a human said is wrong."""
+    with env.Session() as s:
+        add_link(s, 20, 0.95)  # outside the band: not queued, but linkable
+        add_link(s, 30, 0.96)
+        s.commit()
+        s.get(EventIdentity, 20).verdict = "confirmed"
+        s.get(EventIdentity, 30).verdict = "wrong"
+        s.commit()
+        queue = daily_queue(s, env.config, DAY)
+    entry = next(e for e in queue["entries"] if e["kind"] == "link")
+    assert entry["ref_crop"] == "c/2026-08-01/e20.jpg"
+
+
+def test_the_reference_falls_back_to_the_identity_gallery_crop(env):
+    """An identity with no other linked event still shows *something*:
+    its own best-known crop, which for a first-sighting mint is the only
+    likeness the system has."""
+    with env.Session() as s:
+        # Leave link 1 (the queued one) as identity 1's only event.
+        s.delete(s.get(EventIdentity, 2))
+        s.delete(s.get(EventIdentity, 3))
+        s.get(Identity, 1).best_crop_path = "c/2026-08-01/gallery.jpg"
+        s.commit()
+        queue = daily_queue(s, env.config, DAY)
+    entry = next(e for e in queue["entries"] if e["kind"] == "link")
+    assert entry["ref_crop"] == "c/2026-08-01/gallery.jpg"
+
+
+def test_the_queue_markup_renders_the_pair(env):
+    """Visit and match, labelled, each clicking through to its screen."""
+    body = env.client.get("/training").text
+    assert ">visit</span>" in body
+    assert ">match</span>" in body
+    assert 'href="/identities/1"' in body
+
+
+# -- an event-fed site: the library chrome collapses ------------------------
+
+
+def test_an_event_fed_site_collapses_the_library_chrome(tmp_path, monkeypatch):
+    """No sources and no annotations means the filter chips, the crop
+    grid and the labelling inspector can never show anything — so they
+    are not rendered, the queue still is, and the empty state says where
+    this site's training signal actually lives."""
+    config, Session = make_env(tmp_path)
+    monkeypatch.setattr(library_routes, "_queue_today", lambda: DAY)
+    with Session() as s:
+        s.add(Camera(id="c", site_id="t", name="Cam"))
+        s.add(
+            Identity(
+                id=1,
+                identifier_key="vehicle",
+                class_name="car",
+                label="Kestrel Sedan",
+                first_seen=TS,
+                last_seen=TS,
+            )
+        )
+        add_link(s, 1, 0.84)
+        s.commit()
+    body = TestClient(create_app(config)).get("/training").text
+    assert 'id="inspector"' not in body
+    assert "no imported photo library" in body
+    assert 'data-link="1"' in body  # the queue is the screen now
+
+
+def test_a_site_with_a_library_keeps_the_chrome(env):
+    """The collapse is about absence, not emptiness: one source (or one
+    annotation) and the full labelling surface is back."""
+    body = env.client.get("/training").text
+    assert 'id="inspector"' in body
+    assert "no imported photo library" not in body

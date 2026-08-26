@@ -95,3 +95,71 @@ def test_an_unknown_anchor_appends_rather_than_dropping_the_entry():
         assert nav.items()[-1].href == "/probe"
     finally:
         nav.NAV[:] = [i for i in nav.NAV if i.href != "/probe"]
+
+
+# -- grouped entries: one row, several screens (tabs) ------------------------
+
+
+def test_every_tab_resolves_to_a_registered_route_and_renders(app):
+    """Tabs are sidebar links by another shape — the dead-link and
+    lost-feature failures apply to them unchanged."""
+    routes = {r.path for r in app.routes}
+    client = TestClient(app)
+    for item in nav.items():
+        for href, _ in item.tabs:
+            assert href in routes, f"tab with no route: {href}"
+            r = client.get(href)
+            assert r.status_code == 200, f"{href} -> {r.status_code}"
+
+
+def test_a_tab_screen_lights_its_entry_and_only_its_entry(app):
+    """/train is a screen of Training, /bookings of Events: each lights
+    exactly one sidebar row, and the strip marks the tab itself."""
+    client = TestClient(app)
+    for path, entry_label in (
+        ("/train", "Training"),
+        ("/plates", "Identities"),
+        ("/backfill", "Jobs"),
+        ("/bookings", "Events"),
+        ("/noise", "Events"),
+        ("/library", "Training"),
+        ("/classes", "Training"),
+    ):
+        body = client.get(path).text
+        assert body.count("sl-nav-item active") == 1, path
+        assert f'<span class="sl-label">{entry_label}</span>' in body, path
+        assert f'class="on" href="{path}"' in body, path
+
+
+def test_single_screen_entries_render_no_strip(app):
+    body = TestClient(app).get("/stats").text
+    assert '<nav class="sl-subtabs">' not in body
+
+
+def test_tab_of_attaches_without_taking_a_row():
+    """A screen registered as a tab joins its entry's strip and holds no
+    row of its own — idempotently, for the many apps one test process
+    builds."""
+    original = [i for i in nav.NAV if i.href == "/jobs"][0]
+    before = len(nav.items())
+    nav.add("/probe", "Probe", "PB", tab_of="/jobs")
+    nav.add("/probe", "Probe", "PB", tab_of="/jobs")
+    try:
+        assert len(nav.items()) == before
+        (jobs,) = [i for i in nav.NAV if i.href == "/jobs"]
+        assert jobs.tabs.count(("/probe", "Probe")) == 1
+        # The entry's own screen seeded the strip when it had none.
+        assert jobs.tabs[0] == ("/jobs", "Jobs")
+        assert jobs.active_for("/probe/deep")
+    finally:
+        nav.NAV[[i for i, e in enumerate(nav.NAV) if e.href == "/jobs"][0]] = original
+
+
+def test_an_unknown_tab_parent_falls_back_to_a_row():
+    """An entry never vanishes because the group it wanted was removed —
+    the same rule `after` follows."""
+    nav.add("/probe", "Probe", "PB", tab_of="/nonexistent")
+    try:
+        assert nav.items()[-1].href == "/probe"
+    finally:
+        nav.NAV[:] = [i for i in nav.NAV if i.href != "/probe"]

@@ -177,7 +177,10 @@ def clip_rows(session, cameras) -> list[dict]:
 
 
 def register(app, templates, Session, config) -> None:
-    nav.add("/backfill", "Backfill", "BF", after="/jobs")
+    # A tab of Jobs: watching runs and starting archive sweeps are one
+    # operations surface, on the same restricted-readable floor (neither
+    # is in RESTRICTED_DENIED_PREFIXES; mutations are admin either way).
+    nav.add("/backfill", "Backfill", "BF", tab_of="/jobs")
 
     def unifi_cameras():
         return [c for c in config.cameras if c.adapter == "unifi"]

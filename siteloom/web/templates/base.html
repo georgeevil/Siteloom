@@ -139,6 +139,22 @@
     main { flex: 1; overflow: auto; padding: 20px; animation: slrise 180ms ease; }
     /* Screens that own their own scrolling panes (triage, training data). */
     main.flush { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+    /* One sidebar row, several screens (nav.NavItem.tabs): the strip
+       between the header and the page, rendered here once. */
+    .sl-subtabs {
+      display: flex; gap: 6px; padding: 9px 20px; flex: 0 0 auto;
+      background: var(--toolbar); border-bottom: 1px solid var(--hairline);
+      overflow-x: auto;
+    }
+    .sl-subtabs a {
+      padding: 5px 12px; border-radius: 6px; font-size: 12.5px;
+      color: var(--muted); text-decoration: none;
+      border: 1px solid transparent; white-space: nowrap;
+    }
+    .sl-subtabs a:hover { color: var(--text); }
+    .sl-subtabs a.on {
+      background: var(--panel); border-color: var(--hairline); color: var(--text);
+    }
 
     /* Shared page styles (legacy classes used by the pre-console templates) */
     a { color: var(--accent); text-decoration: none; }
@@ -288,6 +304,16 @@
         <span class="sl-clock" id="sl-clock">--:--:--</span>
       </div>
     </header>
+    {# The active entry's screens, when it has more than one. Tabs share
+       their entry's read floor by rule (nav.NavItem.tabs), so the strip
+       needs no second role filter beyond the sidebar's own. #}
+    {% for item in nav_items(user) %}{% if item.tabs | length > 1 and item.active_for(path) %}
+    <nav class="sl-subtabs">
+      {% for t_href, t_label in item.tabs %}
+      <a class="{% if item.owns(t_href, path) %}on{% endif %}" href="{{ t_href }}">{{ t_label }}</a>
+      {% endfor %}
+    </nav>
+    {% endif %}{% endfor %}
     <main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
   </div>
   <script>

@@ -391,11 +391,17 @@ def test_the_sidebar_lists_only_what_the_viewer_may_open(env):
     middleware refuses with — so the two cannot disagree."""
     client = signed_in(env, "nina", "restricted")
     body = client.get("/").text
+    # Neither as a sidebar row nor as a tab of one: hiding the Training
+    # and Identities rows hides their strips with them.
     for label in ("Identities", "Media library", "Models", "Operators"):
         assert f">{label}</span>" not in body, label
+        assert f">{label}</a>" not in body, label
     # What it does keep: the queue it exists to work.
-    for label in ("Events", "Live view", "Noise"):
+    for label in ("Events", "Live view"):
         assert f">{label}</span>" in body, label
+    # Noise rides as a tab of the Events row now — same floor, same
+    # reachability, one row fewer.
+    assert ">Noise</a>" in body
 
 
 def test_every_entry_a_role_is_shown_actually_opens(env):

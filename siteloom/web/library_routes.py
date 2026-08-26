@@ -778,6 +778,40 @@ def daily_queue(session, config, day: date) -> dict:
             .all()
         }
 
+    def _reference_crop(link: EventIdentity) -> str | None:
+        """A crop of the claimed identity from a *different* event.
+
+        The queue asks "is this visit that identity?", and the visit's own
+        crop cannot answer for both sides of the comparison — least of all
+        when it is what set `Identity.best_crop_path`. Confirmed links
+        first, wrong ones never (a crop a human said is *not* this
+        identity is the one image that must not stand in for it); the
+        identity's own best crop is only the fallback for an identity with
+        no other linked event.
+        """
+        ref = session.execute(
+            select(Event.best_crop_path)
+            .join(EventIdentity, EventIdentity.event_id == Event.id)
+            .where(
+                EventIdentity.identity_id == link.identity_id,
+                EventIdentity.event_id != link.event_id,
+                EventIdentity.unlinked_at.is_(None),
+                or_(
+                    EventIdentity.verdict.is_(None),
+                    EventIdentity.verdict == "confirmed",
+                ),
+                Event.best_crop_path.is_not(None),
+            )
+            .order_by(
+                func.coalesce(EventIdentity.verdict == "confirmed", False).desc(),
+                EventIdentity.id.desc(),
+            )
+            .limit(1)
+        ).scalar()
+        if ref is None and link.identity is not None:
+            ref = link.identity.best_crop_path
+        return ref
+
     entries: list[dict] = []
     for link_id in link_ids:
         link = links_by_id.get(link_id)
@@ -787,6 +821,7 @@ def daily_queue(session, config, day: date) -> dict:
                     "kind": "link",
                     "link": link,
                     "threshold": _queue_threshold(config, link.identifier_key),
+                    "ref_crop": _reference_crop(link),
                 }
             )
     for annotation_id in named_ids + crop_ids:
@@ -2399,6 +2434,16 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 select(TrainingRun).order_by(TrainingRun.id.desc()).limit(10)
             ).all()
             sources = _source_progress(session)
+            # Whether the library workflow exists on this deployment at
+            # all: no sources registered and no annotation of any class
+            # ever written. The grid, its filter chips and the labelling
+            # inspector are that workflow's chrome; on an event-fed site
+            # they can only ever render empty, so the template collapses
+            # them and says where this site's training signal lives
+            # instead (the queue above, and /identities).
+            library_empty = not sources and not (
+                session.scalar(select(func.count()).select_from(Annotation)) or 0
+            )
             # Grouped here, not in the template: Jinja's groupby sorts by
             # the key, and proposed_name is nullable — comparing None with
             # str raises. Unnamed crops sort last under their own heading.
@@ -2473,6 +2518,7 @@ def register(app, templates, Session, config):  # noqa: C901 — route table
                 crop_filters=CROP_FILTERS,
                 crop_kinds=CROP_KINDS,
                 crop_total=crop_total,
+                library_empty=library_empty,
                 view={"show": show, "kind": kind, "group": group, "size": size},
                 identities=identities,
                 custom_classes=custom_classes,

@@ -538,7 +538,11 @@ def _save_config(config) -> str | None:
 
 
 def register(app, templates, Session, config) -> None:  # noqa: C901 — route table
-    nav.add("/train", "Models", "MO", after="/training")
+    # A tab of Training, not a row of its own — the CLD-94 split is kept
+    # in the routes, not spent on sidebar space. `/train` shares
+    # `/training`'s read floor (auth.RESTRICTED_DENIED_PREFIXES), which
+    # is what `NavItem.tabs` requires.
+    nav.add("/train", "Models", "MO", tab_of="/training")
 
     def ctx(**kw) -> dict:
         return {"site_name": config.site_name or config.site_id, **kw}

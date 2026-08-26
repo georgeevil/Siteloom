@@ -506,7 +506,10 @@ def test_an_admin_start_is_audited(tmp_path, monkeypatch):
 
 
 def test_the_screen_is_reachable_from_the_sidebar(tmp_path):
+    """As a tab of the Jobs row now — the link is in the strip, and the
+    Jobs entry is the one lit while here."""
     client, _, _ = build(tmp_path, [unifi("front")])
     body = client.get("/backfill").text
-    assert 'href="/backfill"' in body
-    assert ">BF<" in body
+    assert 'class="on" href="/backfill"' in body
+    assert '<span class="sl-label">Jobs</span>' in body
+    assert body.count("sl-nav-item active") == 1

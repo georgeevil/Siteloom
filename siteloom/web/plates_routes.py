@@ -703,7 +703,10 @@ def search_clause(q: str):
 def register(app, templates, Session, config) -> None:  # noqa: C901 — route table
     from siteloom.web.app import _more, _with_cursor
 
-    nav.add("/plates", "Plate reads", "PR", after="/stats")
+    # A tab of Identities: both are directories of who and what the site
+    # knows, and both sit on the same restricted-denied read floor —
+    # which is what lets one sidebar row stand for the pair.
+    nav.add("/plates", "Plate reads", "PR", tab_of="/identities")
 
     @app.get("/plates", response_class=HTMLResponse)
     def plates(
