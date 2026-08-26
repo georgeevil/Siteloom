@@ -222,6 +222,13 @@ class Detection(Base):
     color_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     color_min_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
     color_chroma_floor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Frame time when the identity pass actually ran for this row
+    # (CLD-286) — the backlog's idempotency marker. NULL means the row
+    # never went through an identity job (gated out, pre-column, or its
+    # event never earned significance), so an un-flip/re-flip (`events
+    # retag` both directions) cannot double-identify a row and inflate
+    # hit counts or re-learn duplicate vectors. Naive UTC (CLD-100).
+    identified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="detections")
 

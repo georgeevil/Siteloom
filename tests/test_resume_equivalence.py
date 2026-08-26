@@ -466,3 +466,63 @@ def test_restarted_ingest_merges_identity_fragments_like_a_clean_run(
     assert len(clean_snap["events"]) == 1
     assert clean_snap["events"][0][4] == 20
     assert len(clean_snap["links"]) == 1
+
+
+def test_restarted_ingest_backfills_warmup_identity_like_a_clean_run(
+    tmp_path, sample_video
+):
+    """The backlog pass (CLD-286) reads prior rows and their stored
+    crops, so it joins stitching and the identity merge in this harness:
+    clip1 carries only the event's warm-up — below min_detections, so the
+    process dies at the boundary with the event still ephemeral and its
+    rows unidentified — and the flip, and therefore the backlog, happens
+    in the resuming process, reading crops the dead process wrote."""
+    import os
+    import shutil
+
+    from test_ingest import SequenceDetector, StubIdentity, _det
+
+    from siteloom.dispatch import LocalBackend as LB
+    from siteloom.ingest import IngestService
+
+    box = (10.0, 10.0, 80.0, 120.0)
+    corpus = tmp_path / "clips"
+    corpus.mkdir()
+    clip1 = corpus / "a_clip1.mp4"
+    clip2 = corpus / "b_clip2.mp4"
+    shutil.copy(sample_video, clip1)
+    shutil.copy(sample_video, clip2)
+    base = 1_754_000_000
+    os.utime(clip1, (base, base))
+    os.utime(clip2, (base + 3, base + 3))
+
+    def make(config, clip_frames):
+        dispatcher = LB()
+        dispatcher.register("detection", SequenceDetector(clip_frames))
+        dispatcher.register("identity", StubIdentity())
+        return IngestService(config, dispatcher=dispatcher)
+
+    # Two detections on clip1's last samples: one below min_detections=3.
+    warmup = [[] for _ in range(8)] + [[_det(track_id=1, bbox=box)] for _ in range(2)]
+    rest = [[_det(track_id=7, bbox=box)] for _ in range(10)]
+
+    clean = make(
+        _ingest_config(tmp_path, "clean", corpus, identity=True), warmup + rest
+    )
+    clean.run_camera(clean.config.cameras[0])
+
+    half1 = make(_ingest_config(tmp_path, "split", clip1, identity=True), warmup)
+    half1.run_camera(half1.config.cameras[0])
+    resumed_config = _ingest_config(tmp_path, "split-resume", clip2, identity=True)
+    resumed_config.storage = half1.config.storage  # same database...
+    resumed_config.identity = half1.config.identity  # ...same vector store
+    half1.resolver.vectors.close()
+    half2 = make(resumed_config, rest)
+    half2.run_camera(half2.config.cameras[0])
+
+    clean_snap = _ingest_snapshot(clean.Session)
+    split_snap = _ingest_snapshot(half2.Session)
+    assert clean_snap == split_snap
+    # And the backlog actually ran: all 12 frames hit, warm-up included.
+    assert len(clean_snap["links"]) == 1
+    assert clean_snap["links"][0][3] == 12
