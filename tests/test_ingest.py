@@ -555,6 +555,80 @@ def test_backlog_replays_warmup_frames_in_order_at_the_flip(
         assert session.query(EventIdentity).one().hit_count == 5
 
 
+def test_backlog_is_capped_when_the_flip_was_delayed(
+    sample_video, tmp_path, monkeypatch
+):
+    """CLD-286: min_detections-1 rows is the usual backlog, but a flip
+    held back by min_duration_s (or min_confidence) can sit on far more —
+    the replay is capped, keeping the earliest rows (a departure's best
+    plate frames come first)."""
+    import siteloom.ingest as ingest_mod
+
+    monkeypatch.setattr(ingest_mod, "IDENTIFY_BACKLOG_MAX", 2)
+    frames = [[_det(track_id=1)] for _ in range(10)]
+    recorder = RecordingIdentity()
+    service = _identity_service(
+        sample_video,
+        tmp_path,
+        frames,
+        events_cfg=EventConfig(min_duration_s=1.0),
+        identity_module=recorder,
+    )
+    service.run_camera(service.config.cameras[0])
+    # At 5 fps the flip lands on frame 6 (1.0 s after first_seen): five
+    # warm-up rows are eligible, the cap keeps the earliest two, and
+    # frames 6-10 identify live.
+    assert len(recorder.crops) == 7
+    with service.Session() as session:
+        assert session.query(EventIdentity).one().hit_count == 7
+
+
+def test_backlog_skips_rows_whose_identity_job_already_ran(
+    sample_video, tmp_path
+):
+    """CLD-286: `events retag` can un-flip an event and a later frame
+    re-flip it — `identified_at` marks the rows already resolved, so a
+    second backlog pass replays nothing and hit counts stay honest."""
+    frames = [[_det(track_id=1)] for _ in range(5)]
+    recorder = RecordingIdentity()
+    service = _identity_service(
+        sample_video, tmp_path, frames, identity_module=recorder
+    )
+    cam = service.config.cameras[0]
+    service.run_camera(cam)
+    assert len(recorder.crops) == 5
+    with service.Session() as session:
+        rows = session.query(Detection).order_by(Detection.timestamp).all()
+        assert all(r.identified_at is not None for r in rows)
+        event = session.query(Event).one()
+        # What a re-flip would run: the pass finds every row stamped.
+        service._identify_backlog(session, cam, event, rows[-1], service._rules_for(cam))
+    assert len(recorder.crops) == 5
+
+
+def test_two_trackless_detections_in_one_frame_keep_their_own_crops(
+    sample_video, tmp_path
+):
+    """Two same-class detections with no track id share timestamp, class
+    and track ('None') in the crop filename — without the per-frame
+    sequence suffix the second overwrites the first, and the backlog pass
+    (CLD-286) would then embed the wrong subject's pixels."""
+    a = _det(track_id=None, bbox=(10.0, 10.0, 80.0, 120.0))
+    a["crop_jpeg"] = b"\xff\xd8subjectA"
+    b = _det(track_id=None, bbox=(600.0, 400.0, 700.0, 560.0))
+    b["crop_jpeg"] = b"\xff\xd8subjectB"
+    service = _sequence_service(sample_video, tmp_path, [[a, b]])
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        rows = session.query(Detection).order_by(Detection.id).all()
+    assert len(rows) == 2
+    assert rows[0].crop_path != rows[1].crop_path
+    from pathlib import Path
+
+    assert Path(rows[0].crop_path).read_bytes() == b"\xff\xd8subjectA"
+    assert Path(rows[1].crop_path).read_bytes() == b"\xff\xd8subjectB"
+
+
 def test_backlog_respects_the_per_frame_quality_gates(sample_video, tmp_path):
     """CLD-286: only the significance gate is behind the backlog pass by
     construction — a weak warm-up frame stays out after the flip too."""

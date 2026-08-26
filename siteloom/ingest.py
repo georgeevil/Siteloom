@@ -49,6 +49,15 @@ LIVE_BACKOFF_S = 2.0
 LIVE_BACKOFF_MAX_S = 60.0
 LIVE_STABLE_S = 30.0
 
+# Ceiling on the frames replayed by `_identify_backlog` at a significance
+# flip (CLD-286). The usual backlog is min_detections-1 rows; a flip that
+# min_confidence or min_duration_s held back can sit on hundreds, and the
+# replay runs synchronously inside the flipping frame's session on the
+# camera thread — this bounds that stall and that transaction. Sized to
+# dwarf every sane warm-up (min_detections is single digits) while
+# keeping the worst case to seconds.
+IDENTIFY_BACKLOG_MAX = 64
+
 def _bbox_iou(
     a: tuple[float, float, float, float] | list[float],
     b: tuple[float, float, float, float] | list[float],
@@ -313,9 +322,9 @@ class IngestService:
         ts = timestamp.replace(tzinfo=None)
         rules = self._rules_for(cam)
         with self.Session() as session:
-            for det in detections:
+            for seq, det in enumerate(detections):
                 event = self._find_or_create_event(session, cam.id, det, ts, rules)
-                crop_path = self._save_crop(cam.id, det, ts)
+                crop_path = self._save_crop(cam.id, det, ts, seq)
                 detection = Detection(
                     event_id=event.id,
                     timestamp=ts,
@@ -454,6 +463,11 @@ class IngestService:
         if not result.ok:
             log.error("identity job failed on %s: %s", cam.id, result.error)
             return event
+        if detection is not None:
+            # The identity job ran for this row — the backlog's idempotency
+            # marker (CLD-286). A transient job failure above leaves it
+            # NULL, so a later flip may retry the frame.
+            detection.identified_at = ts
         # The color read lands on the Detection row whether or not it
         # named a color, and before any resolution happens — it is a
         # measurement of the frame, not of the match (CLD-254). The
@@ -596,6 +610,21 @@ class IngestService:
         the significance gate is behind us by construction. Returns the
         surviving event, because a backlog frame can trigger the
         identity-aware merge like any other.
+
+        Three bounds keep the pass honest. `identified_at IS NULL` makes
+        it idempotent — `events retag` can un-flip and a later frame
+        re-flip, and rows already identified must not resolve twice.
+        The confidence filter mirrors `_identify`'s own gate so refused
+        rows cost no file read. And `IDENTIFY_BACKLOG_MAX` caps the
+        replay: min_detections-1 rows is the usual backlog, but a flip
+        delayed by `min_confidence`/`min_duration_s` can sit on far more,
+        and an unbounded replay would stall the camera thread and grow
+        the flipping frame's transaction without limit — earliest rows
+        kept (a departure's best plate frames come first), the drop
+        logged. A crash mid-pass rolls the flip back with its backlog
+        (they commit together); Qdrant writes made before the crash are
+        not transactional and may leave orphan pending vectors, the same
+        window every identified frame already has, wider by the burst.
         """
         if self.resolver is None or "identity" not in cam.modules:
             return event
@@ -604,14 +633,34 @@ class IngestService:
         # The flipping frame's own row is identified by the caller; it
         # needs its id assigned before it can be excluded here.
         session.flush()
-        rows = (
+        query = (
             session.query(Detection)
-            .filter(Detection.event_id == event.id, Detection.id != current.id)
+            .filter(
+                Detection.event_id == event.id,
+                Detection.id != current.id,
+                Detection.identified_at.is_(None),
+                Detection.confidence >= rules.identify_min_confidence,
+            )
             .order_by(Detection.timestamp, Detection.id)
-            .all()
         )
+        rows = query.limit(IDENTIFY_BACKLOG_MAX + 1).all()
+        if len(rows) > IDENTIFY_BACKLOG_MAX:
+            log.warning(
+                "identity backlog on event %s capped at %d of %d eligible rows",
+                event.id,
+                IDENTIFY_BACKLOG_MAX,
+                query.count(),
+            )
+            rows = rows[:IDENTIFY_BACKLOG_MAX]
         for row in rows:
             if not row.crop_path:
+                continue
+            try:
+                bbox = json.loads(row.bbox)
+            except ValueError:
+                # One corrupt row must degrade like an unreadable crop,
+                # not roll back the flip and re-run the pass every frame.
+                log.warning("backlog bbox unreadable on detection %s", row.id)
                 continue
             try:
                 crop_jpeg = Path(row.crop_path).read_bytes()
@@ -621,7 +670,7 @@ class IngestService:
             det = {
                 "class_name": row.class_name,
                 "confidence": row.confidence,
-                "bbox": json.loads(row.bbox),
+                "bbox": bbox,
                 "crop_jpeg": crop_jpeg,
             }
             event = self._identify(
@@ -823,6 +872,18 @@ class IngestService:
         if source.track_id is not None:
             # Adopt the fragment's track so its later frames fast-path here.
             target.track_id = source.track_id
+        # The OCR rationing notes (CLD-130) are keyed by event id, and the
+        # source's id dies with the row. Left behind, a visit that merges
+        # mid-stream — including a backlog frame merging its own event
+        # away (CLD-286) — restarts rationing from scratch on the
+        # survivor, and SQLite's rowid reuse could even hand the stale
+        # note to an unrelated future event. Newest note per key wins.
+        for (eid, key), noted in list(self._plate_ocr_last.items()):
+            if eid == source.id:
+                kept = self._plate_ocr_last.get((target.id, key))
+                if kept is None or noted > kept:
+                    self._plate_ocr_last[(target.id, key)] = noted
+                del self._plate_ocr_last[(eid, key)]
         target.significant = target.significant or source.significant
         self._update_significance(target, rules)
         # Children are re-pointed above; flush before the delete so the
@@ -937,13 +998,25 @@ class IngestService:
             best.track_id = det["track_id"]
         return best
 
-    def _save_crop(self, camera_id: str, det: dict, ts: datetime) -> str | None:
+    def _save_crop(
+        self, camera_id: str, det: dict, ts: datetime, seq: int = 0
+    ) -> str | None:
         crop_jpeg = det.get("crop_jpeg")
         if not crop_jpeg:
             return None
         day_dir = self.media_dir / camera_id / ts.strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True)
-        name = f"{ts.strftime('%H%M%S_%f')}_{det['class_name']}_{det['track_id']}.jpg"
+        # `seq` is the detection's index within its frame: two trackless
+        # same-class detections share timestamp, class and track id
+        # ("None"), and without it the second overwrites the first's file
+        # — wrong thumbnail always, wrong *pixels* once the backlog pass
+        # (CLD-286) re-reads crops from disk. Zero keeps the historical
+        # name for the common one-detection case.
+        suffix = f"_{seq}" if seq else ""
+        name = (
+            f"{ts.strftime('%H%M%S_%f')}_{det['class_name']}"
+            f"_{det['track_id']}{suffix}.jpg"
+        )
         path = day_dir / name
         path.write_bytes(crop_jpeg)
         return str(path)
