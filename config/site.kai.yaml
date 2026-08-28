@@ -58,7 +58,11 @@ audio:
   enabled: false              # UniFi live path is video-only for now
 
 guests:
-  ical: ""
+  ical:
+    - https://kaiappartments.com/api/ical/casa-1.ics
+    - https://kaiappartments.com/api/ical/casa-2.ics
+  checkin_time: "15:00"
+  checkout_time: "11:00"
   arrival_pre_hours: 2
   arrival_post_hours: 4
 
