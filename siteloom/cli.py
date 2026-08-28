@@ -317,12 +317,20 @@ def backfill(
 @app.command()
 def backfill_unifi(
     ctx: typer.Context,
-    camera: str = typer.Argument(..., help="Configured camera id (adapter: unifi)"),
+    camera: list[str] = typer.Argument(
+        None, help="Configured camera id(s) (adapter: unifi); several run side by side"
+    ),
     config: Path = CONFIG_OPT,
     start: datetime = typer.Option(
         ..., help="Range start (local time unless an offset is given)"
     ),
     end: datetime = typer.Option(None, help="Range end (default: now)"),
+    all_cameras: bool = typer.Option(
+        False, "--all", help="Every configured UniFi camera, instead of naming them"
+    ),
+    parallel: int = typer.Option(
+        None, help="Cameras processed at once (default: backfill.parallel in config)"
+    ),
     pad_seconds: float = typer.Option(
         5.0, help="Padding added to each side of an NVR event window"
     ),
@@ -331,7 +339,7 @@ def backfill_unifi(
         help="Sweep the whole range in fixed chunks instead of NVR event windows",
     ),
     min_score: int = typer.Option(0, help="Skip NVR events scoring below this"),
-    limit: int = typer.Option(None, help="Max clips processed this run"),
+    limit: int = typer.Option(None, help="Max clips processed this run, per camera"),
     retry_failed: bool = typer.Option(
         False, "--retry-failed", help="Re-queue clips that failed on an earlier run"
     ),
@@ -346,9 +354,10 @@ def backfill_unifi(
     Asks the NVR for its motion/smart-detect events in the range, then
     downloads each recorded window and runs it through the exact live
     pipeline. Resumable — stop and rerun freely; processed windows are
-    remembered by NVR event id.
+    remembered by NVR event id. Several cameras run side by side, one
+    job row each (CLD-317), bounded by --parallel.
     """
-    from siteloom.backfill import UnifiBackfill
+    from siteloom.backfill import ACTIVE_STATUSES, BackfillRequest, run_backfills
     from siteloom.cli_library import INTERRUPTED_EXIT, _resume_command
     from siteloom.config import load_config
     from siteloom.ingest import IngestService
@@ -356,10 +365,28 @@ def backfill_unifi(
 
     setup_logging(level="INFO", log_file=log_file)
     cfg = load_config(config)
-    cams = {c.id: c for c in cfg.cameras}
-    if camera not in cams:
-        typer.echo(f"no camera {camera!r} in {config}; known: {list(cams)}", err=True)
+    unifi = {c.id: c for c in cfg.cameras if c.adapter == "unifi"}
+    wanted = list(dict.fromkeys(camera or []))
+    if all_cameras and wanted:
+        typer.echo("name cameras or pass --all, not both", err=True)
         raise typer.Exit(2)
+    if all_cameras:
+        wanted = list(unifi)
+    if not wanted:
+        typer.echo(
+            f"name at least one camera (or --all); unifi cameras in {config}: "
+            f"{list(unifi)}",
+            err=True,
+        )
+        raise typer.Exit(2)
+    cams_by_id = {c.id: c for c in cfg.cameras}
+    for cam_id in wanted:
+        if cam_id not in cams_by_id:
+            typer.echo(
+                f"no camera {cam_id!r} in {config}; known: {list(cams_by_id)}", err=True
+            )
+            raise typer.Exit(2)
+    cams = [cams_by_id[cam_id] for cam_id in wanted]
 
     # Operators type wall time — the *site's* wall time (CLD-100), the
     # same frame the console's backfill form reads. An explicit offset in
@@ -371,50 +398,81 @@ def backfill_unifi(
     zone = site_zone(cfg)
     start = as_aware(start, zone)
     end = as_aware(end, zone) if end else datetime.now(timezone.utc)
+    request = BackfillRequest(
+        start=start,
+        end=end,
+        pad_s=pad_seconds,
+        chunk_minutes=chunk_minutes,
+        min_score=min_score,
+        limit=limit,
+        retry_failed=retry_failed,
+        scan_only=scan_only,
+    )
 
     service = IngestService(cfg)
-    backfill = UnifiBackfill(service, cams[camera])
-    resume = _resume_command(ctx)
-    result = None
-    with ProgressReporter(
-        service.Session,
-        "backfill-unifi",
-        target=camera,
-        resume_command=resume,
-        bar=not quiet,
-    ) as progress:
-        with progress.phase("Scanning NVR events"):
-            scan = backfill.scan(
-                start,
-                end,
-                pad_s=pad_seconds,
-                chunk_minutes=chunk_minutes,
-                min_score=min_score,
+    # One resume line per camera, naming only that camera — a row on
+    # /jobs is one camera's run, and its line must continue that run.
+    resumes = {
+        cam.id: _resume_command(ctx, camera=[cam.id], all_cameras=False) for cam in cams
+    }
+    # The reporters take no signals: with a worker per camera there is
+    # one owner of Ctrl-C — the service's own handlers — and the runner
+    # relays the stop to every row. A bar only when there is one camera;
+    # two Rich bars in two threads fight over the terminal.
+    with service._stop_signals(active=True):
+        states = run_backfills(
+            service,
+            cams,
+            request,
+            parallel=cfg.backfill.parallel if parallel is None else parallel,
+            make_reporter=lambda cam: ProgressReporter(
+                service.Session,
+                "backfill-unifi",
+                target=cam.id,
+                resume_command=resumes[cam.id],
+                bar=not quiet and len(cams) == 1,
+                signals=False,
+            ),
+            interrupt=lambda: service.stopped,
+        )
+
+    failed = interrupted = False
+    for cam in cams:
+        state = states[cam.id]
+        label = f"[{cam.id}]" if len(cams) > 1 else ""
+        status = state["status"]
+        if status == "failed":
+            failed = True
+            typer.echo(f"{label} failed: {state.get('error', '')}".strip())
+            continue
+        if status in ACTIVE_STATUSES or status == "stopped":
+            interrupted = True
+            continue  # the reporter already printed the resume command
+        if "added" in state:
+            typer.echo(
+                f"{label} scan: +{state['added']} new clip(s), {state['skipped']} "
+                f"already covered, {state['pending']} pending".strip()
             )
-        typer.echo(
-            f"scan: +{scan.added} new clip(s), {scan.skipped} already covered, "
-            f"{scan.pending} pending"
-        )
         if scan_only:
-            return
-        result = backfill.process(
-            limit=limit, retry_failed=retry_failed, progress=progress
-        )
-    if result is None:
-        # Interrupted; the reporter already printed the resume command.
-        raise typer.Exit(INTERRUPTED_EXIT)
-    retried = f"retried {result.retried}, " if result.retried else ""
-    typer.echo(
-        f"{retried}processed {result.processed} clip(s) ({result.frames} frames), "
-        f"{result.failed} failed, {result.remaining} still pending"
-    )
-    if result.remaining:
-        typer.echo(f"continue with: {resume}")
-    if result.failed_total and not retry_failed:
+            continue
+        retried = f"retried {state['retried']}, " if state.get("retried") else ""
         typer.echo(
-            f"{result.failed_total} clip(s) failed earlier and will not be "
-            f"retried automatically; retry with: {resume} --retry-failed"
+            f"{label} {retried}processed {state['processed']} clip(s) "
+            f"({state['frames']} frames), {state['clip_failures']} failed, "
+            f"{state['remaining']} still pending".strip()
         )
+        if state["remaining"]:
+            typer.echo(f"{label} continue with: {resumes[cam.id]}".strip())
+        if state["failed_total"] and not retry_failed:
+            typer.echo(
+                f"{label} {state['failed_total']} clip(s) failed earlier and will "
+                f"not be retried automatically; retry with: {resumes[cam.id]} "
+                "--retry-failed".strip()
+            )
+    if interrupted:
+        raise typer.Exit(INTERRUPTED_EXIT)
+    if failed:
+        raise typer.Exit(1)
 
 
 @app.command()

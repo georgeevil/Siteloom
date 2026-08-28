@@ -27,6 +27,9 @@
   .bf-panel h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
   .bf-panel p { margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.6; max-width: 78ch; }
   .bf-form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .bf-cams { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .bf-cams label { display: flex; gap: 6px; align-items: center; }
+  .bf-cams label.busy { opacity: .6; }
   .bf-field { display: flex; flex-direction: column; gap: 4px; }
   .bf-field > span {
     font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
@@ -106,29 +109,32 @@
 <div class="bf-error">{{ error }}</div>
 {% endif %}
 
-{% if last %}
-<div class="bf-banner {% if last.status == 'failed' %}bad{% elif last.added == 0 and last.status != 'running' %}noop{% endif %}">
-  {% if last.status in ('running', 'processing') %}
-  <strong>Backfill of {{ last.camera }} is running.</strong>
+{% for last in runs %}
+<div class="bf-banner {% if last.status == 'failed' %}bad{% elif last.added == 0 and last.status not in ('waiting', 'running') %}noop{% endif %}">
+  {% if last.status == 'waiting' %}
+  <strong>Backfill of {{ last.name }} is waiting for a slot.</strong>
+  {{ parallel if parallel else 'Every' }} camera{{ '' if parallel == 1 else 's' }} at a time; it starts when one finishes.
+  {% elif last.status in ('running', 'processing') %}
+  <strong>Backfill of {{ last.name }} is running.</strong>
   {% if last.status == 'processing' %}
   Scan registered {{ last.added }} new window(s); {{ last.skipped }} were already covered.
   {% endif %}
   Progress is on the <a href="/jobs">Jobs</a> board.
   {% elif last.status == 'failed' %}
-  <strong>Backfill of {{ last.camera }} failed.</strong>
+  <strong>Backfill of {{ last.name }} failed.</strong>
   <span class="mono">{{ last.error }}</span>
   {% elif last.status == 'stopped' %}
-  <strong>Backfill of {{ last.camera }} stopped early.</strong>
+  <strong>Backfill of {{ last.name }} stopped early.</strong>
   Whatever it finished is recorded; the rest is still pending. Continue with
   <code>{{ last.resume }}</code>.
   {% elif last.added == 0 %}
-  <strong>Nothing new to do — that range was already covered.</strong>
+  <strong>Nothing new to do for {{ last.name }} — that range was already covered.</strong>
   The scan matched {{ last.skipped }} recording window(s) and all of them were
   already registered, so nothing was downloaded and no event was created twice.
   Clips are keyed by the NVR's own event id, and
   <code>(camera, event id)</code> is unique.
   {% else %}
-  <strong>Backfill of {{ last.camera }} finished.</strong>
+  <strong>Backfill of {{ last.name }} finished.</strong>
   Registered {{ last.added }} new window(s) ({{ last.skipped }} already covered),
   processed {{ last.processed }} clip(s) over {{ '{:,}'.format(last.frames or 0) }} frames.
   {% if last.clip_failures %}{{ last.clip_failures }} clip(s) failed.{% endif %}
@@ -136,29 +142,32 @@
   <code>{{ last.resume }}</code>.{% endif %}
   {% endif %}
 </div>
-{% endif %}
+{% endfor %}
 
 {% if cameras %}
 <div class="bf-panel">
   <h3>Index a range</h3>
   <p>
-    Runs here in the console, one at a time — the pipeline holds per-camera
-    tracker state and the embedded vector store, which takes one client per
-    machine. Progress heartbeats to the <a href="/jobs">Jobs</a> board like any
-    other long job, and stopping the server leaves the remaining clips pending
-    rather than losing them.
+    Runs here in the console, {{ parallel if parallel else 'every' }}
+    camera{{ '' if parallel == 1 else 's' }} at a time (<code>backfill.parallel</code>),
+    each camera as its own job on the <a href="/jobs">Jobs</a> board — never the
+    same camera twice, because the pipeline holds per-camera tracker state.
+    Stopping the server leaves the remaining clips pending rather than losing
+    them.
   </p>
   <form class="bf-form" method="post" action="/backfill/start">
-    <label class="bf-field">
-      <span>Camera</span>
-      <select name="camera">
+    <div class="bf-field">
+      <span>Cameras</span>
+      <div class="bf-cams">
         {% for cam in cameras %}
-        <option value="{{ cam.id }}" {% if form.camera == cam.id %}selected{% endif %}>
-          {{ cam.name or cam.id }}
-        </option>
+        <label {% if cam.id in running %}class="busy"{% endif %}>
+          <input type="checkbox" name="cameras" value="{{ cam.id }}"
+                 {% if cam.id in running %}disabled{% elif not form.cameras or cam.id in form.cameras %}checked{% endif %}>
+          {{ cam.name or cam.id }}{% if cam.id in running %} <span class="why">— running</span>{% endif %}
+        </label>
         {% endfor %}
-      </select>
-    </label>
+      </div>
+    </div>
     <label class="bf-field">
       <span>From</span>
       <input type="datetime-local" name="start" value="{{ form.start or '' }}" required>
@@ -201,8 +210,8 @@
         Retry earlier failures
       </label>
     </div>
-    <button class="bf-go" type="submit" {% if running %}disabled{% endif %}>
-      {% if running %}Backfill running…{% else %}Scan &amp; index{% endif %}
+    <button class="bf-go" type="submit" {% if all_running %}disabled{% endif %}>
+      {% if all_running %}Backfill running…{% else %}Scan &amp; index{% endif %}
     </button>
   </form>
 </div>

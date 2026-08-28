@@ -7,10 +7,11 @@ clips are the only camera-derived source of NoiseEvent rows at all.
 Two properties carry the screen. The read must show the resumability
 model (`the remaining clips are the ones still pending`, scoped per
 camera) and distinguish its three empty states, because "nothing here"
-means something different each time. The write must be single-flight and
-admin-only: it downloads from the NVR and writes events, and two sweeps
-in one process would share the detector's per-camera tracker state and
-the embedded vector store.
+means something different each time. The write must be single-flight
+*per camera* and admin-only: it downloads from the NVR and writes events,
+and two sweeps of one camera in one process would share the detector's
+tracker state for it — while different cameras run side by side, one job
+row each (CLD-317).
 
 No NVR, no weights, no cameras: the adapter is stubbed and the run never
 gets past the fake scan.
@@ -52,9 +53,13 @@ def unifi(camera_id="front", name="Front door"):
 @pytest.fixture(autouse=True)
 def clean_state():
     """Module state is per-process and tests build many apps."""
-    backfill_routes._state.update({"thread": None, "last": None})
+    backfill_routes._state["runs"].clear()
     yield
-    backfill_routes._state.update({"thread": None, "last": None})
+    backfill_routes._state["runs"].clear()
+
+
+def idle() -> bool:
+    return not backfill_routes.running_cameras()
 
 
 def build(tmp_path, cameras, clips=()):
@@ -246,6 +251,7 @@ def stub_run(monkeypatch, seen: dict, block: threading.Event | None = None):
     class FakeBackfill:
         def __init__(self, service, cam):
             seen["camera"] = cam.id
+            seen.setdefault("cameras", []).append(cam.id)
 
         def scan(self, start, end, **kwargs):
             seen["range"] = (start, end)
@@ -283,8 +289,8 @@ def test_start_runs_the_scan_in_the_background(tmp_path, monkeypatch):
         data={"camera": "front", "start": "2026-08-06T09:00", "mode": "events"},
     )
     assert r.status_code == 303
-    assert wait_for(lambda: backfill_routes._state["thread"] is None)
-    assert seen["camera"] == "front"
+    assert wait_for(idle)
+    assert seen["cameras"] == ["front"]
     # Motion windows are the default: no chunking asked for.
     assert seen["kwargs"]["chunk_minutes"] is None
     assert seen["process"]["retry_failed"] is False
@@ -306,31 +312,108 @@ def test_full_sweep_passes_its_chunk_size(tmp_path, monkeypatch):
             "chunk_minutes": "30",
         },
     )
-    assert wait_for(lambda: backfill_routes._state["thread"] is None)
+    assert wait_for(idle)
     assert seen["kwargs"]["chunk_minutes"] == 30.0
 
 
-def test_a_second_start_is_refused_not_queued(tmp_path):
-    """The pipeline keeps per-camera tracker state and the embedded
-    vector store is one client per path per machine."""
+def busy(camera_id: str, name: str | None = None) -> None:
+    """A run in flight for this camera, as the coordinator would leave it."""
+    backfill_routes._state["runs"][camera_id] = {
+        "camera": camera_id,
+        "name": name or camera_id,
+        "status": "processing",
+        "added": 1,
+        "skipped": 0,
+    }
+
+
+def test_a_second_start_of_the_same_camera_is_refused_not_queued(tmp_path):
+    """The pipeline keeps per-camera tracker state, so the same camera
+    twice is a failure — refused with the camera named, nothing started."""
+    client, _, _ = build(tmp_path, [unifi("front", "Front door")])
+    busy("front", "Front door")
+    r = client.post(
+        "/backfill/start", data={"camera": "front", "start": "2026-08-06T09:00"}
+    )
+    assert r.status_code == 409
+    assert "Front door is already running" in r.text
+    # With every camera running the button is disabled rather than
+    # merely failing on click.
+    assert "Backfill running" in client.get("/backfill").text
+
+
+def test_an_idle_camera_may_start_while_another_runs(tmp_path, monkeypatch):
+    """Different cameras are the shape live ingest already runs in — one
+    thread each over the shared pipeline — so the guard is per camera."""
+    seen: dict = {}
+    stub_run(monkeypatch, seen)
+    client, _, _ = build(tmp_path, [unifi("front", "Front door"), unifi("gate", "Gate")])
+    busy("front", "Front door")
+    page = client.get("/backfill").text
+    assert "Backfill running" not in page  # one idle camera: the button stays live
+    r = client.post(
+        "/backfill/start", data={"camera": "gate", "start": "2026-08-06T09:00"}
+    )
+    assert r.status_code == 303
+    assert wait_for(lambda: backfill_routes._state["runs"]["gate"]["status"] == "complete")
+    assert seen["cameras"] == ["gate"]
+    assert backfill_routes._state["runs"]["front"]["status"] == "processing"
+
+
+def test_a_mixed_pick_with_one_busy_camera_starts_nothing(tmp_path, monkeypatch):
+    """All or nothing: a partial start would leave the form lying about
+    which cameras it began."""
+    seen: dict = {}
+    stub_run(monkeypatch, seen)
+    client, _, _ = build(tmp_path, [unifi("front", "Front door"), unifi("gate", "Gate")])
+    busy("front", "Front door")
+    r = client.post(
+        "/backfill/start",
+        data={"cameras": ["front", "gate"], "start": "2026-08-06T09:00"},
+    )
+    assert r.status_code == 409
+    assert "Front door" in r.text
+    assert "gate" not in backfill_routes._state["runs"]
+    assert "cameras" not in seen
+
+
+def test_several_cameras_start_from_one_submit_one_row_each(tmp_path, monkeypatch):
+    from siteloom.store import OperationRun
+
+    seen: dict = {}
+    stub_run(monkeypatch, seen)
+    client, Session, _ = build(
+        tmp_path, [unifi("front", "Front door"), unifi("gate", "Gate")]
+    )
+    r = client.post(
+        "/backfill/start",
+        # The same camera twice on the wire is one run, not a race.
+        data={"cameras": ["front", "gate", "front"], "start": "2026-08-06T09:00"},
+    )
+    assert r.status_code == 303
+    assert wait_for(idle)
+    assert sorted(seen["cameras"]) == ["front", "gate"]
+    with Session() as s:
+        runs = s.scalars(select(OperationRun)).all()
+    assert sorted(run.target for run in runs) == ["front", "gate"]
+    assert all(run.kind == "backfill-unifi" for run in runs)
+    # Each row's resume line continues *that* camera.
+    by_target = {run.target: run.resume_command for run in runs}
+    assert by_target["gate"].startswith("siteloom backfill-unifi gate --start")
+    assert "front" not in by_target["gate"]
+    # One banner per camera, each naming its own (the stub scans nothing
+    # new, so both read as the no-op they are).
+    body = client.get("/backfill").text
+    assert "Nothing new to do for Front door" in body
+    assert "Nothing new to do for Gate" in body
+
+
+def test_no_camera_picked_is_a_400(tmp_path):
     client, _, _ = build(tmp_path, [unifi("front")])
-    stop = threading.Event()
-    busy = threading.Thread(target=stop.wait)
-    busy.start()
-    backfill_routes._state["thread"] = busy
-    try:
-        r = client.post(
-            "/backfill/start",
-            data={"camera": "front", "start": "2026-08-06T09:00"},
-        )
-        assert r.status_code == 409
-        assert "already running" in r.text
-        # The button is disabled rather than merely failing on click.
-        assert "Backfill running" in client.get("/backfill").text
-    finally:
-        stop.set()
-        busy.join()
-        backfill_routes._state["thread"] = None
+    r = client.post("/backfill/start", data={"start": "2026-08-06T09:00"})
+    assert r.status_code == 400
+    assert "at least one camera" in r.text
+    assert idle()
 
 
 def test_an_unknown_camera_is_rejected(tmp_path):
@@ -339,7 +422,7 @@ def test_an_unknown_camera_is_rejected(tmp_path):
         "/backfill/start", data={"camera": "nope", "start": "2026-08-06T09:00"}
     )
     assert r.status_code == 400
-    assert backfill_routes._state["thread"] is None
+    assert idle()
 
 
 def test_a_file_camera_cannot_be_backfilled_from_an_nvr(tmp_path):
@@ -351,6 +434,7 @@ def test_a_file_camera_cannot_be_backfilled_from_an_nvr(tmp_path):
         "/backfill/start", data={"camera": "clip", "start": "2026-08-06T09:00"}
     )
     assert r.status_code == 400
+    assert idle()
 
 
 def test_a_malformed_range_is_rejected_with_a_reason(tmp_path):
@@ -392,7 +476,7 @@ def test_a_covered_range_reports_itself_as_a_no_op(tmp_path, monkeypatch):
     client.post(
         "/backfill/start", data={"camera": "front", "start": "2026-08-06T09:00"}
     )
-    assert wait_for(lambda: backfill_routes._state["thread"] is None)
+    assert wait_for(idle)
     body = client.get("/backfill").text
     assert "already covered" in body
     assert "3 recording window(s)" in body
@@ -410,7 +494,7 @@ def test_the_run_heartbeats_an_operation_run(tmp_path, monkeypatch):
     client.post(
         "/backfill/start", data={"camera": "front", "start": "2026-08-06T09:00"}
     )
-    assert wait_for(lambda: backfill_routes._state["thread"] is None)
+    assert wait_for(idle)
     with Session() as s:
         run = s.scalars(select(OperationRun)).one()
         assert run.kind == "backfill-unifi"
@@ -437,7 +521,7 @@ def test_the_resume_command_keeps_the_sweep_and_the_retry(tmp_path, monkeypatch)
             "retry_failed": "1",
         },
     )
-    assert wait_for(lambda: backfill_routes._state["thread"] is None)
+    assert wait_for(idle)
     with Session() as s:
         command = s.scalars(select(OperationRun)).one().resume_command
     assert "--chunk-minutes 15" in command
@@ -486,7 +570,7 @@ def test_an_editor_may_watch_a_backfill_but_not_start_one(tmp_path):
         "/backfill/start", data={"camera": "front", "start": "2026-08-06T09:00"}
     )
     assert r.status_code == 403
-    assert backfill_routes._state["thread"] is None
+    assert idle()
 
 
 def test_an_admin_start_is_audited(tmp_path, monkeypatch):
@@ -499,7 +583,7 @@ def test_an_admin_start_is_audited(tmp_path, monkeypatch):
         "/backfill/start", data={"camera": "front", "start": "2026-08-06T09:00"}
     )
     assert r.status_code == 303
-    assert wait_for(lambda: backfill_routes._state["thread"] is None)
+    assert wait_for(idle)
     with Session() as s:
         rows = s.scalars(select(AuditLog)).all()
         assert ("root", "/backfill/start") in {(r.username, r.path) for r in rows}

@@ -236,3 +236,18 @@ def test_unit_argv_uses_the_real_command(config_file):
     argv = unit_argv("serve", {"config": str(config_file), "port": 9999})
     assert argv[len(siteloom_program())] == "serve"
     assert "--port" in argv and "9999" in argv
+
+
+def test_a_list_positional_is_one_token_per_item():
+    """`backfill-unifi cam1 cam2` must resume as two arguments, never as
+    the repr of a list — both the resume line and a unit's argv read
+    these tokens (CLD-317)."""
+    app = typer.Typer()
+
+    @app.command()
+    def cmd(camera: list[str] = typer.Argument(None), config: str = "c.yaml"):
+        pass
+
+    params = typer.main.get_command(app).params
+    tokens = invocation_tokens(params, {"camera": ["front", "gate"], "config": "c.yaml"})
+    assert tokens == ["front", "gate", "--config", "c.yaml"]

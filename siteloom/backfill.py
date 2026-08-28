@@ -13,12 +13,22 @@ follows the library indexer's two-phase shape:
 
 Clips are processed in chronological order so tracker state and the
 event-linking gap behave the same as they would have live.
+
+Several cameras at once (CLD-317) run through `run_backfills`: one
+worker thread per camera over one shared `IngestService` — the shape
+`IngestService.run` already has for live cameras — with one
+`OperationRun` row each, bounded by a slot count. The two reasons a
+second run used to be refused (per-camera tracker state, one embedded
+vector store per process) forbid the *same* camera twice, not different
+cameras side by side.
 """
 
 from __future__ import annotations
 
 import logging
 import tempfile
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +64,157 @@ def _naive_utc(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+@dataclass(frozen=True)
+class BackfillRequest:
+    """One range and one set of options, applied to each camera alike."""
+
+    start: datetime
+    end: datetime
+    pad_s: float = 5.0
+    chunk_minutes: float | None = None
+    min_score: int = 0
+    limit: int | None = None
+    retry_failed: bool = False
+    scan_only: bool = False
+
+
+#: Per-camera state a UI can render while the run is going. Statuses in
+#: ACTIVE mean "do not start this camera again"; everything else is over.
+ACTIVE_STATUSES = ("waiting", "running", "processing")
+
+#: How long a queued camera waits on the slot before ticking its heartbeat
+#: — well inside the stale threshold, so "Waiting for a slot" on /jobs
+#: never reads as a dead run.
+SLOT_WAIT_S = 5.0
+
+
+def new_state(cam: CameraConfig, request: BackfillRequest, resume: str) -> dict:
+    return {
+        "camera": cam.id,
+        "name": cam.name or cam.id,
+        "sweep": bool(request.chunk_minutes),
+        "chunk_minutes": request.chunk_minutes,
+        "retry_failed": request.retry_failed,
+        "start": request.start,
+        "end": request.end,
+        "status": "waiting",
+        "resume": resume,
+    }
+
+
+def run_backfills(
+    service: IngestService,
+    cams: list[CameraConfig],
+    request: BackfillRequest,
+    *,
+    parallel: int,
+    make_reporter: Callable[[CameraConfig], object],
+    states: dict[str, dict] | None = None,
+    interrupt: Callable[[], bool] | None = None,
+) -> dict[str, dict]:
+    """Scan and process `cams` side by side; returns per-camera state.
+
+    One thread per camera, each under its own reporter from
+    `make_reporter(cam)` (so /jobs shows one row per camera, with its own
+    progress, cancel and resume command), and at most `parallel` of them
+    holding a slot at once — `0` means all. A camera holds its slot from
+    scan through process: the scan is an NVR API call too, and N of them
+    at once is exactly the load the cap exists to bound.
+
+    Blocks until every camera is done. `interrupt` is polled meanwhile;
+    when it answers True every live reporter is asked to stop, which is
+    how one Ctrl-C (owned by the caller — the reporters take
+    `signals=False`) reaches every thread. A camera that fails records
+    its error in its state and does not sink its siblings.
+    """
+    seen: set[str] = set()
+    cams = [c for c in cams if not (c.id in seen or seen.add(c.id))]  # type: ignore[func-returns-value]
+    if states is None:
+        states = {c.id: new_state(c, request, "") for c in cams}
+    slots = threading.BoundedSemaphore(parallel if parallel > 0 else max(1, len(cams)))
+    reporters: dict[str, object] = {}
+    threads = [
+        threading.Thread(
+            target=_run_one,
+            args=(service, cam, request, slots, make_reporter, states[cam.id], reporters),
+            name=f"backfill-{cam.id}",
+            daemon=True,
+        )
+        for cam in cams
+    ]
+    for thread in threads:
+        thread.start()
+    while any(t.is_alive() for t in threads):
+        if interrupt is not None and interrupt():
+            for reporter in list(reporters.values()):
+                reporter.interrupt_requested = True  # type: ignore[attr-defined]
+        for thread in threads:
+            thread.join(timeout=0.5)
+    return states
+
+
+def _run_one(service, cam, request, slots, make_reporter, state, reporters) -> None:
+    from siteloom.progress import Interrupted
+
+    try:
+        with make_reporter(cam) as progress:
+            reporters[cam.id] = progress
+            with progress.phase("Waiting for a slot"):
+                while not slots.acquire(timeout=SLOT_WAIT_S):
+                    progress.heartbeat()  # queued is not dead
+                    progress.check_interrupt()
+            try:
+                _backfill_camera(service, cam, request, progress, state)
+            finally:
+                slots.release()
+    except Interrupted:
+        pass  # the reporter recorded it; `status` says so below
+    except Exception as exc:
+        log.exception("backfill of %s failed", cam.id)
+        state.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    finally:
+        # A run stopped by signal leaves `status` where the reporter left
+        # it: the OperationRun row is the record of how it ended, and
+        # inventing "complete" here would contradict it.
+        if state.get("status") in ACTIVE_STATUSES:
+            state["status"] = "stopped"
+
+
+def _backfill_camera(service, cam, request, progress, state) -> None:
+    runner = UnifiBackfill(service, cam)
+    state["status"] = "running"
+    with progress.phase("Scanning NVR events"):
+        scan = runner.scan(
+            request.start,
+            request.end,
+            pad_s=request.pad_s,
+            chunk_minutes=request.chunk_minutes,
+            min_score=request.min_score,
+        )
+    # On the jobs board as well as the page: a sweep that registered
+    # nothing looks identical to a stalled one unless the counters say
+    # what it found.
+    progress.bump(registered=scan.added, already_covered=scan.skipped)
+    state.update(
+        added=scan.added, skipped=scan.skipped, pending=scan.pending, status="processing"
+    )
+    if request.scan_only:
+        state["status"] = "complete"
+        return
+    result = runner.process(
+        limit=request.limit, retry_failed=request.retry_failed, progress=progress
+    )
+    state.update(
+        status="complete",
+        processed=result.processed,
+        frames=result.frames,
+        clip_failures=result.failed,
+        remaining=result.remaining,
+        failed_total=result.failed_total,
+        retried=result.retried,
+    )
 
 
 class UnifiBackfill:
