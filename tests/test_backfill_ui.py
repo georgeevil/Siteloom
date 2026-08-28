@@ -408,6 +408,54 @@ def test_several_cameras_start_from_one_submit_one_row_each(tmp_path, monkeypatc
     assert "Nothing new to do for Gate" in body
 
 
+def test_reading_the_runs_while_a_submit_inserts_does_not_blow_up(tmp_path):
+    """The page reads the run table while submits mutate it; without the
+    reader taking the lock this is "dictionary changed size during
+    iteration" within seconds (found by review of PR #98)."""
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def churn():
+        n = 0
+        while not stop.is_set():
+            with backfill_routes._state["lock"]:
+                backfill_routes._state["runs"][f"cam{n % 50}"] = {
+                    "camera": f"cam{n % 50}",
+                    "status": "processing",
+                }
+                if n % 7 == 0:
+                    backfill_routes._state["runs"].clear()
+            n += 1
+
+    def read():
+        try:
+            while not stop.is_set():
+                backfill_routes.running_cameras()
+        except BaseException as exc:  # pragma: no cover — the failure mode
+            errors.append(exc)
+
+    threads = [threading.Thread(target=churn), threading.Thread(target=read)]
+    for t in threads:
+        t.start()
+    time.sleep(0.5)
+    stop.set()
+    for t in threads:
+        t.join(5)
+    assert errors == []
+
+
+def test_the_slot_count_is_worded_for_every_value(tmp_path):
+    from siteloom.config import BackfillConfig
+
+    for parallel, words in ((0, "every camera"), (1, "one camera"), (3, "3 cameras")):
+        root = tmp_path / str(parallel)
+        root.mkdir()
+        client, _, config = build(root, [unifi("front")])
+        config.backfill = BackfillConfig(parallel=parallel)
+        body = re.sub(r"\s+", " ", client.get("/backfill").text)
+        assert f"{words} at a time" in body, words
+
+
 def test_no_camera_picked_is_a_400(tmp_path):
     client, _, _ = build(tmp_path, [unifi("front")])
     r = client.post("/backfill/start", data={"start": "2026-08-06T09:00"})

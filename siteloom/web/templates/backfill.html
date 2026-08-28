@@ -113,7 +113,7 @@
 <div class="bf-banner {% if last.status == 'failed' %}bad{% elif last.added == 0 and last.status not in ('waiting', 'running') %}noop{% endif %}">
   {% if last.status == 'waiting' %}
   <strong>Backfill of {{ last.name }} is waiting for a slot.</strong>
-  {{ parallel if parallel else 'Every' }} camera{{ '' if parallel == 1 else 's' }} at a time; it starts when one finishes.
+  {% if parallel == 1 %}One camera{% elif parallel %}{{ parallel }} cameras{% else %}Every camera{% endif %} at a time; it starts when one finishes.
   {% elif last.status in ('running', 'processing') %}
   <strong>Backfill of {{ last.name }} is running.</strong>
   {% if last.status == 'processing' %}
@@ -148,8 +148,9 @@
 <div class="bf-panel">
   <h3>Index a range</h3>
   <p>
-    Runs here in the console, {{ parallel if parallel else 'every' }}
-    camera{{ '' if parallel == 1 else 's' }} at a time (<code>backfill.parallel</code>),
+    Runs here in the console,
+    {% if parallel == 1 %}one camera{% elif parallel %}{{ parallel }} cameras{% else %}every camera{% endif %}
+    at a time (<code>backfill.parallel</code>),
     each camera as its own job on the <a href="/jobs">Jobs</a> board — never the
     same camera twice, because the pipeline holds per-camera tracker state.
     Stopping the server leaves the remaining clips pending rather than losing

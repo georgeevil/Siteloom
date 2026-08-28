@@ -57,15 +57,24 @@ log = logging.getLogger(__name__)
 #: builds) so a re-run over an already-covered range reads as the no-op
 #: it is, and so a running camera can refuse a second start. The lock
 #: makes "is it busy" and "now it is" one step, or two submits racing
-#: through the check would both start it.
-_state: dict = {"runs": {}, "lock": threading.Lock()}
+#: through the check would both start it — and every *reader* takes it
+#: too, because a page rendering while a submit inserts is "dictionary
+#: changed size during iteration". Re-entrant: the submit reads under
+#: the lock it already holds.
+_state: dict = {"runs": {}, "lock": threading.RLock()}
+
+
+def run_states() -> list[dict]:
+    """A snapshot of every camera's run state, safe to iterate."""
+    with _state["lock"]:
+        return list(_state["runs"].values())
 
 
 def running_cameras() -> list[str]:
     """Camera ids with a backfill in flight (waiting, scanning or processing)."""
     return [
-        cam_id
-        for cam_id, state in _state["runs"].items()
+        state["camera"]
+        for state in run_states()
         if state.get("status") in ACTIVE_STATUSES
     ]
 
@@ -221,9 +230,7 @@ def register(app, templates, Session, config) -> None:
             empty_reason = None
         running = running_cameras()
         order = {c.id: i for i, c in enumerate(cameras)}
-        runs = sorted(
-            _state["runs"].values(), key=lambda s: order.get(s["camera"], len(order))
-        )
+        runs = sorted(run_states(), key=lambda s: order.get(s["camera"], len(order)))
         return {
             "site_name": config.site_name or config.site_id,
             "cameras": cameras,
