@@ -252,9 +252,20 @@ def _two_camera_env(sample_video, tmp_path, monkeypatch, name, fail_ids=()):
 
 
 def _event_snapshot(Session):
+    """Events by content — the same shape the resume-equivalence harness
+    compares, `confidence_sum` rounded because merge order can differ
+    float-associatively between two runs."""
     with Session() as session:
         return sorted(
-            (e.camera_id, e.class_name, e.first_seen, e.last_seen, e.detection_count)
+            (
+                e.camera_id,
+                e.class_name,
+                e.first_seen,
+                e.last_seen,
+                e.detection_count,
+                round(e.confidence_sum, 6),
+                e.significant,
+            )
             for e in session.query(Event).all()
         )
 
