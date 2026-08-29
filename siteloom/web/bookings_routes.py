@@ -94,20 +94,26 @@ def parse_window(start: str, end: str, zone=None) -> tuple[datetime, datetime]:
     return as_utc(first, zone), as_utc(last, zone)
 
 
-def feed_label(ical: str) -> str:
-    """A printable name for the configured feed, without its secrets.
+def feed_label(ical: str | list[str]) -> str:
+    """A printable name for the configured feed(s), without their secrets.
 
     Booking-site iCal URLs carry an unguessable token in the path or
     query — that URL *is* the credential. The page needs to say which
     feed it read, not hand it to everyone with `view`, so a URL is
-    reduced to its host and a local file to its path.
+    reduced to its host and a local file to its path. Several feeds are
+    listed the same way, joined.
     """
-    if not ical:
-        return ""
-    if ical.startswith(("http://", "https://")):
-        parts = urlsplit(ical)
-        return f"{parts.scheme}://{parts.netloc}/…"
-    return ical
+    sources = [ical] if isinstance(ical, str) else list(ical)
+    labels = []
+    for source in sources:
+        if not source:
+            continue
+        if source.startswith(("http://", "https://")):
+            parts = urlsplit(source)
+            labels.append(f"{parts.scheme}://{parts.netloc}/…")
+        else:
+            labels.append(source)
+    return ", ".join(labels)
 
 
 def arrival_window(booking: Booking, guests) -> tuple[datetime, datetime]:
@@ -231,7 +237,7 @@ def register(app, templates, Session, config) -> None:
         # cannot fill must never read as a quiet week.
         if everything:
             reason = None
-        elif not config.guests.ical:
+        elif not config.guests.sources:
             reason = "unconfigured"
         else:
             reason = "unsynced"
