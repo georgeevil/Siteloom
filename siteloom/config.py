@@ -831,6 +831,24 @@ class AudioConfig(BaseModel):
     release_s: float = 5.0
 
 
+class BackfillConfig(BaseModel):
+    """NVR backfill (`siteloom backfill-unifi`, `/backfill`) — CLD-317."""
+
+    # Cameras processed at once when several are asked for. Each camera
+    # is one worker thread over the one shared pipeline — the shape live
+    # ingest already runs in — so the bound is about compute, not
+    # correctness: a box that must keep up with live cameras cannot also
+    # decode three archives (CLD-105). 0 means every selected camera.
+    parallel: int = 2
+
+    @field_validator("parallel")
+    @classmethod
+    def _non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("backfill.parallel must be 0 (unbounded) or more")
+        return value
+
+
 class GuestConfig(BaseModel):
     """Booking correlation (PRD §6.7): iCal source + arrival window."""
 
@@ -1039,6 +1057,7 @@ class SiteConfig(BaseModel):
     identity: IdentityConfig = IdentityConfig()
     audio: AudioConfig = AudioConfig()
     guests: GuestConfig = GuestConfig()
+    backfill: BackfillConfig = BackfillConfig()
     library: LibraryConfig = LibraryConfig()
     training: TrainingConfig = TrainingConfig()
     integrations: IntegrationsConfig = IntegrationsConfig()

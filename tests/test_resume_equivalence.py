@@ -526,3 +526,72 @@ def test_restarted_ingest_backfills_warmup_identity_like_a_clean_run(
     # And the backlog actually ran: all 12 frames hit, warm-up included.
     assert len(clean_snap["links"]) == 1
     assert clean_snap["links"][0][3] == 12
+
+
+# -- NVR backfill, two cameras interleaved (CLD-317) ------------------------
+
+
+def test_interrupted_parallel_backfill_plus_resume_equals_clean_run(
+    tmp_path, sample_video, monkeypatch
+):
+    """Two cameras side by side, one of them stopped mid-run, then the
+    pair resumed, must land where an uninterrupted parallel run lands.
+    The interrupt is injected on one camera's own reporter — the other
+    keeps going, which is the interleaving the single-camera cases
+    cannot exercise."""
+    from test_unifi_backfill import _event_snapshot, _request, _two_camera_env
+
+    from siteloom.backfill import run_backfills
+    from siteloom.store import OperationRun
+
+    clean, _ = _two_camera_env(sample_video, tmp_path, monkeypatch, "clean")
+    run_backfills(
+        clean,
+        clean.config.cameras,
+        _request(),
+        parallel=2,
+        make_reporter=lambda cam: ProgressReporter(
+            clean.Session, "backfill-unifi", target=cam.id, bar=False, signals=False
+        ),
+    )
+
+    split, _ = _two_camera_env(sample_video, tmp_path, monkeypatch, "split")
+
+    def stopping(cam):
+        if cam.id == "front":
+            return InterruptingReporter(
+                split.Session,
+                "backfill-unifi",
+                target=cam.id,
+                bar=False,
+                signals=False,
+                at_phase="Processing clips",
+                after=1,
+            )
+        return ProgressReporter(
+            split.Session, "backfill-unifi", target=cam.id, bar=False, signals=False
+        )
+
+    first = run_backfills(
+        split, split.config.cameras, _request(), parallel=2, make_reporter=stopping
+    )
+    assert first["front"]["status"] == "stopped"
+    assert first["gate"]["status"] == "complete"
+    with split.Session() as session:
+        by_target = {r.target: r.status for r in session.query(OperationRun).all()}
+    assert by_target == {"front": "interrupted", "gate": "complete"}
+
+    # Resume: the same request again — the scan dedupes, and only front's
+    # remaining clip is still pending.
+    second = run_backfills(
+        split,
+        split.config.cameras,
+        _request(),
+        parallel=2,
+        make_reporter=lambda cam: ProgressReporter(
+            split.Session, "backfill-unifi", target=cam.id, bar=False, signals=False
+        ),
+    )
+    assert second["front"]["processed"] == 1
+    assert second["gate"]["processed"] == 0
+    assert _event_snapshot(split.Session) == _event_snapshot(clean.Session)

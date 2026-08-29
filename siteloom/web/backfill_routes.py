@@ -25,10 +25,15 @@ resumable path would have the screen imply a guarantee it does not have.
 The page says which one is missing and why, rather than quietly omitting
 it.
 
-The run happens in the *serving* process, one at a time, exactly like
-/jobs/reindex: the pipeline keeps per-camera tracker state and the
-embedded vector store is one client per path per machine, so a second
-concurrent run is a failure rather than a slowdown.
+The run happens in the *serving* process, observed through OperationRun
+like every other long job. Several cameras may run side by side — one
+thread and one row each, over one shared pipeline, the shape live ingest
+has (CLD-317) — but never the *same* camera twice: the pipeline keeps
+per-camera tracker state, so a second run on a running camera is a
+failure rather than a slowdown, and is refused with the camera named.
+Known non-guard: /jobs/reindex keeps its own single-flight state, so a
+reindex and a backfill of one camera can overlap; the reindex purges
+first, so they would interleave. Decided out of scope for CLD-317.
 """
 
 from __future__ import annotations
@@ -41,17 +46,37 @@ from fastapi import Form, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 
+from siteloom.backfill import ACTIVE_STATUSES
 from siteloom.store import BackfillClip
 from siteloom.web import nav
 
 log = logging.getLogger(__name__)
 
-#: One UI-triggered backfill at a time, in the serve process, observed
-#: through OperationRun like every other long job. `last` keeps the most
-#: recent run's scan/process outcome so a re-run over an
-#: already-covered range reads as the no-op it is instead of looking
-#: like nothing happened at all.
-_state: dict = {"thread": None, "last": None}
+#: Per-camera run state, in the serve process. `runs` keeps each camera's
+#: most recent scan/process outcome (the dict `backfill.new_state`
+#: builds) so a re-run over an already-covered range reads as the no-op
+#: it is, and so a running camera can refuse a second start. The lock
+#: makes "is it busy" and "now it is" one step, or two submits racing
+#: through the check would both start it — and every *reader* takes it
+#: too, because a page rendering while a submit inserts is "dictionary
+#: changed size during iteration". Re-entrant: the submit reads under
+#: the lock it already holds.
+_state: dict = {"runs": {}, "lock": threading.RLock()}
+
+
+def run_states() -> list[dict]:
+    """A snapshot of every camera's run state, safe to iterate."""
+    with _state["lock"]:
+        return list(_state["runs"].values())
+
+
+def running_cameras() -> list[str]:
+    """Camera ids with a backfill in flight (waiting, scanning or processing)."""
+    return [
+        state["camera"]
+        for state in run_states()
+        if state.get("status") in ACTIVE_STATUSES
+    ]
 
 #: Chunk sizes offered for a full sweep. Deliberately a short list: the
 #: number trades clip count against clip length, and every option here
@@ -203,7 +228,9 @@ def register(app, templates, Session, config) -> None:
             empty_reason = "all-done"
         else:
             empty_reason = None
-        running = _state["thread"]
+        running = running_cameras()
+        order = {c.id: i for i, c in enumerate(cameras)}
+        runs = sorted(run_states(), key=lambda s: order.get(s["camera"], len(order)))
         return {
             "site_name": config.site_name or config.site_id,
             "cameras": cameras,
@@ -213,8 +240,10 @@ def register(app, templates, Session, config) -> None:
             "failed": failed,
             "empty_reason": empty_reason,
             "chunk_choices": CHUNK_CHOICES,
-            "running": running is not None and running.is_alive(),
-            "last": _state["last"],
+            "running": running,
+            "all_running": bool(cameras) and all(c.id in running for c in cameras),
+            "runs": runs,
+            "parallel": config.backfill.parallel,
             "form": {},
             "error": None,
             **kw,
@@ -232,6 +261,7 @@ def register(app, templates, Session, config) -> None:
     @app.post("/backfill/start")
     def start_backfill(
         request: Request,
+        cameras: list[str] = Form([]),
         camera: str = Form(""),
         start: str = Form(""),
         end: str = Form(""),
@@ -239,42 +269,41 @@ def register(app, templates, Session, config) -> None:
         chunk_minutes: float = Form(15.0),
         retry_failed: str = Form("0"),
     ):
-        """Scan the NVR for the range, then ingest what it registered.
+        """Scan the NVR for the range, then ingest what it registered —
+        for every camera picked, side by side (CLD-317).
 
-        One at a time. The second start is refused rather than queued:
-        two sweeps sharing this process would share the detector's
-        per-camera tracker state and the embedded vector store, which is
-        one client per path per machine — the failure would land inside
-        the pipeline, far from the button that caused it.
+        All or nothing: if any picked camera is already running, nothing
+        starts and the answer names it. A queued start would surprise
+        the operator later; a partial one would leave the form lying
+        about which cameras it began. `camera` (singular) is the form's
+        old name and still counts — a script posting it must keep
+        working.
         """
+        wanted_ids: list[str] = []
+        for cam_id in [*cameras, camera]:
+            cam_id = (cam_id or "").strip()
+            if cam_id and cam_id not in wanted_ids:
+                wanted_ids.append(cam_id)
         form = {
-            "camera": camera,
+            "cameras": wanted_ids,
             "start": start,
             "end": end,
             "mode": mode,
             "chunk_minutes": chunk_minutes,
             "retry_failed": retry_failed == "1",
         }
-        thread = _state["thread"]
-        if thread is not None and thread.is_alive():
-            return page(
-                request,
-                409,
-                error="A backfill is already running. Wait for it to finish.",
-                form=form,
-            )
-        cam = next((c for c in unifi_cameras() if c.id == camera), None)
-        if cam is None:
+        if not wanted_ids:
+            return page(request, 400, error="Choose at least one camera.", form=form)
+        known = {c.id: c for c in unifi_cameras()}
+        unknown = [cam_id for cam_id in wanted_ids if cam_id not in known]
+        if unknown:
             return page(
                 request,
                 400,
-                error=(
-                    f"{camera!r} is not a configured UniFi camera."
-                    if camera
-                    else "Choose a camera."
-                ),
+                error=f"{unknown[0]!r} is not a configured UniFi camera.",
                 form=form,
             )
+        cams = [known[cam_id] for cam_id in wanted_ids]
         try:
             from siteloom.localtime import site_zone
 
@@ -282,90 +311,77 @@ def register(app, templates, Session, config) -> None:
         except ValueError as exc:
             return page(request, 400, error=str(exc), form=form)
 
+        from siteloom.backfill import BackfillRequest, new_state
+
         sweep = mode == "sweep"
         chunk = max(1.0, min(float(chunk_minutes), 24 * 60)) if sweep else None
         wants_retry = retry_failed == "1"
-        # Rebuilt from the whole invocation, not a couple of interesting
-        # fields: an operator continuing this run in a shell must get the
-        # sweep and the retry back, or the shell run means something else.
-        resume = " ".join(
-            [
-                "siteloom backfill-unifi",
-                cam.id,
-                f"--start {begins.isoformat()}",
-                f"--end {finishes.isoformat()}",
-            ]
-            + ([f"--chunk-minutes {chunk:g}"] if chunk else [])
-            + (["--retry-failed"] if wants_retry else [])
+        req = BackfillRequest(
+            start=begins, end=finishes, chunk_minutes=chunk, retry_failed=wants_retry
         )
-        _state["last"] = {
-            "camera": cam.id,
-            "sweep": sweep,
-            "chunk_minutes": chunk,
-            "retry_failed": wants_retry,
-            "start": begins,
-            "end": finishes,
-            "status": "running",
-            "resume": resume,
-        }
+
+        def resume_for(cam) -> str:
+            # Rebuilt from the whole invocation, not a couple of
+            # interesting fields: an operator continuing this run in a
+            # shell must get the sweep and the retry back, or the shell
+            # run means something else. One camera per line — each row
+            # on /jobs is one camera's run.
+            return " ".join(
+                [
+                    "siteloom backfill-unifi",
+                    cam.id,
+                    f"--start {begins.isoformat()}",
+                    f"--end {finishes.isoformat()}",
+                ]
+                + ([f"--chunk-minutes {chunk:g}"] if chunk else [])
+                + (["--retry-failed"] if wants_retry else [])
+            )
+
+        with _state["lock"]:
+            busy = [c for c in cams if c.id in running_cameras()]
+            if busy:
+                names = ", ".join(c.name or c.id for c in busy)
+                return page(
+                    request,
+                    409,
+                    error=(
+                        f"A backfill of {names} is already running. "
+                        "Wait for it to finish, or pick other cameras."
+                    ),
+                    form=form,
+                )
+            states = {c.id: new_state(c, req, resume_for(c)) for c in cams}
+            _state["runs"].update(states)
 
         def work():
-            from siteloom.backfill import UnifiBackfill
+            from siteloom.backfill import run_backfills
             from siteloom.ingest import IngestService
             from siteloom.progress import ProgressReporter
 
-            last = _state["last"]
             try:
                 service = IngestService(config)
-                runner = UnifiBackfill(service, cam)
-                with ProgressReporter(
+            except Exception as exc:  # pragma: no cover — via the banner
+                log.exception("backfill could not start")
+                for state in states.values():
+                    state.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+                return
+            run_backfills(
+                service,
+                cams,
+                req,
+                parallel=config.backfill.parallel,
+                # uvicorn owns the signals in this process; a stop reaches
+                # these rows through `jobs cancel`, not Ctrl-C.
+                make_reporter=lambda cam: ProgressReporter(
                     Session,
                     "backfill-unifi",
                     target=cam.id,
-                    resume_command=resume,
+                    resume_command=states[cam.id]["resume"],
                     bar=False,
-                ) as progress:
-                    with progress.phase("Scanning NVR events"):
-                        scan = runner.scan(
-                            begins, finishes, chunk_minutes=chunk
-                        )
-                    # On the jobs board as well as this page: a sweep that
-                    # registered nothing looks identical to a stalled one
-                    # unless the counters say what it found.
-                    progress.bump(
-                        registered=scan.added, already_covered=scan.skipped
-                    )
-                    last.update(
-                        added=scan.added,
-                        skipped=scan.skipped,
-                        pending=scan.pending,
-                        status="processing",
-                    )
-                    result = runner.process(
-                        retry_failed=wants_retry, progress=progress
-                    )
-                    last.update(
-                        status="complete",
-                        processed=result.processed,
-                        frames=result.frames,
-                        clip_failures=result.failed,
-                        remaining=result.remaining,
-                        failed_total=result.failed_total,
-                        retried=result.retried,
-                    )
-            except Exception as exc:  # pragma: no cover — via OperationRun
-                log.exception("backfill of %s failed", cam.id)
-                last.update(status="failed", error=f"{type(exc).__name__}: {exc}")
-            finally:
-                # A run stopped by signal leaves `status` where the
-                # reporter left it: the OperationRun row is the record of
-                # how it ended, and inventing "complete" here would
-                # contradict it.
-                if last.get("status") in ("running", "processing"):
-                    last["status"] = "stopped"
-                _state["thread"] = None
+                    signals=False,
+                ),
+                states=states,
+            )
 
-        thread = threading.Thread(target=work, name="siteloom-backfill", daemon=True)
-        _state["thread"] = thread
-        thread.start()
+        threading.Thread(target=work, name="siteloom-backfill", daemon=True).start()
         return RedirectResponse("/backfill", status_code=303)

@@ -396,3 +396,12 @@ def test_saved_config_round_trips_its_gates(tmp_path):
     path = tmp_path / "site.yaml"
     save_config(cfg, path)
     assert load_config(path).identity.identifiers["face"].min_sightings == 3
+
+
+def test_backfill_parallel_is_zero_or_more():
+    from siteloom.config import BackfillConfig
+
+    assert BackfillConfig().parallel == 2
+    assert BackfillConfig(parallel=0).parallel == 0
+    with pytest.raises(ValueError):
+        BackfillConfig(parallel=-1)
