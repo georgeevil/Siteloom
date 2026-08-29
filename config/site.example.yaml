@@ -120,7 +120,12 @@ backfill:
   parallel: 2           # cameras backfilled at once (0 = all picked); CLD-317
 
 guests:
-  ical: ""              # booking iCal URL or .ics path (Kai Apartments sync)
+  ical: ""              # booking iCal URL or .ics path — or a list, one per unit
+  # ical:
+  #   - https://example.com/api/ical/casa-1.ics
+  #   - https://example.com/api/ical/casa-2.ics
+  checkin_time: "15:00" # site wall time attached to all-day feed dates
+  checkout_time: "11:00"
   arrival_pre_hours: 2
   arrival_post_hours: 4
 

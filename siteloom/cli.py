@@ -480,14 +480,16 @@ def sync_bookings(config: Path = CONFIG_OPT):
     """Sync guest bookings from the configured iCal feed (PRD §6.7)."""
     from siteloom.config import load_config
     from siteloom.guests import sync_bookings as _sync
+    from siteloom.localtime import site_zone
     from siteloom.store import get_session, init_db, make_engine
 
     cfg = load_config(config)
     engine = make_engine(cfg.storage.db_url)
     init_db(engine)
     with get_session(engine)() as session:
-        count = _sync(session, cfg.guests)
-    typer.echo(f"synced {count} booking(s)")
+        count = _sync(session, cfg.guests, site_zone(cfg))
+    feeds = len(cfg.guests.sources)
+    typer.echo(f"synced {count} booking(s) from {feeds} feed(s)")
 
 
 @app.command()
