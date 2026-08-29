@@ -97,7 +97,12 @@ def invocation_tokens(params, values: dict) -> list[str]:
         # Positionals carry a bare name where options carry flags. Don't
         # test the class — typer's TyperArgument is not a click.Argument.
         if param.opts and not param.opts[0].startswith("-"):
-            tokens.append(str(value))
+            # A list-valued positional (`backfill-unifi cam1 cam2`) is one
+            # token per item, never the repr of the list.
+            if isinstance(value, (list, tuple)):
+                tokens.extend(str(item) for item in value)
+            else:
+                tokens.append(str(value))
             continue
         # --config even at its default: it decides which deployment the
         # command touches, and a resume line read out of `jobs list` has
@@ -118,8 +123,12 @@ def invocation_tokens(params, values: dict) -> list[str]:
     return tokens
 
 
-def _resume_command(ctx: typer.Context) -> str:
+def _resume_command(ctx: typer.Context, **overrides) -> str:
     """This invocation, rebuilt from the parsed parameters.
+
+    `overrides` replace parsed values for the line — a multi-camera
+    backfill prints one resume line *per camera*, each naming only its
+    own camera, and is otherwise the same invocation.
 
     A resume line is a promise that rerunning it continues *this* job.
     Composing it from a couple of interesting fields quietly broke that
@@ -135,7 +144,8 @@ def _resume_command(ctx: typer.Context) -> str:
     # starts with whatever argv[0] happened to be (a venv path, "root"
     # under a test runner), and a resume line has to be pasteable.
     parts = ["siteloom", *ctx.command_path.split()[1:]]
-    parts.extend(shlex.quote(t) for t in invocation_tokens(ctx.command.params, ctx.params))
+    values = {**ctx.params, **overrides}
+    parts.extend(shlex.quote(t) for t in invocation_tokens(ctx.command.params, values))
     return " ".join(parts)
 
 

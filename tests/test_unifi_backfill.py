@@ -216,3 +216,145 @@ def test_requires_unifi_camera(env):
     cam = CameraConfig(id="f", adapter="file", source="x")
     with pytest.raises(ValueError):
         UnifiBackfill(service, cam)
+
+
+# -- several cameras side by side (CLD-317) -------------------------------
+
+
+def _two_camera_env(sample_video, tmp_path, monkeypatch, name, fail_ids=()):
+    """Two UniFi cameras over one shared pipeline, one fake NVR adapter
+    *each* — the runner builds an adapter per camera and must keep it
+    that way, so the fake does too."""
+    root = tmp_path / name
+    root.mkdir()
+    config = SiteConfig(
+        site_id="test-site",
+        cameras=[
+            CameraConfig(id="front", adapter="unifi", source="nvr-cam-1", sample_fps=5.0, modules=["detection"]),
+            CameraConfig(id="gate", adapter="unifi", source="nvr-cam-2", sample_fps=5.0, modules=["detection"]),
+        ],
+        identity=IdentityConfig(enabled=False),
+        storage=StorageConfig(db_url=f"sqlite:///{root}/bf.db", media_dir=str(root / "media")),
+    )
+    dispatcher = LocalBackend()
+    dispatcher.register("detection", StubDetector())
+    service = IngestService(config, dispatcher=dispatcher)
+    gate_events = [
+        RecordingEvent("g-1", "nvr-cam-2", "motion", T0 + timedelta(minutes=5), T0 + timedelta(minutes=5, seconds=20)),
+        RecordingEvent("g-2", "nvr-cam-2", "motion", T0 + timedelta(minutes=40), T0 + timedelta(minutes=40, seconds=20)),
+    ]
+    adapters = {
+        "nvr-cam-1": FakeNvrAdapter(sample_video, make_events(), fail_ids=fail_ids),
+        "nvr-cam-2": FakeNvrAdapter(sample_video, gate_events),
+    }
+    monkeypatch.setattr("siteloom.backfill.build_adapter", lambda cam, cfg: adapters[cam.source])
+    return service, adapters
+
+
+def _event_snapshot(Session):
+    """Events by content — the same shape the resume-equivalence harness
+    compares, `confidence_sum` rounded because merge order can differ
+    float-associatively between two runs."""
+    with Session() as session:
+        return sorted(
+            (
+                e.camera_id,
+                e.class_name,
+                e.first_seen,
+                e.last_seen,
+                e.detection_count,
+                round(e.confidence_sum, 6),
+                e.significant,
+            )
+            for e in session.query(Event).all()
+        )
+
+
+def _reporter(service):
+    from siteloom.progress import ProgressReporter
+
+    return lambda cam: ProgressReporter(
+        service.Session, "backfill-unifi", target=cam.id, bar=False, signals=False
+    )
+
+
+def _request():
+    from siteloom.backfill import BackfillRequest
+
+    return BackfillRequest(start=T0 - timedelta(minutes=5), end=T0 + timedelta(hours=2))
+
+
+def test_two_cameras_in_parallel_land_where_one_after_the_other_lands(
+    sample_video, tmp_path, monkeypatch
+):
+    """The differential that protects the parallel path: the same corpus
+    through two threads must produce the same events as through one."""
+    from siteloom.backfill import run_backfills
+    from siteloom.store import OperationRun
+
+    seq, _ = _two_camera_env(sample_video, tmp_path, monkeypatch, "sequential")
+    for cam in seq.config.cameras:
+        runner = UnifiBackfill(seq, cam)
+        runner.scan(_request().start, _request().end)
+        runner.process()
+
+    par, _ = _two_camera_env(sample_video, tmp_path, monkeypatch, "parallel")
+    states = run_backfills(
+        par, par.config.cameras, _request(), parallel=2, make_reporter=_reporter(par)
+    )
+    assert {cam_id: s["status"] for cam_id, s in states.items()} == {
+        "front": "complete",
+        "gate": "complete",
+    }
+    assert states["front"]["processed"] == 2 and states["gate"]["processed"] == 2
+    assert _event_snapshot(par.Session) == _event_snapshot(seq.Session)
+    assert len(_event_snapshot(par.Session)) == 4
+    with par.Session() as session:
+        runs = session.query(OperationRun).all()
+    # One row per camera, each closed out complete.
+    assert sorted((r.target, r.status) for r in runs) == [
+        ("front", "complete"),
+        ("gate", "complete"),
+    ]
+
+
+def test_a_slot_cap_of_one_still_finishes_every_camera(sample_video, tmp_path, monkeypatch):
+    """The waiting camera heartbeats on the slot instead of deadlocking on it."""
+    from siteloom.backfill import run_backfills
+
+    service, _ = _two_camera_env(sample_video, tmp_path, monkeypatch, "capped")
+    states = run_backfills(
+        service, service.config.cameras, _request(), parallel=1, make_reporter=_reporter(service)
+    )
+    assert [s["status"] for s in states.values()] == ["complete", "complete"]
+    assert len(_event_snapshot(service.Session)) == 4
+
+
+def test_a_failing_camera_does_not_sink_its_siblings(sample_video, tmp_path, monkeypatch):
+    from siteloom.backfill import run_backfills
+
+    service, adapters = _two_camera_env(sample_video, tmp_path, monkeypatch, "onebad")
+
+    def broken(*args, **kwargs):
+        raise IOError("NVR refused the export list")
+
+    adapters["nvr-cam-1"].list_recording_events = broken
+    states = run_backfills(
+        service, service.config.cameras, _request(), parallel=2, make_reporter=_reporter(service)
+    )
+    assert states["front"]["status"] == "failed"
+    assert "NVR refused" in states["front"]["error"]
+    assert states["gate"]["status"] == "complete"
+    assert states["gate"]["processed"] == 2
+
+
+def test_the_same_camera_twice_is_one_run(sample_video, tmp_path, monkeypatch):
+    from siteloom.backfill import run_backfills
+
+    service, _ = _two_camera_env(sample_video, tmp_path, monkeypatch, "dupe")
+    front = service.config.cameras[0]
+    states = run_backfills(
+        service, [front, front], _request(), parallel=2, make_reporter=_reporter(service)
+    )
+    assert list(states) == ["front"]
+    assert states["front"]["processed"] == 2

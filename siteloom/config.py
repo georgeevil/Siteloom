@@ -831,14 +831,57 @@ class AudioConfig(BaseModel):
     release_s: float = 5.0
 
 
+class BackfillConfig(BaseModel):
+    """NVR backfill (`siteloom backfill-unifi`, `/backfill`) — CLD-317."""
+
+    # Cameras processed at once when several are asked for. Each camera
+    # is one worker thread over the one shared pipeline — the shape live
+    # ingest already runs in — so the bound is about compute, not
+    # correctness: a box that must keep up with live cameras cannot also
+    # decode three archives (CLD-105). 0 means every selected camera.
+    parallel: int = 2
+
+    @field_validator("parallel")
+    @classmethod
+    def _non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("backfill.parallel must be 0 (unbounded) or more")
+        return value
+
+
 class GuestConfig(BaseModel):
     """Booking correlation (PRD §6.7): iCal source + arrival window."""
 
-    ical: str = ""  # URL or local .ics path
+    # One URL / local .ics path, or a list of them — a multi-unit site has
+    # one calendar per unit (Kai: casa-1 and casa-2) and every feed's
+    # bookings land in the same table, keyed by the feed's own UID.
+    ical: str | list[str] = ""
+    # Booking feeds carry all-day dates (DTSTART/DTEND with no time); the
+    # site's check-in and check-out hours turn those into the instants
+    # the arrival window is measured from. Site wall time (CLD-100).
+    checkin_time: str = "15:00"
+    checkout_time: str = "11:00"
     # Events within [checkin - pre, checkin + post] hours are stamped
     # guest_window=True to suppress unknown-vehicle alarms.
     arrival_pre_hours: float = 2.0
     arrival_post_hours: float = 4.0
+
+    @field_validator("checkin_time", "checkout_time")
+    @classmethod
+    def _hh_mm(cls, value: str) -> str:
+        from datetime import time
+
+        try:
+            time.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"{value!r} is not a time of day (HH:MM)") from None
+        return value
+
+    @property
+    def sources(self) -> list[str]:
+        """The configured feeds, blanks dropped — one string or many."""
+        raw = [self.ical] if isinstance(self.ical, str) else list(self.ical)
+        return [s.strip() for s in raw if s and s.strip()]
 
 
 class LibraryConfig(BaseModel):
@@ -1014,6 +1057,7 @@ class SiteConfig(BaseModel):
     identity: IdentityConfig = IdentityConfig()
     audio: AudioConfig = AudioConfig()
     guests: GuestConfig = GuestConfig()
+    backfill: BackfillConfig = BackfillConfig()
     library: LibraryConfig = LibraryConfig()
     training: TrainingConfig = TrainingConfig()
     integrations: IntegrationsConfig = IntegrationsConfig()
