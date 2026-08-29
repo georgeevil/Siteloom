@@ -121,6 +121,11 @@ ADMIN_PREFIXES = (
     "/backfill",
     "/classes/detection",
     "/classes/events",
+    # The tuning lab's mutations run trials on the GPU and rewrite
+    # detection settings — reconfiguration, like /classes/detection.
+    # Watching trials and reading reports stays at the default read
+    # floor, the /backfill split.
+    "/detector/",
     # The site timezone (CLD-100) moves every rendered timestamp and the
     # frame form input is read in — reconfiguration, like the two above.
     # Covers set, NVR detect and the one-time browser seed alike.

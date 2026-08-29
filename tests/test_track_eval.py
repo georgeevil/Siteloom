@@ -8,7 +8,13 @@ is where a metric quietly starts lying.
 
 from __future__ import annotations
 
-from siteloom.track_eval import Observation, compare, iou, summarize
+from siteloom.track_eval import (
+    Observation,
+    compare,
+    containment,
+    iou,
+    summarize,
+)
 
 
 def walk(track_id, start_t, n, x0, step=5.0, w=100.0, h=250.0, dt=0.2):
@@ -124,6 +130,109 @@ def test_iou_of_disjoint_boxes_is_zero():
     assert iou((0, 0, 10, 10), (0, 0, 10, 10)) == 1.0
 
 
+# -- occlusion ------------------------------------------------------------
+
+
+def box(cx, cy, w, h):
+    return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+
+def occluded_pair(n, t0=0.0, dt=0.2, cx=500.0):
+    """Track 1 (200px occluder) with track 2's 60px box sitting inside
+    it — the far end of the path, one person almost fully behind the
+    other, co-moving."""
+    obs = []
+    for i in range(n):
+        t = t0 + i * dt
+        obs.append(Observation(1, t, box(cx + i, 300.0, 200.0, 400.0)))
+        obs.append(Observation(2, t, box(cx + i + 20, 320.0, 60.0, 120.0)))
+    return obs
+
+
+def test_containment_sees_the_overlap_iou_cannot():
+    """The hidden person's partial box is small relative to the
+    occluder's, so IoU stays low exactly when the occlusion is total.
+    Gating episodes on IoU would miss the failure case outright."""
+    big = box(500.0, 300.0, 200.0, 400.0)
+    small = box(520.0, 320.0, 60.0, 120.0)
+    assert containment(big, small) == 1.0
+    assert iou(big, small) < 0.5
+
+
+def test_separate_subjects_open_no_episode():
+    r = report(walk(1, 0.0, 20, 200.0) + walk(2, 0.0, 20, 900.0))
+    assert r.occlusions == []
+    assert r.crossings == 0
+    assert r.mid_occlusion_births == []
+    assert r.post_occlusion_births == []
+
+
+def test_sustained_containment_opens_one_episode():
+    r = report(occluded_pair(20))
+    assert r.crossings == 1
+    e = r.occlusions[0]
+    assert {e.track_a, e.track_b} == {1, 2}
+    assert e.t_start == 0.0
+    assert e.t_end > 3.5
+    # Neither participant is a birth: they appeared together, so neither
+    # can be the other's phantom.
+    assert r.mid_occlusion_births == []
+    assert r.post_occlusion_births == []
+
+
+def test_a_single_frame_graze_is_not_an_episode():
+    r = report(occluded_pair(1)
+               + walk(1, 0.4, 10, 200.0) + walk(2, 0.4, 10, 900.0))
+    assert r.crossings == 0
+
+
+def test_a_track_born_inside_an_open_episode_is_a_mid_birth():
+    """Failure (a) on the real clip: the sliver of the hidden person's
+    arm mints a fresh id while both subjects are already tracked."""
+    r = report(occluded_pair(20)
+               + [Observation(3, 2.0, box(510.0, 350.0, 40.0, 80.0))])
+    assert r.mid_occlusion_births == [3]
+    assert r.post_occlusion_births == []
+
+
+def test_a_subject_first_seen_already_occluded_is_a_mid_birth():
+    """Track 2 only becomes visible at all once inside track 1's box —
+    the episode opens at its birth, and the older participant is what
+    marks it as suspect rather than as an ordinary entrance."""
+    obs = [Observation(1, i * 0.2, box(500.0 + i, 300.0, 200.0, 400.0))
+           for i in range(20)]
+    obs += [Observation(2, 2.0 + i * 0.2, box(520.0 + i, 320.0, 60.0, 120.0))
+            for i in range(5)]
+    r = report(obs)
+    assert r.crossings == 1
+    assert r.mid_occlusion_births == [2]
+
+
+def test_a_track_born_just_after_an_episode_near_it_is_a_post_birth():
+    """Failure (b): the hidden person steps out and gets a stranger's
+    id. The old track never went dark, so the bridge metric is blind."""
+    r = report(occluded_pair(20)
+               + walk(3, 5.0, 10, 520.0, step=0.0, w=60.0, h=120.0))
+    assert r.post_occlusion_births == [3]
+    assert r.mid_occlusion_births == []
+
+
+def test_a_birth_far_from_or_long_after_the_episode_is_ordinary():
+    far = report(occluded_pair(20) + walk(3, 5.0, 10, 5000.0))
+    assert far.post_occlusion_births == []
+    late = report(occluded_pair(20)
+                  + walk(3, 12.0, 10, 520.0, step=0.0, w=60.0))
+    assert late.post_occlusion_births == []
+
+
+def test_an_episode_does_not_bridge_into_the_pairs_next_encounter():
+    """The same two people crossing twice is two episodes, not one long
+    one — otherwise a birth between the crossings would be blamed on an
+    episode that was not happening."""
+    r = report(occluded_pair(10) + occluded_pair(10, t0=10.0))
+    assert r.crossings == 2
+
+
 # -- the verdict ----------------------------------------------------------
 
 
@@ -172,3 +281,20 @@ def test_more_switches_is_worse():
     baseline = make(tracks=8, implausible=0)
     candidate = make(tracks=8, implausible=3)
     assert compare(baseline, candidate)["verdict"] == "worse"
+
+
+def test_trading_a_bridge_for_an_occlusion_birth_is_no_improvement():
+    """Bridges and occlusion births are the same failure — a subject
+    acquiring an identity it should not have — so swapping one for the
+    other must not read as a win."""
+    baseline = make(tracks=3, implausible=1)
+    candidate = report(
+        occluded_pair(20)
+        + [Observation(3, 2.0, box(510.0, 350.0, 40.0, 80.0))]
+    )
+    assert candidate.tracks == 3
+    assert candidate.implausible_bridges == []
+    assert candidate.mid_occlusion_births == [3]
+    v = compare(baseline, candidate)
+    assert v["verdict"] == "no change"
+    assert v["occlusion_births"] == (0, 1)

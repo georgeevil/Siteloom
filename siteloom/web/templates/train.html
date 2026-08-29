@@ -122,6 +122,37 @@
 </div>
 {% endif %}
 
+{# -- embedding space (CLD-106) --------------------------------------- #}
+<div class="tr-panel">
+  <h3>Vector store
+    {% if space.drifted %}<span class="badge missed">settings drifted</span>
+    {% elif not space.stamped %}<span class="badge missed">unstamped</span>
+    {% else %}<span class="badge ok">in sync</span>{% endif %}
+  </h3>
+  {% if space.drifted %}
+  <p class="note">
+    The configuration no longer matches the embedding space the stored
+    vectors were built in — {{ space.drifted | join('; ') }}. New and old
+    vectors are incomparable, so matching quietly degrades. The fix is a
+    rebuild: every gallery is re-embedded from its stored crops. Labels
+    and identities survive; recognition is degraded until it finishes.
+  </p>
+  <a href="/train/rebuild-vectors">Review what a rebuild would do →</a>
+  {% elif not space.stamped %}
+  <p class="note">
+    This store predates the embedding-space stamp, so the settings its
+    vectors were built with are unknown. A one-time rebuild re-embeds
+    everything from stored crops and stamps the store — after that, a
+    poisoning change (crop margin, face projection) is detected instead
+    of silently degrading matching.
+  </p>
+  <a href="/train/rebuild-vectors">Review what a rebuild would do →</a>
+  {% else %}
+  <p class="note">The stored vectors match the configured crop margin,
+     face projection and embedder dimensions.</p>
+  {% endif %}
+</div>
+
 {# -- enrolment ------------------------------------------------------- #}
 <div class="tr-panel">
   <h3>Enrolment

@@ -15,7 +15,11 @@ def test_default_disables_fuse_score():
     # The one non-library default: fused cost breaks track confirmation
     # at our few-fps sampling rate (CLD-5).
     assert data["fuse_score"] is False
-    assert data["tracker_type"] == "bytetrack"
+    # BoT-SORT with appearance-verified re-acquisition (2026-08-25,
+    # corpus-measured): motion-only matching is what minted occlusion
+    # phantoms, and the 4 s buffer below is only safe alongside it.
+    assert data["tracker_type"] == "botsort"
+    assert data["with_reid"] is True
     for key, value in TRACKER_DEFAULTS.items():
         if key != "fuse_score":
             assert data[key] == value
@@ -27,20 +31,30 @@ def test_lost_tracks_do_not_coast_for_seconds():
     a dead track waiting to adopt the next person who walks near its
     Kalman prediction — which is exactly how one event came to hold two
     people (CLD-96). The number is only meaningful as a duration, so the
-    assertion is about the duration.
+    configured quantity is `track_buffer_s` and the materialized frame
+    count must give the same coast duration at every sampling rate.
     """
-    buffered = TRACKER_DEFAULTS["track_buffer"]
-    for sample_fps in (2.0, 5.0):
-        coast_s = buffered / sample_fps
-        assert coast_s <= 5.0, (
-            f"at {sample_fps} fps a lost track survives {coast_s:.1f}s "
-            f"(track_buffer={buffered})"
+    cfg = DetectionConfig()
+    for sample_fps in (2.0, 5.0, 10.0):
+        data = yaml.safe_load(
+            tracker_config_path(cfg, sample_fps).read_text()
         )
+        coast_s = data["track_buffer"] / sample_fps
+        assert coast_s == cfg.track_buffer_s, (
+            f"at {sample_fps} fps a lost track survives {coast_s:.1f}s "
+            f"(track_buffer={data['track_buffer']})"
+        )
+    # A caller with no meaningful sampling rate gets the frames-based
+    # fallback, which is the same 4 s at the live cameras' 5 fps.
+    fallback = yaml.safe_load(tracker_config_path(cfg).read_text())
+    assert fallback["track_buffer"] == TRACKER_DEFAULTS["track_buffer"] == 20
 
 
 def test_track_buffer_is_still_overridable_per_deployment():
-    """A camera sampled faster wants a longer buffer; this is config."""
-    path = tracker_config_path(DetectionConfig(tracker={"track_buffer": 45}))
+    """An explicit frame count is a deliberate departure and wins over
+    the seconds-based derivation."""
+    cfg = DetectionConfig(tracker={"track_buffer": 45})
+    path = tracker_config_path(cfg, sample_fps=5.0)
     assert yaml.safe_load(path.read_text())["track_buffer"] == 45
 
 

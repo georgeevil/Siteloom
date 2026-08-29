@@ -1,0 +1,366 @@
+"""The tuning lab's web surface (CLD-101/102/106).
+
+Trials themselves are exercised in test_tuning.py with a stub module;
+here the contract under test is the screen's: settings parse whole
+before anything runs, applies write minimal overrides and snapshot
+first, copy is explicit about sample_fps, revert restores, and the
+mutations sit on the admin floor.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import yaml
+from fastapi.testclient import TestClient
+
+from siteloom.config import (
+    CameraConfig,
+    DetectionOverride,
+    SiteConfig,
+    StorageConfig,
+    load_config,
+    save_config,
+)
+from siteloom.web.app import create_app
+from siteloom.web.auth import required_role
+
+
+@pytest.fixture
+def env(tmp_path):
+    config = SiteConfig(
+        site_id="t",
+        cameras=[
+            CameraConfig(id="cam-a", adapter="file", source="x"),
+            CameraConfig(id="cam-b", adapter="file", source="y",
+                         sample_fps=8.0),
+        ],
+        storage=StorageConfig(
+            db_url=f"sqlite:///{tmp_path}/t.db", media_dir=str(tmp_path / "m")
+        ),
+    )
+    config.identity.enabled = False
+    config.identity.vector_db_path = str(tmp_path / "v")
+    # A real file behind the config, so saves and snapshots are real.
+    path = tmp_path / "site.yaml"
+    save_config(config, path)
+    config = load_config(path)
+    config.identity.enabled = False
+    client = TestClient(create_app(config))
+    client.config = config
+    client.config_path = path
+    return client
+
+
+def fake_run(client, run_id="20260826-000000-cam-a", **settings):
+    run_dir = Path(client.config.storage.media_dir) / "tuning" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.json").write_text(json.dumps({
+        "source": "clip.mp4", "sample_fps": 5.0, "frames": 10,
+        # Defaults mirror DetectionConfig's own, so a fake run with no
+        # kwargs is "identical to the site" by construction.
+        "settings": {
+            "model": "yolo11n.pt", "confidence": 0.4,
+            "class_confidence": {}, "tracker": {"fuse_score": False},
+            "track_buffer_s": 4.0, **settings,
+        },
+        "groups": {}, "scene": {"classes": {}, "ir": False,
+                                "saturation_mean": 60.0, "luma_mean": 100.0},
+        "moments": [], "video": None,
+    }))
+    return run_id
+
+
+def test_the_page_renders_with_effective_settings(env):
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.7)
+    body = env.get("/detector").text
+    assert "Effective settings per camera" in body
+    assert "0.7" in body
+
+
+def test_mutations_sit_on_the_admin_floor():
+    assert required_role("POST", "/detector/run") == "admin"
+    assert required_role("POST", "/detector/apply") == "admin"
+    assert required_role("GET", "/detector") == "restricted"
+
+
+def test_a_broken_settings_form_runs_nothing(env):
+    resp = env.post("/detector/run", data={
+        "source_kind": "clip", "clip": "nope.mp4", "confidence": "eleven",
+    })
+    assert resp.status_code == 400
+    assert "confidence" in resp.text
+
+
+def test_an_unknown_clip_is_refused(env):
+    resp = env.post("/detector/run", data={
+        "source_kind": "clip", "clip": "../../etc/passwd",
+    })
+    assert resp.status_code == 400
+
+
+def test_apply_to_camera_writes_the_minimal_override(env):
+    """Only what differs from the site lands in the override — a
+    restated site value would stop following later site changes."""
+    run_id = fake_run(env, confidence=0.65, tracker={
+        "fuse_score": False, "match_thresh": 0.9,
+    })
+    resp = env.post("/detector/apply",
+                    data={"run_id": run_id, "target": "cam-a"},
+                    follow_redirects=False)
+    assert resp.status_code == 303
+    override = env.config.cameras[0].detection
+    assert override.confidence == 0.65
+    assert override.tracker == {"match_thresh": 0.9}  # fuse_score = site value
+    assert override.model is None                     # matched the site
+    # ... and it survived to disk.
+    on_disk = load_config(env.config_path)
+    assert on_disk.cameras[0].detection.confidence == 0.65
+
+
+def test_apply_matching_the_site_leaves_no_override(env):
+    run_id = fake_run(env)  # settings identical to site defaults
+    env.post("/detector/apply", data={"run_id": run_id, "target": "cam-a"},
+             follow_redirects=False)
+    assert env.config.cameras[0].detection is None
+
+
+def test_apply_snapshots_first_and_revert_restores(env):
+    run_id = fake_run(env, confidence=0.9)
+    env.post("/detector/apply", data={"run_id": run_id, "target": "site"},
+             follow_redirects=False)
+    assert env.config.detection.confidence == 0.9
+    history = env.config_path.parent / "config-history"
+    snapshots = sorted(p.name for p in history.glob("site-*.yaml"))
+    assert snapshots
+    resp = env.post("/detector/revert", data={"snapshot": snapshots[-1]},
+                    follow_redirects=False)
+    assert resp.status_code == 303
+    assert env.config.detection.confidence == 0.4  # live config restored
+    assert yaml.safe_load(env.config_path.read_text())["detection"][
+        "confidence"
+    ] == 0.4  # and the file
+
+
+def test_copy_is_explicit_about_sample_fps(env):
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.7)
+    env.post("/detector/copy", data={
+        "from_camera": "cam-a", "to_camera": "cam-b",
+    }, follow_redirects=False)
+    assert env.config.cameras[1].detection.confidence == 0.7
+    assert env.config.cameras[1].sample_fps == 8.0  # scene property kept
+    env.post("/detector/copy", data={
+        "from_camera": "cam-a", "to_camera": "cam-b",
+        "include_sample_fps": "1",
+    }, follow_redirects=False)
+    assert env.config.cameras[1].sample_fps == env.config.cameras[0].sample_fps
+
+
+def test_reset_camera_drops_the_override(env):
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.7)
+    env.post("/detector/reset-camera", data={"camera": "cam-a"},
+             follow_redirects=False)
+    assert env.config.cameras[0].detection is None
+
+
+def test_run_detail_refuses_cross_source_comparison(env):
+    a = fake_run(env, run_id="20260826-000001-a")
+    b_dir = Path(env.config.storage.media_dir) / "tuning" / "20260826-000002-b"
+    b_dir.mkdir(parents=True)
+    report = json.loads(
+        (Path(env.config.storage.media_dir) / "tuning" / a / "report.json")
+        .read_text()
+    )
+    report["source"] = "different.mp4"
+    (b_dir / "report.json").write_text(json.dumps(report))
+    resp = env.get(f"/detector/runs/{a}?versus=20260826-000002-b")
+    assert resp.status_code == 400
+    assert "same source" in resp.text
+
+
+# -- the guided workflows (W1) ---------------------------------------------
+
+
+def test_the_wizard_opens_on_camera_cards(env):
+    body = env.get("/detector/tune").text
+    assert "Which camera?" in body
+    assert "cam-a" in body
+    assert "runs the site defaults" in body  # provenance at the first step
+
+
+def test_a_non_unifi_camera_is_pointed_at_upload_not_a_form_error(env):
+    body = env.get("/detector/tune?camera=cam-a").text
+    assert "not a UniFi camera" in body
+    assert "/detector/upload" in body
+
+
+def test_the_settings_step_carries_the_footage_choice(env):
+    body = env.get(
+        "/detector/tune?camera=cam-a&step=settings&source_kind=clip&clip=x.mp4"
+    ).text
+    assert 'name="clip" value="x.mp4"' in body      # hidden field for the POST
+    assert "reasoned starting point" in body         # honest preset badges
+    assert "site default" in body                    # provenance table
+    assert "Lost-track patience" in body             # words, not track_buffer_s
+
+
+def test_the_upload_workflow_is_one_page(env):
+    body = env.get("/detector/upload").text
+    assert 'name="upload"' in body
+    assert "this footage is from" in body
+    assert "Keep current settings" in body
+
+
+def test_the_help_page_renders_the_workflow_doc(env):
+    body = env.get("/detector/help").text
+    assert "A trial changes nothing" in body
+    assert "Workflow 3" in body
+
+
+def test_a_failed_trial_shows_guidance_with_the_raw_behind_it(env):
+    from siteloom.web import detector_routes
+
+    raw = ("BadRequest: Request failed: https://x/proxy/protect/api/video/"
+           "export?camera=y - Status: 404 - Reason: 502")
+    old = detector_routes._state["last"]
+    detector_routes._state["last"] = {
+        "run_id": "x", "status": "failed", "summary": "s",
+        "source": "clip.mp4", "error": raw,
+        "friendly": __import__("siteloom.tuning", fromlist=["friendly_error"])
+        .friendly_error(raw),
+    }
+    try:
+        body = env.get("/detector").text
+        assert "restarting the UniFi Protect console" in body  # the guidance
+        assert "technical detail" in body                      # raw kept behind
+    finally:
+        detector_routes._state["last"] = old
+
+
+def test_the_run_review_says_what_would_change(env):
+    run_id = fake_run(env, confidence=0.9)
+    run_dir = Path(env.config.storage.media_dir) / "tuning" / run_id
+    report = json.loads((run_dir / "report.json").read_text())
+    report["camera"] = "cam-a"
+    (run_dir / "report.json").write_text(json.dumps(report))
+    body = env.get(f"/detector/runs/{run_id}").text
+    assert "Nothing was detected" in body            # plain summary, empty run
+    assert "would change" in body
+    assert "0.9" in body and "0.4" in body           # after and now
+
+
+# -- history metadata (CLD-106) --------------------------------------------
+
+
+def test_every_config_change_records_who_what_and_why(env):
+    run_id = fake_run(env, confidence=0.9)
+    env.post("/detector/apply",
+             data={"run_id": run_id, "target": "cam-a",
+                   "reason": "driveway churned all week"},
+             follow_redirects=False)
+    history = env.config_path.parent / "config-history"
+    metas = sorted(history.glob("site-*.meta.json"))
+    assert metas
+    meta = json.loads(metas[-1].read_text())
+    assert meta["actor"] == "(open)"          # the audit convention
+    assert meta["reason"] == "driveway churned all week"
+    assert "cam-a" in meta["summary"]
+    assert "confidence" in meta["summary"]    # the diff rides in the summary
+
+
+def test_a_revert_is_itself_a_recorded_revertable_change(env):
+    run_id = fake_run(env, confidence=0.9)
+    env.post("/detector/apply", data={"run_id": run_id, "target": "site"},
+             follow_redirects=False)
+    history = env.config_path.parent / "config-history"
+    first = sorted(p.name for p in history.glob("site-*.yaml"))[-1]
+    env.post("/detector/revert", data={"snapshot": first, "reason": "nope"},
+             follow_redirects=False)
+    metas = [json.loads(p.read_text())
+             for p in sorted(history.glob("site-*.meta.json"))]
+    assert any("reverted to" in m["summary"] for m in metas)
+    # The history panel shows the trail.
+    body = env.get("/detector").text
+    assert "reverted to" in body
+
+
+# -- day/night profiles (CLD-129) ------------------------------------------
+
+
+def test_apply_to_the_night_profile_diffs_against_day_effective(env):
+    """The night override records only what differs from the camera's
+    DAY-effective settings — restating a day override into the night
+    layer would detach it from future day changes."""
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.6)
+    run_id = fake_run(env, confidence=0.6, tracker={
+        "fuse_score": False, "with_reid": False,
+    })
+    env.post("/detector/apply",
+             data={"run_id": run_id, "target": "cam-a:night"},
+             follow_redirects=False)
+    night = env.config.cameras[0].night
+    assert night is not None
+    assert night.confidence is None          # 0.6 IS the day-effective value
+    assert night.tracker == {"with_reid": False}
+    # Round-trips to disk, and the effective table shows the night row.
+    on_disk = load_config(env.config_path)
+    assert on_disk.cameras[0].night.tracker == {"with_reid": False}
+    body = env.get("/detector").text
+    assert "night" in body
+
+
+def test_resetting_the_night_profile_leaves_the_day_override(env):
+    env.config.cameras[0].detection = DetectionOverride(confidence=0.6)
+    env.config.cameras[0].night = DetectionOverride(confidence=0.9)
+    env.post("/detector/reset-camera",
+             data={"camera": "cam-a", "profile": "night"},
+             follow_redirects=False)
+    assert env.config.cameras[0].night is None
+    assert env.config.cameras[0].detection.confidence == 0.6
+
+
+# -- the settings search (CLD-102) -----------------------------------------
+
+
+def test_the_search_confirm_states_the_budget(env):
+    body = env.get("/detector/search?camera=cam-a").text
+    # No clips saved for this camera yet: the page says what to do, not
+    # a form error.
+    assert "needs clips" in body
+    body = env.get("/detector/search").text
+    assert "cam-a" in body  # camera picker
+
+
+def test_a_search_with_no_clips_is_refused(env):
+    resp = env.post("/detector/search", data={"camera": "cam-a"})
+    assert resp.status_code == 400
+    assert "at least one clip" in resp.text
+
+
+def test_a_proposal_page_shows_evidence_links_and_the_apply(env):
+    root = Path(env.config.storage.media_dir) / "tuning"
+    prop_dir = root / "proposals" / "cam-a" / "20260826-000000"
+    prop_dir.mkdir(parents=True)
+    (prop_dir / "proposal.json").write_text(json.dumps({
+        "camera": "cam-a", "clips": ["clip-a"],
+        "baseline_trials": {"clip-a": "run-base"},
+        "rounds": [{"round": 1, "clips": ["clip-a"], "standings": [
+            {"name": "preset:garden-foliage", "total": 1, "kept": True},
+        ]}],
+        "winner": {"name": "preset:garden-foliage",
+                   "overrides": {"confidence": 0.5}, "total": 1,
+                   "scores": {"clip-a": 1}, "trials": {"clip-a": "run-win"}},
+    }))
+    body = env.get("/detector/proposals/cam-a/20260826-000000").text
+    assert "preset:garden-foliage" in body
+    assert "/detector/runs/run-win?versus=run-base" in body  # evidence first
+    assert "Apply the proposal" in body
+    # ... and the hub lists it as waiting for review.
+    assert "Proposals waiting" in env.get("/detector").text
+
+
+def test_search_mutations_sit_on_the_admin_floor():
+    assert required_role("POST", "/detector/search") == "admin"
+    assert required_role("GET", "/detector/proposals/x/y") == "restricted"

@@ -51,6 +51,7 @@ class EventRulesOverride(BaseModel):
     identify_min_confidence: float | None = None
     identify_min_crop_px: int | None = None
     identify_only_significant: bool | None = None
+    occlusion_stitch: bool | None = None
 
 
 class PlateFloors(NamedTuple):
@@ -140,6 +141,39 @@ class CameraIdentityOverride(BaseModel):
         return values
 
 
+class DetectionOverride(BaseModel):
+    """Per-camera detection overrides (CLD-101) — only non-None apply.
+
+    The differences between cameras are not subtle: subject scale,
+    lighting, motion and clutter all vary by an order of magnitude, and
+    every confidence floor and tracker threshold is scale-dependent.
+    Same pattern as `EventRulesOverride`, resolved by
+    `DetectionConfig.for_camera`.
+
+    Deliberately absent, all for recorded reasons:
+    * `classes` — structural, like `class_groups`: it describes what the
+      site tracks, not how one camera sees it (CLD-101).
+    * `crop_margin` — not a setting but a migration: it changes the
+      embedding space, so varying it per camera would make one camera's
+      vectors incomparable with the rest of the site's (CLD-106).
+    * `device` — a property of the machine, never of a camera.
+
+    `model` IS overridable — the one hard camera that needs the larger
+    model is CLD-101's judgement call — but each distinct model is a
+    separately loaded network, so it costs memory per camera, not per
+    site.
+    """
+
+    model: str | None = None
+    confidence: float | None = None
+    class_confidence: dict[str, float] | None = None
+    #: Merged over the site tracker dict (which itself merges over
+    #: TRACKER_DEFAULTS) rather than replacing it — otherwise a camera
+    #: overriding one knob would silently drop the site's fuse_score.
+    tracker: dict[str, float | int | bool | str] | None = None
+    track_buffer_s: float | None = None
+
+
 class CameraConfig(BaseModel):
     id: str
     name: str = ""
@@ -162,6 +196,15 @@ class CameraConfig(BaseModel):
     events: "EventRulesOverride | None" = None
     # Per-camera identity gates — per-identifier similarity thresholds.
     identity: "CameraIdentityOverride | None" = None
+    # Per-camera detection overrides (CLD-101): confidence floors,
+    # tracker knobs, model. Resolved by DetectionConfig.for_camera.
+    detection: DetectionOverride | None = None
+    # The night profile (CLD-129): a second override layered over the
+    # camera's day-effective settings whenever the footage reads as IR
+    # (measured — `siteloom/scene.py` — never the clock, because
+    # reindex/backfill process old footage at today's wall time).
+    # Setting it is what turns profile switching on for a camera.
+    night: DetectionOverride | None = None
 
 
 class UniFiConfig(BaseModel):
@@ -203,6 +246,20 @@ class DetectionConfig(BaseModel):
     # created and instantly discarded, and every detection becomes its
     # own event (CLD-5).
     tracker: dict[str, float | int | bool | str] = {"fuse_score": False}
+    # How long a lost track may coast on its Kalman prediction before the
+    # tracker drops it, in seconds of stream time. The underlying knob is
+    # `track_buffer`, which counts *sampled* frames — a fixed frame count
+    # silently means 5 s on a 2 fps camera and 2 s on a 5 fps one, which
+    # is how CLD-96's fix was right for one sampling rate only. The
+    # effective buffer is round(track_buffer_s * sample_fps) per camera;
+    # an explicit `tracker.track_buffer` still overrides it outright.
+    # 4 s survives a person walking behind another (the occlusion corpus
+    # clip's overlap is ~4 s) and is safe only because the default
+    # tracker verifies re-acquisition by appearance (BoT-SORT ReID) —
+    # a long buffer with motion-only matching re-opens CLD-96, where a
+    # dead track's coasting prediction adopted a stranger. Buffer length
+    # and ReID are one decision, not two.
+    track_buffer_s: float = 4.0
     # Per-class minimum confidence, overriding `confidence` for that
     # class (e.g. demand more of "dog" than "person"). The detector runs
     # at the lowest applicable threshold and per-class filtering happens
@@ -228,6 +285,37 @@ class DetectionConfig(BaseModel):
         "cat",
         "bird",
     ]
+
+    def for_camera(
+        self, camera: "CameraConfig", profile: str = "day"
+    ) -> "DetectionConfig":
+        """Effective detection settings for one camera (CLD-101), for
+        one profile (CLD-129).
+
+        Site defaults + the camera's `DetectionOverride` + (night) the
+        camera's `night` override — night layers over the day-effective
+        values, so a camera's daytime tuning carries into its nights
+        except where the night override says otherwise. Shared by the
+        live pipeline, the tuning lab and the tracker harness so no two
+        surfaces can disagree about what a camera actually runs.
+        `tracker` merges (over the site dict, which merges over
+        TRACKER_DEFAULTS); every other non-None field replaces.
+        """
+        layers = [o for o in (camera.detection,) if o is not None]
+        if profile == "night" and camera.night is not None:
+            layers.append(camera.night)
+        if not layers:
+            return self
+        merged = self.model_copy(deep=True)
+        for override in layers:
+            for field, value in override.model_dump().items():
+                if value is None:
+                    continue
+                if field == "tracker":
+                    merged.tracker = {**merged.tracker, **value}
+                else:
+                    setattr(merged, field, value)
+        return merged
 
 
 class EventConfig(BaseModel):
@@ -283,6 +371,17 @@ class EventConfig(BaseModel):
     identify_min_confidence: float = 0.5
     identify_min_crop_px: int = 48
     identify_only_significant: bool = True
+    # Occlusion-aware stitching: a track born inside (or just after)
+    # another subject's box is a suspect phantom, and stitching it by
+    # IoU is exactly the trap — its box overlaps the *occluder*, so the
+    # IoU vote hands the hidden subject's frames to the wrong event.
+    # When on, a suspect birth skips the IoU stitch and starts its own
+    # event; the identity-aware merge then folds it into the right visit
+    # only if its embedding clears CLD-41's full gate (threshold and
+    # margin). An ambiguous phantom stays a fragment, which is the
+    # correct failure: the stitcher exists to undo fragments, and
+    # nothing undoes a wrong merge. Off until the corpus says otherwise.
+    occlusion_stitch: bool = False
 
     def for_camera(self, camera: "CameraConfig") -> "EventConfig":
         """Effective rules for one camera: site defaults + overrides.

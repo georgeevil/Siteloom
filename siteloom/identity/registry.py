@@ -65,6 +65,20 @@ class IdentifierRegistry:
             self._embedders[algo] = embedder
         return embedder
 
+    def generic_embedder(self):
+        """The shared appearance embedder, independent of any identifier.
+
+        For callers that compare crops to each other (the occlusion swap
+        check) rather than resolving them against a gallery — available
+        even when no configured identifier uses the generic algo."""
+        embedder = self._embedders.get("generic")
+        if embedder is None:
+            from siteloom.identity.embedders import build_embedder
+
+            embedder = build_embedder("generic", device=self._device)
+            self._embedders["generic"] = embedder
+        return embedder
+
     @property
     def known(self) -> dict[str, IdentifierConfig]:
         return dict(self._identifiers)

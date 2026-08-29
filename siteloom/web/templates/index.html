@@ -519,6 +519,7 @@
               <span class="inline-cam">{{ e.camera.name if e.camera else e.camera_id }} · </span>
               {{ e.detection_count }} det<span class="inline-conf"> · {{ '%.2f' | format(e.best_confidence) }}</span>
               {%- if e.guest_window %} · guest{% endif %}
+              {%- if e.suspect_swap %} · <span title="possible ID swap across an occlusion — open the event to rule">swap?</span>{% endif %}
             </div>
           </div>
         </div>

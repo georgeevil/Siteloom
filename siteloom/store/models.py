@@ -11,6 +11,7 @@ joined by Identity.id, which is used as the vector point id's payload.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -127,6 +128,26 @@ class Event(Base):
     # and writers that don't gate (Frigate consumer, tests) — stay visible;
     # `siteloom events retag` recomputes historical rows from stored counts.
     significant: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    # Machine-raised suspicion of a mid-occlusion ID swap: when an
+    # occlusion episode closed, this event's post-episode crops matched
+    # the *other* participant's pre-episode crops better than its own by
+    # a margin (`ingest._check_swap`). The machine half of what
+    # `multi_subject` records by hand — kept separate because the corpus
+    # loop (`track_ab.py suggest`) reads multi_subject as *operator*
+    # ground truth, and a machine guess must not impersonate it. While
+    # the suspicion stands, the resolver makes no new identity claims on
+    # the event and learns nothing from it: its later crops may belong
+    # to the other subject, which is exactly what cannot be assumed.
+    # An operator confirm promotes both events to multi_subject (a
+    # labelled example, feeding the corpus); confirm or reject clears
+    # the suspicion on both.
+    suspect_swap: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    suspect_swap_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # JSON evidence: the paired event, the episode window, and the
+    # cross/own similarity scores the suspicion rests on — so the badge
+    # can say *why*, and a rejected flag leaves an inspectable record of
+    # what the detector got wrong.
+    suspect_swap_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     camera: Mapped[Camera] = relationship(back_populates="events")
     detections: Mapped[list["Detection"]] = relationship(back_populates="event")
@@ -148,6 +169,18 @@ class Event(Base):
             for link in self.identities
             if link.identity_id is not None and link.unlinked_at is None
         ]
+
+    @property
+    def swap_note(self) -> dict | None:
+        """The suspicion's evidence, parsed — or None (no note, or a
+        corrupt one; a bad row must degrade to `no detail`, not take the
+        event page down with it)."""
+        if not self.suspect_swap_note:
+            return None
+        try:
+            return json.loads(self.suspect_swap_note)
+        except ValueError:
+            return None
 
     @property
     def mean_confidence(self) -> float | None:
@@ -229,6 +262,17 @@ class Detection(Base):
     # retag` both directions) cannot double-identify a row and inflate
     # hit counts or re-learn duplicate vectors. Naive UTC (CLD-100).
     identified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Whether this frame sat inside an occlusion episode — another
+    # track's box over this one for several frames (`siteloom/tracking/
+    # occlusion.py`) — when it was stored. NULL means "not measured"
+    # (pre-column row, or a writer with no monitor: backfill of loose
+    # media, the Frigate consumer) and renders as nothing, never as
+    # "clear" — the CLD-254 honesty rule. An occluded frame may still
+    # *match* an identity, but the resolver refuses to let it teach or
+    # found one: a partial-box crop is the worst kind of gallery
+    # evidence, and the flag is persisted so the CLD-286 backlog replay
+    # applies the same refusal to warm-up frames.
+    occluded: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     event: Mapped[Event] = relationship(back_populates="detections")
 

@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+{% block title %}Tuning{% endblock %}
+{% block subtitle %}try detector settings against real footage before anything goes live{% endblock %}
+
+{#
+  The detector tuning lab (CLD-101/102/106). Three panels in the order
+  an operator uses them: run a sandboxed trial, read the evidence, and
+  only then touch what is live (apply / copy / revert). The per-camera
+  effective table exists because a merged config nobody can read is how
+  a wrong setting survives for months (CLD-101).
+#}
+
+{% block content %}
+<style>
+  .dt-panel {
+    border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel);
+    padding: 14px 16px; margin-bottom: 14px;
+  }
+  .dt-panel h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .dt-panel p { margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.6; max-width: 82ch; }
+  .dt-form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .dt-field { display: flex; flex-direction: column; gap: 4px; }
+  .dt-field > span {
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--faint);
+  }
+  .dt-field select, .dt-field input, .dt-field textarea {
+    padding: 6px 9px; border-radius: 6px; font-family: inherit; font-size: 12px;
+    border: 1px solid var(--control-border); background: var(--raised); color: var(--text);
+  }
+  .dt-field textarea { font-family: var(--font-mono); min-width: 220px; }
+  .dt-go {
+    padding: 7px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px;
+    border: 1px solid transparent; background: var(--accent); color: var(--on-accent);
+  }
+  .dt-go:disabled { background: var(--raised); color: var(--faint); cursor: not-allowed; }
+  .dt-error { color: oklch(0.7 0.16 30); font-size: 12.5px; margin: 8px 0 0; }
+  .dt-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .dt-table th, .dt-table td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--hairline); }
+  .dt-table th { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+  .dt-ovr { color: var(--accent); font-weight: 600; }
+  .dt-axis { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--muted); }
+  .dt-preview img { max-width: 100%; border-radius: 8px; border: 1px solid var(--hairline); }
+</style>
+
+<style>
+  .dt-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .dt-card { display: block; border: 1px solid var(--control-border); border-radius: 8px; padding: 14px 16px; text-decoration: none; color: inherit; font-size: 12.5px; line-height: 1.6; }
+  .dt-card:hover { border-color: var(--accent); }
+  .dt-card strong { display: block; font-size: 13.5px; margin-bottom: 4px; }
+  .dt-card span { color: var(--muted); }
+  .dt-fail { border-left: 3px solid oklch(0.6 0.15 30); padding: 6px 12px; font-size: 12.5px; line-height: 1.6; margin: 8px 0; }
+  .dt-fail details { margin-top: 4px; }
+  .dt-fail summary { font-size: 11px; color: var(--faint); cursor: pointer; }
+  .dt-fail pre { font-size: 10.5px; white-space: pre-wrap; color: var(--muted); }
+</style>
+
+<div class="dt-panel">
+  <h3>What do you want to do?</h3>
+  <p>
+    Everything here is a rehearsal: trials read footage, draw what was
+    tracked, and change nothing — settings only move when you apply a
+    reviewed result. The <a href="/detector/help">workflow guide</a> has
+    worked examples.
+  </p>
+  {% if running %}
+  <p><strong>A trial is running</strong> — watch it on <a href="/jobs">Jobs</a>.</p>
+  {% endif %}
+  {% if last and not running %}
+    {% if last.status == 'failed' %}
+    <div class="dt-fail">
+      The last trial ({{ last.source }}) did not finish.
+      {% if last.friendly %}{{ last.friendly }}{% endif %}
+      <details><summary>technical detail</summary><pre>{{ last.error }}</pre></details>
+    </div>
+    {% else %}
+    <p>
+      Last trial: <strong>{{ last.status }}</strong> — {{ last.source }} ({{ last.summary }})
+      {% if last.status == 'complete' %}· <a href="/detector/runs/{{ last.run_id }}">open the report</a>{% endif %}
+    </p>
+    {% endif %}
+  {% endif %}
+  <div class="dt-cards">
+    <a class="dt-card" href="/detector/tune">
+      <strong>Tune a camera from its own footage</strong>
+      <span>Pick a camera, a ten-minute window, and a scene description —
+        the trial shows what those settings would have tracked.</span>
+    </a>
+    <a class="dt-card" href="/detector/upload">
+      <strong>Try settings on a downloaded clip</strong>
+      <span>For a camera that isn't set up yet, or when the recorder
+        won't export — upload an MP4 and test against it.</span>
+    </a>
+    <a class="dt-card" href="#trials">
+      <strong>Review &amp; compare trials</strong>
+      <span>Open past runs, compare two over the same footage, and apply
+        the one that looks right.</span>
+    </a>
+    <a class="dt-card" href="/detector/search">
+      <strong>Search for better settings</strong>
+      <span>Try every named bundle against a camera's saved clips —
+        overnight-sized, cancellable, and it only ever <em>proposes</em>.</span>
+    </a>
+  </div>
+  {% if proposals %}
+  <p style="margin-top:10px">
+    Proposals waiting for review:
+    {% for p in proposals %}
+    <a href="/detector/proposals/{{ p.camera }}/{{ p.stamp }}">{{ p.camera }} · {{ p.stamp }}{% if p.winner %} → {{ p.winner }}{% else %} (no winner){% endif %}</a>{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+</div>
+
+<details class="dt-panel">
+  <summary style="cursor:pointer; font-size:13px; font-weight:600">Advanced: run a trial with explicit settings</summary>
+  <p style="margin-top:8px">
+    The raw knobs, for when you know exactly what to try. Same sandbox,
+    same report.
+  </p>
+  <form class="dt-form" method="post" action="/detector/run" enctype="multipart/form-data">
+    <div class="dt-field">
+      <span>source</span>
+      <select name="source_kind">
+        <option value="nvr">NVR window (camera + time)</option>
+        <option value="clip" {% if not sources %}disabled{% endif %}>cached clip</option>
+        <option value="upload">upload a video</option>
+      </select>
+    </div>
+    <div class="dt-field">
+      <span>camera (settings base + NVR source)</span>
+      <select name="camera">
+        <option value="">— site defaults —</option>
+        {% for cam in cameras %}
+        <option value="{{ cam.id }}" {% if form.camera == cam.id %}selected{% endif %}>{{ cam.name or cam.id }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="dt-field">
+      <span>start (site time)</span>
+      <input type="datetime-local" name="start" step="1" value="{{ form.start or '' }}">
+    </div>
+    <div class="dt-field">
+      <span>end</span>
+      <input type="datetime-local" name="end" step="1" value="{{ form.end or '' }}">
+    </div>
+    <div class="dt-field">
+      <span>cached clip</span>
+      <select name="clip">
+        {% for name in sources %}<option>{{ name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="dt-field">
+      <span>or upload</span>
+      <input type="file" name="upload" accept="video/*">
+    </div>
+    <div class="dt-field">
+      <span>scene preset</span>
+      <select name="preset">
+        <option value="">— none —</option>
+        {% for key, p in presets.items() %}
+        <option value="{{ key }}">{{ p.label }}{% if not p.tested %} (starting point){% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="dt-field">
+      <span>merge ↔ split</span>
+      <div class="dt-axis">
+        <span>split more</span>
+        <input type="range" name="axis" min="-2" max="2" step="1" value="0">
+        <span>merge more</span>
+      </div>
+    </div>
+    <div class="dt-field"><span>confidence</span><input name="confidence" size="5" placeholder="0.4"></div>
+    <div class="dt-field"><span>sample fps</span><input name="sample_fps" size="5" placeholder="5.0"></div>
+    <div class="dt-field"><span>lost-track buffer (s)</span><input name="track_buffer_s" size="5" placeholder="4.0"></div>
+    <div class="dt-field"><span>model</span><input name="model" size="10" placeholder="yolo11s.pt"></div>
+    <div class="dt-field"><span>class confidence (yaml)</span><textarea name="class_confidence" rows="2" placeholder="person: 0.6"></textarea></div>
+    <div class="dt-field"><span>tracker overrides (yaml)</span><textarea name="tracker" rows="2" placeholder="match_thresh: 0.8"></textarea></div>
+    <button class="dt-go" {% if running %}disabled{% endif %}>Run trial</button>
+  </form>
+  {% if error %}<p class="dt-error">{{ error }}</p>{% endif %}
+</details>
+
+<div class="dt-panel" id="preview">
+  <h3>Live preview</h3>
+  <p>
+    The same settings, drawn on the live feed — its own tracker, so the
+    real pipeline never sees these frames. Costs a detector pass per
+    shown frame; it stops itself after ten minutes.
+  </p>
+  {% if preview %}
+  <p><strong>{{ preview.camera }}</strong> · {{ preview.summary }}
+    <form method="post" action="/detector/preview/stop" style="display:inline">
+      <button class="dt-go">stop</button>
+    </form>
+  </p>
+  <div class="dt-preview"><img src="/detector/preview.mjpeg" alt="live preview"></div>
+  {% else %}
+  <form class="dt-form" method="post" action="/detector/preview">
+    <div class="dt-field">
+      <span>camera</span>
+      <select name="camera">
+        {% for cam in cameras %}<option value="{{ cam.id }}">{{ cam.name or cam.id }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="dt-field">
+      <span>scene preset</span>
+      <select name="preset">
+        <option value="">— current settings —</option>
+        {% for key, p in presets.items() %}<option value="{{ key }}">{{ p.label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="dt-field"><span>confidence</span><input name="confidence" size="5"></div>
+    <div class="dt-field"><span>tracker overrides (yaml)</span><textarea name="tracker" rows="2"></textarea></div>
+    <button class="dt-go">Start preview</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="dt-panel" id="trials">
+  <h3>Trials</h3>
+  {% if runs %}
+  <table class="dt-table">
+    <tr><th>run</th><th>source</th><th>fps</th><th>frames</th><th>groups (tracks · births)</th><th></th></tr>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/detector/runs/{{ r.id }}">{{ r.id }}</a></td>
+      <td>{{ r.report.source }}</td>
+      <td>{{ r.report.sample_fps }}</td>
+      <td>{{ r.report.frames }}</td>
+      <td>
+        {% for key, g in r.report.groups.items() %}
+          {{ key }}: {{ g.tracks }}t · {{ g.mid_occlusion_births + g.post_occlusion_births }}b{% if not loop.last %} · {% endif %}
+        {% else %}nothing tracked{% endfor %}
+      </td>
+      <td>{{ r.report.settings.tracker.tracker_type or 'botsort' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>No trials yet. Run one above — the report is where the evidence lives.</p>
+  {% endif %}
+</div>
+
+<div class="dt-panel">
+  <h3>Effective settings per camera</h3>
+  <p>What each camera actually runs — site defaults plus its override.
+     Overridden values are marked; everything else follows the site.</p>
+  <table class="dt-table">
+    <tr><th>camera</th><th>model</th><th>confidence</th><th>class floors</th><th>buffer (s)</th><th>tracker</th><th>fps</th><th></th></tr>
+    {% for row in effective %}
+    <tr>
+      <td>{{ row.camera.name or row.camera.id }}{% if row.profile == 'night' %} · <strong>night</strong>{% endif %}</td>
+      <td class="{{ 'dt-ovr' if 'model' in row.overridden }}">{{ row.effective.model }}</td>
+      <td class="{{ 'dt-ovr' if 'confidence' in row.overridden }}">{{ row.effective.confidence }}</td>
+      <td class="{{ 'dt-ovr' if 'class_confidence' in row.overridden }}">{{ row.effective.class_confidence or '—' }}</td>
+      <td class="{{ 'dt-ovr' if 'track_buffer_s' in row.overridden }}">{{ row.effective.track_buffer_s }}</td>
+      <td class="{{ 'dt-ovr' if 'tracker' in row.overridden }}">{{ row.effective.tracker }}</td>
+      <td>{{ row.camera.sample_fps }}</td>
+      <td>
+        {% if (row.profile == 'night' and row.camera.night) or (row.profile == 'day' and row.camera.detection) %}
+        <form method="post" action="/detector/reset-camera" style="display:inline">
+          <input type="hidden" name="camera" value="{{ row.camera.id }}">
+          <input type="hidden" name="profile" value="{{ row.profile }}">
+          <button title="{% if row.profile == 'night' %}remove the night profile{% else %}drop this camera's override; follow the site again{% endif %}">reset</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <form class="dt-form" method="post" action="/detector/copy" style="margin-top:10px">
+    <div class="dt-field">
+      <span>copy override from</span>
+      <select name="from_camera">{% for cam in cameras %}<option value="{{ cam.id }}">{{ cam.name or cam.id }}</option>{% endfor %}</select>
+    </div>
+    <div class="dt-field">
+      <span>to</span>
+      <select name="to_camera">{% for cam in cameras %}<option value="{{ cam.id }}">{{ cam.name or cam.id }}</option>{% endfor %}</select>
+    </div>
+    <label style="font-size:12px"><input type="checkbox" name="include_sample_fps" value="1"> also copy sample_fps (a property of the scene, not the settings)</label>
+    <button class="dt-go">Copy</button>
+  </form>
+</div>
+
+{% if snapshots %}
+<div class="dt-panel">
+  <h3>Config history</h3>
+  <p>Every apply and copy snapshots <code>site.yaml</code> first, with
+     who, when and why. Revert restores the file whole and re-applies the
+     detection settings live; anything else the snapshot differs in takes
+     effect on restart.</p>
+  <table class="dt-table">
+    <tr><th>snapshot</th><th>who</th><th>what changed after it</th><th>why</th><th></th></tr>
+    {% for snap in snapshots %}
+    <tr>
+      <td>{{ snap.name }}</td>
+      <td>{{ snap.meta.actor if snap.meta else '—' }}</td>
+      <td>{{ snap.meta.summary if snap.meta else '(pre-history snapshot)' }}</td>
+      <td>{{ snap.meta.reason if snap.meta and snap.meta.reason else '—' }}</td>
+      <td>
+        <form method="post" action="/detector/revert" style="display:flex; gap:6px">
+          <input type="hidden" name="snapshot" value="{{ snap.name }}">
+          <input name="reason" placeholder="why revert? (optional)" size="18" style="font-size:11px">
+          <button title="restore the config as it was before this change">revert to this</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}

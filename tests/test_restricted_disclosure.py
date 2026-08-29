@@ -97,6 +97,9 @@ PATH_PARAMS = {
     "read_id": "1",
     "link_id": "1",
     "camera_id": "cam1",
+    # /detector/proposals/{camera_id}/{stamp} — no proposal exists in the
+    # walk's fixture, so the route answers 404, which discloses nothing.
+    "stamp": "20260101-000000",
     # /plates/p/{plate} — the canonical (normalized) spelling, since the
     # route 307s anything else and a redirect body proves nothing.
     "plate": "KX19ZTP",

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Settings search{% endblock %}
+{% block subtitle %}try every named bundle overnight — it proposes, you decide{% endblock %}
+
+{#
+  CLD-102's third rung: an overnight search that proposes, never
+  applies. The confirm page is a budget statement — hours of GPU are
+  spent knowingly, and the candidate list is named bundles, never a
+  parameter grid.
+#}
+
+{% block content %}
+<style>
+  .ds-panel { border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel); padding: 14px 16px; margin-bottom: 14px; max-width: 86ch; }
+  .ds-panel h3 { margin: 0 0 6px; font-size: 13px; }
+  .ds-panel p, .ds-panel li, .ds-panel label { font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+  .ds-go { padding: 8px 16px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); }
+</style>
+
+<div class="ds-panel">
+  <h3>Search for better settings{% if camera %} — {{ camera.name or camera.id }}{% endif %}</h3>
+  {% if not camera %}
+  <p>Pick the camera to search for:</p>
+  {% for cam in cameras %}
+  <p><a href="/detector/search?camera={{ cam.id }}">{{ cam.name or cam.id }}</a></p>
+  {% endfor %}
+  {% elif not clips %}
+  <p>No saved footage for {{ camera.name or camera.id }} yet. A search
+     needs clips to judge candidates against — pull an
+     <a href="/detector/tune?camera={{ camera.id }}">NVR window</a> or
+     <a href="/detector/upload?camera={{ camera.id }}">upload a clip</a>
+     first. Two or three clips showing real activity beat ten empty ones.</p>
+  {% else %}
+  <p>
+    Every named settings bundle ({{ cand_count }} candidates: the scene
+    presets, the merge↔split positions, and small confidence nudges) is
+    tried against this camera's saved footage. Candidates that lose on
+    the first clip are dropped; survivors earn more clips. The winner —
+    if any beats the current settings — becomes a <strong>proposal with
+    evidence pictures</strong>. Nothing is applied without you.
+  </p>
+  <form method="post" action="/detector/search">
+    <input type="hidden" name="camera" value="{{ camera.id }}">
+    <p>Judge against:</p>
+    {% for name in clips %}
+    <label style="display:block"><input type="checkbox" name="clips" value="{{ name }}" {% if loop.index <= 4 %}checked{% endif %}> {{ name }}</label>
+    {% endfor %}
+    <p>
+      Budget: up to ~{{ est_trials }} trials, very roughly
+      {{ est_minutes }}+ minutes of detector time — live detection will
+      be slower while it runs. Cancel any time from
+      <a href="/jobs">Jobs</a>; an interrupted search keeps its finished
+      trials and makes no claim.
+    </p>
+    <button class="ds-go" {% if running %}disabled{% endif %}>Start the search</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

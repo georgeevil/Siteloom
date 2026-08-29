@@ -11,6 +11,12 @@ Job payload (all serializable):
     timestamp:  str (ISO)
     zones:      [{name, points[[x,y]..]}]  — normalized polygons
     require_zone: bool
+    sample_fps: float — the camera's sampling rate, which sizes the
+                tracker's lost-track buffer (track_buffer_s × fps);
+                omitted by callers with no meaningful rate
+    profile:    "day" | "night" — which of the camera's setting
+                profiles is in force (CLD-129); absent means day.
+                Night runs a separate model + tracker instance
 
 Result: {"detections": [{class_name, confidence, bbox, track_id,
                           zones, crop_jpeg}]}
@@ -40,40 +46,73 @@ from siteloom.dispatch.base import Job
 #: tracker config is explicit and stable across library upgrades.
 #: DetectionConfig.tracker entries are merged over these.
 #:
-#: `track_buffer` deliberately departs from ultralytics' 30 (CLD-96).
-#: It counts *sampled* frames, and their default assumes 30 fps video —
-#: at the few-fps Siteloom samples, 30 frames is six seconds of a lost
-#: track coasting on a Kalman prediction whose covariance has grown
-#: enormous, ready to adopt whoever next appears near it. That is not
-#: hypothetical: it merged two different people into one 108-detection
-#: event on real footage, bridging a 6.2 s hole with a 165 px jump.
-#: 10 frames is ~2 s at 5 fps, which measurement put at a 3.0 s / 16 px
-#: worst case over the same clip — a distance well inside one box width,
-#: i.e. plausibly still the same person.
+#: Departures from ultralytics' bytetrack.yaml, each measured on the
+#: tracker corpus (CLD-98; `docs/testing/tracker-corpus.md`):
 #:
-#: Raising it back is reasonable for a camera sampled at a higher rate;
-#: it is config, not a constant. What must not happen is treating the
-#: upstream 30 as neutral when the sampling rate makes it six seconds.
+#: * **BoT-SORT with ReID over plain ByteTrack** (2026-08-25). ByteTrack
+#:   matches on predicted position alone, which is exactly what fails
+#:   when two subjects overlap: occlusion phantoms (mid/post-occlusion
+#:   births) that the bridge metric cannot see because no track goes
+#:   dark. `model: auto` reuses the detector's own backbone features, so
+#:   there is no extra model or meaningful cost; `gmc_method: none`
+#:   because the cameras are fixed and optical flow is pure cost.
+#:
+#: * **`new_track_thresh` 0.5, up from 0.25** (2026-08-25). The sliver
+#:   of a half-hidden person is a low-confidence partial box; demanding
+#:   more confidence to *found* a track than to continue one is what cut
+#:   mid-occlusion births on the corpus, with no fragmentation cost.
+#:
+#: * **`track_buffer` derived from time, not fixed frames** (CLD-96).
+#:   The knob counts *sampled* frames, so a fixed number changes meaning
+#:   with the sampling rate — the same 10 is 2 s at 5 fps and 5 s at
+#:   2 fps. The configured quantity is `DetectionConfig.track_buffer_s`
+#:   (seconds); `tracker_config_path` derives the frame count when the
+#:   caller supplies the camera's `sample_fps`. The 20 here is only the
+#:   fallback for callers with no meaningful sampling rate (the library
+#:   indexer's sparse frames, a bare DetectionModule in a test), equal
+#:   to track_buffer_s=4.0 at the live cameras' 5 fps. An explicit
+#:   `tracker.track_buffer` overrides both.
+#:
+#:   CLD-96 cut the buffer to ~2 s because a long buffer lets a dead
+#:   track's coasting Kalman prediction adopt a stranger (two people
+#:   merged into one 108-detection event, a 6.2 s hole bridged with a
+#:   165 px jump). 4 s is safe *only because* re-acquisition is now
+#:   verified by appearance — buffer length and ReID are one decision,
+#:   not two. Do not raise this while turning `with_reid` off.
 TRACKER_DEFAULTS: dict[str, Any] = {
-    "tracker_type": "bytetrack",
+    "tracker_type": "botsort",
     "track_high_thresh": 0.25,
     "track_low_thresh": 0.1,
-    "new_track_thresh": 0.25,
-    "track_buffer": 10,
+    "new_track_thresh": 0.5,
+    "track_buffer": 20,
     "match_thresh": 0.8,
     "fuse_score": True,
+    "gmc_method": "none",
+    "proximity_thresh": 0.5,
+    "appearance_thresh": 0.8,
+    "with_reid": True,
+    "model": "auto",
 }
 
 
-def tracker_config_path(cfg: DetectionConfig) -> Path:
+def tracker_config_path(
+    cfg: DetectionConfig, sample_fps: float | None = None
+) -> Path:
     """Materialize the effective tracker config as a YAML file.
 
     ultralytics only takes tracker settings as a file path, so the merged
     dict is written under the model cache, named by content hash — the
     same config always maps to the same file, and a config change never
     reuses a stale one.
+
+    `sample_fps` is what turns `track_buffer_s` (seconds, the configured
+    quantity) into `track_buffer` (sampled frames, the tracker's unit);
+    without it the TRACKER_DEFAULTS frame count stands. An explicit
+    `tracker.track_buffer` wins over both.
     """
     merged = {**TRACKER_DEFAULTS, **cfg.tracker}
+    if "track_buffer" not in cfg.tracker and sample_fps:
+        merged["track_buffer"] = max(1, round(cfg.track_buffer_s * sample_fps))
     text = yaml.safe_dump(merged, sort_keys=True)
     digest = hashlib.sha256(text.encode()).hexdigest()[:12]
     path = (
@@ -86,22 +125,50 @@ def tracker_config_path(cfg: DetectionConfig) -> Path:
 
 
 class DetectionModule:
-    def __init__(self, cfg: DetectionConfig | None = None):
+    def __init__(
+        self,
+        cfg: DetectionConfig | None = None,
+        per_camera: dict[str, DetectionConfig] | None = None,
+    ):
         self.cfg = cfg or DetectionConfig()
+        # Already-resolved effective configs for cameras that carry a
+        # DetectionOverride (CLD-101), keyed by camera id. Resolved by
+        # the caller (`DetectionConfig.for_camera`) rather than here, so
+        # this module keeps knowing nothing about CameraConfig — it
+        # receives plain DetectionConfigs either way.
+        self._per_camera = per_camera or {}
         # One YOLO instance per camera: ultralytics keeps ByteTrack state
         # on the predictor, so sharing one instance across cameras would
         # tangle their track IDs. The nano model is small enough that a
         # per-camera copy is cheap, and each stays warm-loaded (the Ray
-        # actor pattern, PRD §7).
+        # actor pattern, PRD §7) — which is also what makes a per-camera
+        # `model` override just another entry here rather than a special
+        # case.
         self._models: dict[str, Any] = {}
-        self._tracker_path = tracker_config_path(self.cfg)
+        # Keyed by (camera, sample_fps): the buffer length is derived
+        # from the fps and the rest of the tracker dict may differ per
+        # camera. Constant per camera, so the path handed to model.track
+        # never changes under a live tracker. Distinct cameras with
+        # identical settings hash to the same file on disk.
+        self._tracker_paths: dict[tuple[str, float | None], Path] = {}
+
+    def _cfg_for(self, camera_id: str) -> DetectionConfig:
+        return self._per_camera.get(camera_id, self.cfg)
+
+    def _tracker_for(self, camera_id: str, sample_fps: float | None) -> Path:
+        key = (camera_id, sample_fps)
+        path = self._tracker_paths.get(key)
+        if path is None:
+            path = tracker_config_path(self._cfg_for(camera_id), sample_fps)
+            self._tracker_paths[key] = path
+        return path
 
     def _model_for(self, camera_id: str):
         model = self._models.get(camera_id)
         if model is None:
             from ultralytics import YOLO
 
-            model = YOLO(self.cfg.model)
+            model = YOLO(self._cfg_for(camera_id).model)
             self._models[camera_id] = model
         return model
 
@@ -114,26 +181,34 @@ class DetectionModule:
             raise ValueError("could not decode image_jpeg")
 
         camera_id = payload["camera_id"]
+        # The night profile is a different model + tracker (CLD-129):
+        # ultralytics reads tracker settings once per predictor, so the
+        # profiles cannot share one. The composite key gives each its
+        # own instance — the same mechanism per-camera models use, and
+        # the id never reaches the store (rows keep the plain camera).
+        if payload.get("profile") == "night":
+            camera_id = f"{camera_id}#night"
+        cfg = self._cfg_for(camera_id)
         model = self._model_for(camera_id)
         # Run the detector at the lowest applicable threshold; per-class
         # minimums are applied to its output below. (YOLO's conf is a
         # single global floor.)
         floor = min(
-            [self.cfg.confidence, *self.cfg.class_confidence.values()]
+            [cfg.confidence, *cfg.class_confidence.values()]
         )
         results = model.track(
             image,
             persist=True,
             conf=floor,
-            device=self.cfg.device,
-            tracker=str(self._tracker_path),
+            device=cfg.device,
+            tracker=str(self._tracker_for(camera_id, payload.get("sample_fps"))),
             verbose=False,
         )
 
         h, w = image.shape[:2]
         zones = payload.get("zones") or []
         require_zone = bool(payload.get("require_zone")) and bool(zones)
-        wanted = set(self.cfg.classes)
+        wanted = set(cfg.classes)
 
         detections: list[dict[str, Any]] = []
         result = results[0]
@@ -147,8 +222,8 @@ class DetectionModule:
             if class_name not in wanted:
                 continue
             confidence = float(boxes.conf[i])
-            if confidence < self.cfg.class_confidence.get(
-                class_name, self.cfg.confidence
+            if confidence < cfg.class_confidence.get(
+                class_name, cfg.confidence
             ):
                 continue
             x1, y1, x2, y2 = (float(v) for v in boxes.xyxy[i])
@@ -159,7 +234,7 @@ class DetectionModule:
                 continue
 
             cx1, cy1, cx2, cy2 = expand_box(
-                (x1, y1, x2, y2), self.cfg.crop_margin, w, h
+                (x1, y1, x2, y2), cfg.crop_margin, w, h
             )
             crop = image[cy1:cy2, cx1:cx2]
             crop_jpeg = None

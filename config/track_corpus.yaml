@@ -42,39 +42,102 @@ clips:
       1.7 box widths — and produced fifteen identity claims, all wrong.
       Not a stitching failure: every crop carries the same track id.
     expect:
-      # The shipped config scores 8 tracks / 0 implausible bridges here.
+      # The shipped config (2026-08-25, BoT-SORT+ReID) scores 8 tracks /
+      # 0 implausible bridges / 1 mid + 1 post occlusion birth here.
       # The headroom is deliberate: this must fail on a regression, not
-      # on a model that detects one extra frame.
+      # on a model that detects one extra frame. The old plain-ByteTrack
+      # config scored 3 mid + 2 post, so a fallback to motion-only
+      # matching trips both birth gates.
       max_implausible_bridges: 0
       max_tracks: 12
+      max_mid_occlusion_births: 2
+      max_post_occlusion_births: 1
+
+  - id: backyard-puerta-occlusion-two-people
+    camera: backyard-puerta
+    # Naive UTC — 12:06:39 site wall clock (America/Costa_Rica, UTC-6).
+    start: 2026-08-19 18:06:39
+    end: 2026-08-19 18:07:16
+    case: >
+      Two people walk toward the camera along the path. For ~4 s at the
+      far end (12:06:39-43) person B is almost fully behind person A,
+      co-moving at the same speed; a sliver of B's arm shows for a couple
+      of frames. ByteTrack mints extra IDs from partial boxes during the
+      overlap and again when B emerges; a swap is possible. The bridge
+      metric cannot see any of it — neither track goes dark. This is the
+      clip the occlusion metrics (mid/post births, crossings) exist for.
+    expect:
+      # Measured 2026-08-25 under the BoT-SORT+ReID shipped config:
+      # 2 tracks (exactly two people — ReID folds B's frame-edge
+      # fragment back into B), 0 bridges, 0 crossings, 0 births. Person
+      # B is simply not detected until they emerge from behind A, so a
+      # future model that *does* see the sliver will raise crossings —
+      # that is fine; minting a track from it is the regression, and the
+      # zero birth budgets are the point of the clip.
+      max_implausible_bridges: 0
+      max_tracks: 4
+      max_mid_occlusion_births: 0
+      max_post_occlusion_births: 0
 
 # Named tracker configurations. `shipped` is whatever the code defaults
 # to, so it moves when TRACKER_DEFAULTS moves — that is the baseline
-# every candidate is compared against.
+# every candidate is compared against. As of 2026-08-25 that is BoT-SORT
+# with ReID on detector features, a 4 s (derived) track buffer, and
+# new_track_thresh 0.5 — the "occlusion-combo" candidate, adopted after
+# it cut 1392's occlusion births 5->2 and folded the occlusion clip's
+# edge fragment back into its subject (3 tracks -> 2, i.e. two people).
+#
+# Historical variants spell out every knob they depend on rather than
+# riding the defaults, so their meaning survives the next time
+# TRACKER_DEFAULTS moves.
 configs:
   shipped: {}
 
+  # The pre-2026-08-25 shipped config: plain ByteTrack, ~2 s buffer,
+  # births on sight. Kept as the before-picture for the BoT-SORT
+  # adoption, and as the fallback candidate if ReID misbehaves on a
+  # camera the corpus does not cover yet (front-yard is always-IR;
+  # appearance features are weakest exactly there).
+  bytetrack-2s:
+    tracker_type: bytetrack
+    with_reid: false
+    new_track_thresh: 0.25
+    track_buffer: 10
+
   # Ultralytics' own default. Its track_buffer of 30 assumes 30 fps
   # video; at the few fps we sample it is six seconds of a dead track
-  # waiting to adopt a stranger. Kept as a case so the regression is
-  # visible rather than remembered.
+  # waiting to adopt a stranger — with no appearance check on
+  # re-acquisition. Kept so the regression is visible rather than
+  # remembered.
   upstream-defaults:
+    tracker_type: bytetrack
+    with_reid: false
+    new_track_thresh: 0.25
     track_buffer: 30
 
   # Rejected in CLD-97: removes every bridge by fragmenting into ~4x the
   # tracks. Kept so the next person to propose it sees why.
   loose-match:
+    tracker_type: bytetrack
+    with_reid: false
+    new_track_thresh: 0.25
     track_buffer: 10
     match_thresh: 0.5
 
-  # Also rejected in CLD-97: scored identically to plain ByteTrack, so
-  # the appearance-aware tracker that looks obviously right bought
-  # nothing. Worth re-running whenever ultralytics changes its ReID
-  # backend — "no benefit" is a measurement, not a permanent fact.
-  botsort-reid:
-    tracker_type: botsort
-    gmc_method: none          # fixed cameras: optical flow is pure cost
-    with_reid: true
-    model: auto               # detector features, no extra download
-    proximity_thresh: 0.5
-    appearance_thresh: 0.8
+  # A dedicated ReID encoder instead of detector backbone features — in
+  # ultralytics 8.4.x `model:` takes "auto" or a checkpoint path, and a
+  # classification model is the documented choice. Measured 2026-08-25:
+  # identical to "auto" on both clips, so the per-box forward pass buys
+  # nothing today. Re-run when the corpus gains an IR camera.
+  botsort-reid-cls:
+    model: yolo11n-cls.pt
+
+  # Direction check: appearance_thresh gates embedding distance at
+  # (1 - thresh) in ultralytics (bot_sort.py), so a LOWER number is a
+  # LOOSER gate — a mistake worth pinning here because "tight" was this
+  # variant's original, wrong name. Both directions measured 2026-08-25:
+  # identical to shipped on both clips.
+  appearance-loose:
+    appearance_thresh: 0.6
+  appearance-strict:
+    appearance_thresh: 0.9

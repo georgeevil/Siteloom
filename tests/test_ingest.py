@@ -124,14 +124,14 @@ class SequenceDetector:
 
 
 def _det(track_id=None, bbox=(10.0, 10.0, 80.0, 120.0), class_name="person",
-         confidence=0.9):
+         confidence=0.9, crop=b"\xff\xd8fakejpg"):
     return {
         "class_name": class_name,
         "confidence": confidence,
         "bbox": list(bbox),
         "track_id": track_id,
         "zones": [],
-        "crop_jpeg": b"\xff\xd8fakejpg",
+        "crop_jpeg": crop,
     }
 
 
@@ -265,6 +265,296 @@ def test_stitching_disabled_by_zero_gap(sample_video, tmp_path):
     service.run_camera(service.config.cameras[0])
     with service.Session() as session:
         assert session.query(Event).count() == 3
+
+
+# -- occlusion (siteloom/tracking/occlusion.py wiring) ---------------------
+
+BIG_BOX = (400.0, 100.0, 600.0, 500.0)
+#: Inside BIG_BOX — the hidden subject's partial box.
+SLIVER = (480.0, 320.0, 540.0, 440.0)
+FAR_BOX = (900.0, 100.0, 1000.0, 300.0)
+
+
+def test_occlusion_is_measured_onto_detection_rows(sample_video, tmp_path):
+    """Frames sampled while another track's box sat over this one carry
+    occluded=True; clear frames carry False, never NULL — NULL is
+    reserved for writers with no monitor (the CLD-254 honesty rule)."""
+    frames = [
+        [_det(track_id=1, bbox=BIG_BOX), _det(track_id=2, bbox=FAR_BOX)],
+        [_det(track_id=1, bbox=BIG_BOX), _det(track_id=2, bbox=SLIVER)],
+        [_det(track_id=1, bbox=BIG_BOX), _det(track_id=2, bbox=SLIVER)],
+    ]
+    service = _sequence_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        rows = session.query(Detection).order_by(Detection.id).all()
+    # Frame 1: separated — both clear. Frame 2: the overlap begins; the
+    # episode cannot confirm on one frame. Frame 3: confirmed — both
+    # participants are marked.
+    assert [r.occluded for r in rows[:2]] == [False, False]
+    assert [r.occluded for r in rows[2:4]] == [False, False]
+    assert [r.occluded for r in rows[4:6]] == [True, True]
+
+
+def test_suspect_birth_is_iou_stitched_by_default(sample_video, tmp_path):
+    """The trap, preserved for the before-picture: a sliver track born
+    inside an older track's box overlaps *the occluder*, so the IoU
+    stitch hands it the occluder's event and the event adopts the
+    phantom's track id."""
+    frames = [
+        [_det(track_id=1, bbox=BIG_BOX)],
+        [_det(track_id=1, bbox=BIG_BOX)],
+        [_det(track_id=1, bbox=BIG_BOX), _det(track_id=7, bbox=SLIVER)],
+    ]
+    service = _sequence_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).all()
+    assert len(events) == 1
+    assert events[0].track_id == 7  # the phantom stole the event
+
+
+def test_occlusion_stitch_keeps_a_suspect_birth_apart(sample_video, tmp_path):
+    """With occlusion_stitch on, the suspect birth skips the IoU stitch
+    and starts its own event — position is exactly what lies during an
+    occlusion, so only appearance evidence (the identity-aware merge,
+    CLD-41-gated) may fold it back."""
+    frames = [
+        [_det(track_id=1, bbox=BIG_BOX)],
+        [_det(track_id=1, bbox=BIG_BOX)],
+        [_det(track_id=1, bbox=BIG_BOX), _det(track_id=7, bbox=SLIVER)],
+        [_det(track_id=1, bbox=BIG_BOX), _det(track_id=7, bbox=SLIVER)],
+    ]
+    service = _sequence_service(
+        sample_video, tmp_path, frames,
+        events_cfg=EventConfig(occlusion_stitch=True),
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).order_by(Event.id).all()
+    assert len(events) == 2
+    assert events[0].track_id == 1
+    assert events[0].detection_count == 4
+    assert events[1].track_id == 7
+    assert events[1].detection_count == 2
+
+
+def test_an_ordinary_entrance_still_stitches_with_occlusion_stitch_on(
+    sample_video, tmp_path
+):
+    """The flag must only bite suspects: a fresh track id appearing where
+    an event just was (the tracker-rebuild case) still stitches by IoU."""
+    frames = [
+        [_det(track_id=1, bbox=BIG_BOX)],
+        [_det(track_id=1, bbox=BIG_BOX)],
+        [_det(track_id=9, bbox=BIG_BOX)],
+    ]
+    service = _sequence_service(
+        sample_video, tmp_path, frames,
+        events_cfg=EventConfig(occlusion_stitch=True),
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).all()
+    assert len(events) == 1
+    assert events[0].track_id == 9
+
+
+class AppearanceStub:
+    """Identity stub for the swap check: appearance_only probes get a
+    vector keyed by the crop's content; ordinary identity jobs resolve
+    nothing, keeping the resolver out of the picture."""
+
+    VECTORS = {b"subject-A": [1.0, 0.0], b"subject-B": [0.0, 1.0]}
+
+    def process(self, job):
+        if job.payload.get("appearance_only"):
+            return {"embeddings": [{
+                "identifier": "_appearance", "algo": "generic",
+                "vector": self.VECTORS.get(job.payload["crop_jpeg"]),
+                "quality": None, "plate": None, "plate_read": None,
+            }], "fingerprint": None}
+        return {"embeddings": []}
+
+
+def test_a_mid_occlusion_swap_flags_both_events(sample_video, tmp_path):
+    """The failure no other metric sees: both tracks survive the
+    occlusion, but their appearances crossed — track 1's later crops
+    look like event 2's earlier ones and vice versa. Both events get
+    `suspect_swap`, with the scores in the note."""
+    apart = (900.0, 100.0, 1000.0, 300.0)
+    a = dict(crop=b"subject-A")
+    b = dict(crop=b"subject-B")
+    frames = [
+        # Separated: three pre-episode frames each.
+        *[[_det(track_id=1, bbox=BIG_BOX, **a), _det(track_id=2, bbox=apart, **b)]
+          for _ in range(3)],
+        # Overlap: two frames of the sliver inside track 1's box.
+        *[[_det(track_id=1, bbox=BIG_BOX, **a), _det(track_id=2, bbox=SLIVER, **a)]
+          for _ in range(2)],
+        # Reappearance, appearances crossed: the tracker swapped them.
+        *[[_det(track_id=1, bbox=BIG_BOX, **b), _det(track_id=2, bbox=apart, **a)]
+          for _ in range(3)],
+    ]
+    service = _identity_service(
+        sample_video, tmp_path, frames, identity_module=AppearanceStub()
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        events = session.query(Event).order_by(Event.id).all()
+        assert len(events) == 2
+        assert all(e.suspect_swap for e in events)
+        import json as _json
+
+        note = _json.loads(events[0].suspect_swap_note)
+        assert note["other_event"] == events[1].id
+        assert sorted(note["crossed"]) == ["a", "b"]
+
+
+def test_a_clean_reappearance_flags_nothing(sample_video, tmp_path):
+    apart = (900.0, 100.0, 1000.0, 300.0)
+    a = dict(crop=b"subject-A")
+    b = dict(crop=b"subject-B")
+    frames = [
+        *[[_det(track_id=1, bbox=BIG_BOX, **a), _det(track_id=2, bbox=apart, **b)]
+          for _ in range(3)],
+        *[[_det(track_id=1, bbox=BIG_BOX, **a), _det(track_id=2, bbox=SLIVER, **a)]
+          for _ in range(2)],
+        *[[_det(track_id=1, bbox=BIG_BOX, **a), _det(track_id=2, bbox=apart, **b)]
+          for _ in range(3)],
+    ]
+    service = _identity_service(
+        sample_video, tmp_path, frames, identity_module=AppearanceStub()
+    )
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert session.query(Event).filter(Event.suspect_swap).count() == 0
+
+
+def test_cross_class_overlap_is_not_occlusion(sample_video, tmp_path):
+    """Containment cannot see depth: a person whose box sits inside a
+    parked car's box is standing in FRONT of it. Marking every such
+    frame occluded would permanently gate that walkway's learning, so
+    only same-class-group tracks can occlude each other."""
+    frames = [
+        [_det(track_id=1, bbox=BIG_BOX, class_name="car"),
+         _det(track_id=2, bbox=SLIVER, class_name="person")]
+        for _ in range(4)
+    ]
+    service = _sequence_service(sample_video, tmp_path, frames)
+    service.run_camera(service.config.cameras[0])
+    with service.Session() as session:
+        assert all(
+            r.occluded is False
+            for r in session.query(Detection).all()
+        )
+
+
+def test_a_departing_subject_swap_is_caught_one_sided(sample_video, tmp_path):
+    """The most common swap presentation: A leaves during the overlap
+    and the tracker keeps A's id on B, so only one track survives the
+    episode. The vanished side has no post-episode frames — that must
+    not silence the check."""
+    from datetime import datetime, timedelta
+
+    apart = (900.0, 100.0, 1000.0, 300.0)
+    service = _identity_service(
+        sample_video, tmp_path, [], identity_module=AppearanceStub()
+    )
+    cam = service.config.cameras[0]
+    t0 = datetime(2026, 8, 19, 18, 6, 39)
+
+    def at(i):
+        return t0 + timedelta(seconds=i * 0.2)
+
+    for i in range(3):  # separated: pre-episode evidence for both
+        service._store_detections(cam, at(i), [
+            _det(track_id=1, bbox=BIG_BOX, crop=b"subject-A"),
+            _det(track_id=2, bbox=apart, crop=b"subject-B"),
+        ])
+    for i in range(3, 5):  # the overlap
+        service._store_detections(cam, at(i), [
+            _det(track_id=1, bbox=BIG_BOX, crop=b"subject-A"),
+            _det(track_id=2, bbox=BIG_BOX, crop=b"subject-A"),
+        ])
+    for i in range(5, 20):  # B walks on wearing A's track id; A is gone
+        service._store_detections(cam, at(i), [
+            _det(track_id=1, bbox=BIG_BOX, crop=b"subject-B"),
+        ])
+    with service.Session() as session:
+        flagged = session.query(Event).filter(Event.suspect_swap).all()
+        assert len(flagged) == 2
+        import json as _json
+
+        roles = {_json.loads(e.suspect_swap_note)["role"] for e in flagged}
+        assert roles == {"a", "b"}
+
+
+def test_a_suspect_prior_is_never_merged_into(sample_video, tmp_path):
+    """The freeze must hold through the identity-aware merge: folding a
+    fresh fragment into a frozen event would make a new claim on it —
+    the exact thing the freeze forbids — and hand the fragment's clean
+    rows to whatever verdict the operator later passes."""
+    from datetime import datetime, timedelta
+
+    service = _identity_service(
+        sample_video, tmp_path, [],
+        events_cfg=EventConfig(min_detections=1, min_duration_s=0.0,
+                               min_confidence=0.0),
+    )
+    cam = service.config.cameras[0]
+    t0 = datetime(2026, 8, 19, 18, 6, 39)
+    for i in range(3):  # event A, linked to the stub's constant identity
+        service._store_detections(
+            cam, t0 + timedelta(seconds=i * 0.2), [_det(track_id=1)]
+        )
+    with service.Session() as session:
+        frozen = session.query(Event).one()
+        assert session.query(EventIdentity).count() == 1
+        frozen.suspect_swap = True
+        session.commit()
+        frozen_id = frozen.id
+    # A new track, far away (no IoU stitch), resolves to the same
+    # identity moments later — prime identity-merge bait.
+    for i in range(3, 6):
+        service._store_detections(
+            cam, t0 + timedelta(seconds=i * 0.2),
+            [_det(track_id=2, bbox=(600.0, 400.0, 700.0, 560.0))],
+        )
+    with service.Session() as session:
+        events = session.query(Event).order_by(Event.id).all()
+        assert [e.id for e in events][0] == frozen_id
+        assert len(events) == 2  # not folded into the frozen event
+        links = session.query(EventIdentity).all()
+        # The fragment claims the identity on its own row; the frozen
+        # event gained nothing.
+        assert {link.event_id for link in links} == {e.id for e in events}
+
+
+def test_a_suspected_swap_freezes_identity_claims(sample_video, tmp_path):
+    """While the flag stands, the event's frames make no new claims and
+    teach nothing — its crops may belong to the other subject."""
+    service = _identity_service(
+        sample_video, tmp_path, [[_det(track_id=1)]],
+        events_cfg=EventConfig(min_detections=1, min_duration_s=0.0,
+                               min_confidence=0.0),
+    )
+    from datetime import datetime
+
+    cam = service.config.cameras[0]
+    with service.Session() as session:
+        event = Event(camera_id="cam1", track_id=1, class_name="person",
+                      first_seen=datetime(2026, 8, 1),
+                      last_seen=datetime(2026, 8, 1),
+                      significant=True, suspect_swap=True)
+        session.add(event)
+        session.flush()
+        survived = service._identify(
+            session, cam, event, _det(track_id=1),
+            event.last_seen, None, service.config.events,
+        )
+        assert survived is event
+        assert session.query(EventIdentity).count() == 0
 
 
 def test_class_flap_shares_one_event(sample_video, tmp_path):

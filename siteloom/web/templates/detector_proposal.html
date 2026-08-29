@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Proposal {{ stamp }}{% endblock %}
+{% block subtitle %}what the search found for {{ camera.name or camera_id if camera else camera_id }}{% endblock %}
+
+{% block content %}
+<style>
+  .dp-panel { border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel); padding: 14px 16px; margin-bottom: 14px; max-width: 90ch; }
+  .dp-panel h3 { margin: 0 0 6px; font-size: 13px; }
+  .dp-panel p { font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+  .dp-table { border-collapse: collapse; font-size: 12px; }
+  .dp-table th, .dp-table td { text-align: left; padding: 4px 12px 4px 0; border-bottom: 1px solid var(--hairline); }
+  .dp-table th { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+  .dp-go { padding: 8px 16px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); }
+</style>
+
+<div class="dp-panel">
+  {% if proposal.winner %}
+  <h3>Proposed: {{ proposal.winner.name }}</h3>
+  <p>
+    Beat the current settings across {{ proposal.clips | length }}
+    clip{{ 's' if proposal.clips | length != 1 }} (score
+    {{ proposal.winner.total }}). <strong>Look at the evidence before
+    applying</strong> — every trial below has its annotated frames.
+  </p>
+  <table class="dp-table">
+    <tr><th>clip</th><th>score vs current</th><th>evidence</th></tr>
+    {% for clip, score in proposal.winner.scores.items() %}
+    <tr>
+      <td>{{ clip.split('/') | last }}</td>
+      <td>{{ score }}</td>
+      <td>
+        <a href="/detector/runs/{{ proposal.winner.trials[clip] }}">candidate run</a>
+        {% if proposal.baseline_trials.get(clip) %}
+        · <a href="/detector/runs/{{ proposal.winner.trials[clip] }}?versus={{ proposal.baseline_trials[clip] }}">compared with current</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if winner_run %}
+  <form method="post" action="/detector/apply" style="margin-top:12px; display:flex; gap:8px; align-items:center">
+    <input type="hidden" name="run_id" value="{{ winner_run }}">
+    <select name="target">
+      <option value="{{ camera_id }}">{{ camera.name or camera_id if camera else camera_id }}</option>
+      <option value="{{ camera_id }}:night">{{ camera.name or camera_id if camera else camera_id }} — night profile</option>
+    </select>
+    <input name="reason" placeholder="why? (optional, kept in history)" size="24">
+    <button class="dp-go">Apply the proposal</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <h3>No proposal</h3>
+  <p>{{ proposal.verdict }}</p>
+  {% endif %}
+</div>
+
+<div class="dp-panel">
+  <h3>How the rounds went</h3>
+  {% for round in proposal.rounds %}
+  <p><strong>Round {{ round.round }}</strong> over {{ round.clips | length }} clip(s):</p>
+  <table class="dp-table">
+    <tr><th>candidate</th><th>running score</th><th></th></tr>
+    {% for row in round.standings %}
+    <tr><td>{{ row.name }}</td><td>{{ row.total }}</td><td>{{ 'kept' if row.kept else 'dropped' }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endfor %}
+</div>
+{% endblock %}

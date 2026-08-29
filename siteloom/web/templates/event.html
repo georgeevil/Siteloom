@@ -225,6 +225,32 @@
           title="an identifiable face/plate was present but this identifier claimed nothing">mark missed identity</button>
 </form>
 
+{# Machine-raised, operator-ruled: the swap check compared this event's
+   crops across an occlusion and its later frames looked like the other
+   event's earlier ones. Identity claims are frozen while it stands —
+   a claim on mixed evidence is CLD-97 in miniature — so the two
+   buttons are how the freeze ends. "Two subjects" also records both
+   events as multi_subject, the operator mark the corpus reads. #}
+{% if event.suspect_swap %}
+{% set note = event.swap_note %}
+<form class="verdict" method="post" action="/events/{{ event.id }}/swap-verdict"
+      style="margin:0.3rem 0 0.6rem;">
+  <input type="hidden" name="next_url" value="/events/{{ event.id }}">
+  <span class="badge missed">possible ID swap</span>
+  <button name="verdict" value="confirm"
+          title="the crops changed subject — records both events as tracking failures (corpus cases)">
+    two subjects</button>
+  <button name="verdict" value="reject"
+          title="same subject throughout — clear the suspicion and resume identity claims">
+    same subject</button>
+  <span class="muted" style="font-size:0.8rem;">
+    after an occlusion, this event's later crops resembled
+    {% if note and note.other_event %}<a href="/events/{{ note.other_event }}">event {{ note.other_event }}</a>{% else %}its counterpart{% endif %}'s
+    earlier crops more than its own — identity claims are paused until you rule
+  </span>
+</form>
+{% endif %}
+
 {# A different statement from every control above it: those grade a
    claim, this says the event itself is wrong. It is also the cheapest
    corpus contribution there is — the mark carries a camera and a time

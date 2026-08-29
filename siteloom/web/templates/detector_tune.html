@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Tune a camera{% endblock %}
+{% block subtitle %}
+  {%- if step == "camera" %}which camera needs looking at?
+  {%- elif step == "footage" %}pick the footage to test against
+  {%- elif step == "upload" %}try settings on a clip you downloaded
+  {%- else %}pick what to try — nothing changes until you apply a result
+  {%- endif -%}
+{% endblock %}
+
+{#
+  The guided path (CLD-102): camera → footage → settings, each step a
+  stateless GET (state in the URL — bookmarkable, refresh-safe, the
+  import-wizard rule). The final submit goes to the same POST
+  /detector/run the Advanced form uses; this wizard adds no mutation
+  surface of its own. The upload variant collapses to one page because a
+  file input cannot ride a GET between steps.
+#}
+
+{% block content %}
+<style>
+  .tw-crumbs { font-size: 11px; color: var(--faint); margin-bottom: 12px; }
+  .tw-crumbs b { color: var(--text); }
+  .tw-block { border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel); padding: 14px 16px; margin-bottom: 14px; }
+  .tw-block h4 { margin: 0 0 6px; font-size: 13px; }
+  .tw-hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; line-height: 1.6; max-width: 80ch; }
+  .tw-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .tw-card { display: block; border: 1px solid var(--control-border); border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 12px; line-height: 1.5; }
+  .tw-card:has(input:checked) { border-color: var(--accent); background: var(--raised); }
+  .tw-card input { margin-right: 6px; }
+  .tw-card strong { display: inline; }
+  .tw-card span { display: block; color: var(--muted); margin-top: 3px; }
+  .tw-card em { display: block; font-style: normal; font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
+  .tw-tested { color: var(--accent); }
+  .tw-starting { color: var(--faint); }
+  .tw-axis { display: flex; gap: 14px; align-items: center; font-size: 11.5px; color: var(--muted); max-width: 560px; }
+  .tw-axis input { flex: 1; }
+  .tw-axis small { color: var(--faint); }
+  .tw-prov { border-collapse: collapse; font-size: 12px; width: 100%; }
+  .tw-prov td { padding: 4px 12px 4px 0; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  .tw-origin { font-family: var(--font-mono); font-size: 10px; color: var(--accent); white-space: nowrap; }
+  .tw-fixed td { color: var(--faint); }
+  .tw-fixed .tw-origin { color: var(--faint); }
+  .tw-meaning { color: var(--muted); }
+  .tw-field { display: flex; flex-direction: column; gap: 4px; margin: 0 14px 10px 0; }
+  .tw-field > span { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+  .tw-field input, .tw-field select { padding: 6px 9px; border-radius: 6px; font: inherit; font-size: 12px; border: 1px solid var(--control-border); background: var(--raised); color: var(--text); }
+  .tw-go { padding: 8px 16px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); }
+  .tw-row { display: flex; flex-wrap: wrap; align-items: flex-end; }
+</style>
+
+<p class="tw-crumbs">
+  <a href="/detector">Tuning</a> ·
+  {% if step == "upload" %}<b>Try a downloaded clip</b>
+  {% else %}
+    {% if step == "camera" %}<b>1 camera</b>{% else %}<a href="/detector/tune">1 camera</a>{% endif %}
+    → {% if step == "footage" %}<b>2 footage</b>{% elif step == "settings" %}<a href="/detector/tune?camera={{ camera.id }}">2 footage</a>{% else %}2 footage{% endif %}
+    → {% if step == "settings" %}<b>3 what to try</b>{% else %}3 what to try{% endif %}
+  {% endif %}
+</p>
+
+{% if running %}
+<div class="tw-block"><p class="tw-hint">A trial is already running —
+  watch it on <a href="/jobs">Jobs</a>. You can prepare this one; the Run
+  button will refuse until the current trial finishes.</p></div>
+{% endif %}
+
+{% if step == "camera" %}
+<div class="tw-block">
+  <h4>Which camera?</h4>
+  <p class="tw-hint">The camera decides which settings the trial starts
+     from, and where an accepted result would be applied.</p>
+  <div class="tw-cards">
+    {% for row in effective %}
+    <a class="tw-card" href="/detector/tune?camera={{ row.camera.id }}" style="text-decoration:none; color:inherit">
+      <strong>{{ row.camera.name or row.camera.id }}</strong>
+      <span>
+        {% if row.overridden %}{{ row.overridden | length }} setting{{ 's' if row.overridden|length != 1 }} tuned for this camera{% else %}runs the site defaults{% endif %}
+        · {{ row.camera.sample_fps }} frames/s
+      </span>
+    </a>
+    {% endfor %}
+  </div>
+  <p class="tw-hint" style="margin-top:10px">Camera not installed yet, or
+     footage saved on your computer? <a href="/detector/upload">Try
+     settings on a downloaded clip</a> instead.</p>
+</div>
+
+{% elif step == "footage" %}
+<div class="tw-block">
+  <h4>Footage from {{ camera.name or camera.id }}</h4>
+  {% if camera.adapter == "unifi" %}
+  <p class="tw-hint">A ten-minute window from the recorder is plenty —
+     pick a stretch where something actually happened (someone walking
+     through, a car arriving). The window below ends two minutes ago
+     because the recorder often cannot export the newest minute.</p>
+  <form class="tw-row" method="get" action="/detector/tune">
+    <input type="hidden" name="camera" value="{{ camera.id }}">
+    <input type="hidden" name="step" value="settings">
+    <input type="hidden" name="source_kind" value="nvr">
+    <div class="tw-field"><span>from (site time)</span>
+      <input type="datetime-local" name="start" step="1" value="{{ default_start }}"></div>
+    <div class="tw-field"><span>to</span>
+      <input type="datetime-local" name="end" step="1" value="{{ default_end }}"></div>
+    <div class="tw-field"><button class="tw-go">Use this window →</button></div>
+  </form>
+  {% else %}
+  <p class="tw-hint">{{ camera.name or camera.id }} is not a UniFi camera,
+     so footage cannot be pulled from the recorder here. Use
+     <a href="/detector/upload?camera={{ camera.id }}">the downloaded-clip
+     workflow</a> instead — same steps, your file.</p>
+  {% endif %}
+  {% if camera_clips %}
+  <p class="tw-hint" style="margin-top:10px">Or reuse footage already
+     pulled for this camera:</p>
+  <form class="tw-row" method="get" action="/detector/tune">
+    <input type="hidden" name="camera" value="{{ camera.id }}">
+    <input type="hidden" name="step" value="settings">
+    <input type="hidden" name="source_kind" value="clip">
+    <div class="tw-field"><span>saved clip</span>
+      <select name="clip">{% for name in camera_clips %}<option>{{ name }}</option>{% endfor %}</select></div>
+    <div class="tw-field"><button class="tw-go">Use this clip →</button></div>
+  </form>
+  {% endif %}
+</div>
+
+{% elif step == "upload" %}
+<div class="tw-block">
+  <h4>The clip, and whose footage it is</h4>
+  <p class="tw-hint">Export the clip from UniFi Protect (or any camera
+     app) as MP4. Saying which camera it came from picks the settings the
+     trial starts from — and where an accepted result would be applied.</p>
+</div>
+<form method="post" action="/detector/run" enctype="multipart/form-data">
+  <input type="hidden" name="source_kind" value="upload">
+  <div class="tw-block tw-row">
+    <div class="tw-field"><span>video file (mp4)</span>
+      <input type="file" name="upload" accept="video/*" required></div>
+    <div class="tw-field"><span>this footage is from</span>
+      <select name="camera">
+        <option value="">— a camera not set up yet —</option>
+        {% for cam in cameras %}
+        <option value="{{ cam.id }}" {% if camera and camera.id == cam.id %}selected{% endif %}>{{ cam.name or cam.id }}</option>
+        {% endfor %}
+      </select></div>
+  </div>
+  {% include "_detector_settings.html" %}
+  <div class="tw-block">
+    <button class="tw-go" {% if running %}disabled{% endif %}>Run the trial</button>
+    <p class="tw-hint" style="margin-top:8px">Takes roughly half the
+       clip's length. The result appears under Trials on the Tuning page,
+       with pictures of what was tracked.</p>
+  </div>
+</form>
+
+{% else %}{# settings step #}
+<form method="post" action="/detector/run" enctype="multipart/form-data">
+  <input type="hidden" name="camera" value="{{ camera.id }}">
+  <input type="hidden" name="source_kind" value="{{ chosen.source_kind }}">
+  <input type="hidden" name="start" value="{{ chosen.start }}">
+  <input type="hidden" name="end" value="{{ chosen.end }}">
+  <input type="hidden" name="clip" value="{{ chosen.clip }}">
+  <div class="tw-block">
+    <h4>Testing against</h4>
+    <p class="tw-hint">
+      {% if chosen.source_kind == "clip" %}Saved clip <code>{{ chosen.clip }}</code>
+      {% else %}{{ camera.name or camera.id }}, {{ chosen.start | replace("T", " ") }} → {{ chosen.end | replace("T", " ") }} (site time)
+      {% endif %}
+      · <a href="/detector/tune?camera={{ camera.id }}">change</a>
+    </p>
+  </div>
+  {% include "_detector_settings.html" %}
+  <div class="tw-block">
+    <button class="tw-go" {% if running %}disabled{% endif %}>Run the trial</button>
+    <p class="tw-hint" style="margin-top:8px">Sandboxed: the trial writes
+       a report with pictures and touches nothing live. Settings only
+       change if you apply the result afterwards.</p>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

@@ -100,12 +100,18 @@ def fetch(corpus: dict, config_path: str) -> int:
 # -- run ------------------------------------------------------------------
 
 
-def detection_config(base_config: str, tracker: dict):
+def detection_config(base_config: str, tracker: dict, camera_id: str | None = None):
     from siteloom.config import load_config
 
-    cfg = load_config(base_config).detection
+    site = load_config(base_config)
+    # The clip's camera's *effective* settings (CLD-101): a per-camera
+    # override is part of what "shipped" means for that camera, and a
+    # harness that ignored it would grade a config no camera runs.
+    camera = next((c for c in site.cameras if c.id == camera_id), None)
+    cfg = site.detection.for_camera(camera) if camera else site.detection
     # fuse_score must stay off at our sampling rate (CLD-5) regardless of
     # what a variant sets, unless the variant is explicitly testing it.
+    cfg = cfg.model_copy(deep=True)
     cfg.tracker = {"fuse_score": False, **cfg.tracker, **tracker}
     return cfg
 
@@ -142,7 +148,7 @@ def run_clip(clip: dict, det_cfg, sample_fps: float, bridge_gap_s: float) -> Tra
         result = module.process(Job(
             module="detection",
             payload={"image_jpeg": buf.tobytes(), "camera_id": clip["id"],
-                     "timestamp": t},
+                     "timestamp": t, "sample_fps": sample_fps},
         ))
         people = [
             d for d in result.get("detections", [])
@@ -180,6 +186,8 @@ def line(name: str, r: TrackingReport) -> str:
         f"  {name:<20} tracks {r.tracks:>3}  det {r.detection_rate:>4.0%}  "
         f"step-IoU {step:>4}  bridges {len(r.bridges):>2}"
         f" ({len(r.implausible_bridges)} implausible)  worst {worst_s:>11}"
+        f"  occl {r.crossings:>2}  births"
+        f" {len(r.mid_occlusion_births)}mid/{len(r.post_occlusion_births)}post"
     )
 
 
@@ -199,7 +207,7 @@ def run(corpus: dict, config_path: str, only: str | None, out_path: str | None) 
         for name, tracker in configs.items():
             try:
                 report = run_clip(
-                    clip, detection_config(config_path, tracker),
+                    clip, detection_config(config_path, tracker, clip["camera"]),
                     corpus.get("sample_fps", 5.0),
                     corpus.get("bridge_gap_s", 2.0),
                 )
@@ -220,6 +228,7 @@ def run(corpus: dict, config_path: str, only: str | None, out_path: str | None) 
                 v = compare(baseline, report)
                 print(f"    vs shipped — {name}: {v['verdict']}"
                       f"  (implausible {v['implausible_bridges'][0]}→{v['implausible_bridges'][1]},"
+                      f" births {v['occlusion_births'][0]}→{v['occlusion_births'][1]},"
                       f" tracks {v['tracks'][0]}→{v['tracks'][1]})")
 
     if out_path:
@@ -231,6 +240,9 @@ def run(corpus: dict, config_path: str, only: str | None, out_path: str | None) 
                     "bridges": len(r.bridges),
                     "implausible_bridges": len(r.implausible_bridges),
                     "median_step_iou": r.median_step_iou,
+                    "crossings": r.crossings,
+                    "mid_occlusion_births": len(r.mid_occlusion_births),
+                    "post_occlusion_births": len(r.post_occlusion_births),
                 }
                 for name, r in per.items()
             }
@@ -252,21 +264,28 @@ def check(corpus: dict, config_path: str) -> int:
         if not expect:
             continue
         report = run_clip(
-            clip, detection_config(config_path, corpus["configs"]["shipped"]),
+            clip,
+            detection_config(
+                config_path, corpus["configs"]["shipped"], clip["camera"]
+            ),
             corpus.get("sample_fps", 5.0), corpus.get("bridge_gap_s", 2.0),
         )
         print(line(clip["id"], report))
-        got_bridges = len(report.implausible_bridges)
-        if got_bridges > expect.get("max_implausible_bridges", 10**9):
-            failures.append(
-                f"{clip['id']}: {got_bridges} implausible bridges, "
-                f"expected at most {expect['max_implausible_bridges']}"
-            )
-        if report.tracks > expect.get("max_tracks", 10**9):
-            failures.append(
-                f"{clip['id']}: {report.tracks} tracks, "
-                f"expected at most {expect['max_tracks']}"
-            )
+        got = {
+            "max_implausible_bridges":
+                (len(report.implausible_bridges), "implausible bridges"),
+            "max_tracks": (report.tracks, "tracks"),
+            "max_mid_occlusion_births":
+                (len(report.mid_occlusion_births), "mid-occlusion births"),
+            "max_post_occlusion_births":
+                (len(report.post_occlusion_births), "post-occlusion births"),
+        }
+        for key, (value, what) in got.items():
+            if value > expect.get(key, 10**9):
+                failures.append(
+                    f"{clip['id']}: {value} {what}, "
+                    f"expected at most {expect[key]}"
+                )
     if failures:
         print("\nFAILED:")
         for f in failures:

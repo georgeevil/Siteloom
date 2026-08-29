@@ -1,0 +1,82 @@
+{# The guided settings block, shared by the tune wizard's settings step
+   and the upload page. Vocabulary rules (CLD-102): scenes are picked by
+   description, the tracker trade-off is ONE axis between two named
+   failures, and every prefilled value says where it comes from. Expects:
+   presets, provenance, camera (may be None). Renders form fields only —
+   the surrounding <form> belongs to the including template. #}
+
+<div class="tw-block">
+  <h4>1 · What kind of scene is this?</h4>
+  <p class="tw-hint">Pick the description that fits — each is a tested or
+     reasoned bundle of settings. Leave unpicked to keep
+     {% if camera %}{{ camera.name or camera.id }}'s current settings{% else %}the site's current settings{% endif %}.</p>
+  <div class="tw-cards">
+    <label class="tw-card">
+      <input type="radio" name="preset" value="" checked>
+      <strong>Keep current settings</strong>
+      <span>Start from what
+        {% if camera %}{{ camera.name or camera.id }}{% else %}the site{% endif %}
+        runs today, listed below.</span>
+    </label>
+    {% for key, p in presets.items() if key != "site-defaults" %}
+    <label class="tw-card">
+      <input type="radio" name="preset" value="{{ key }}">
+      <strong>{{ p.label }}</strong>
+      {% if p.tested %}<em class="tw-tested">measured on this site's footage</em>
+      {% else %}<em class="tw-starting">reasoned starting point</em>{% endif %}
+      <span>{{ p.description }}</span>
+    </label>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="tw-block">
+  <h4>2 · Lean the tracker, if the problem is known</h4>
+  <p class="tw-hint">One person becoming several tracks? Lean toward
+     <strong>merge</strong>. Two people sharing one track? Lean toward
+     <strong>split</strong>. Leave centred if unsure — the trial will show
+     which failure you have.</p>
+  <div class="tw-axis">
+    <span>split more<br><small>safer against mixing people up</small></span>
+    <input type="range" name="axis" min="-2" max="2" step="1" value="0"
+           list="axis-marks">
+    <datalist id="axis-marks">
+      <option value="-2"></option><option value="-1"></option>
+      <option value="0"></option><option value="1"></option>
+      <option value="2"></option>
+    </datalist>
+    <span>merge more<br><small>safer against splitting one person</small></span>
+  </div>
+</div>
+
+{% if camera %}
+<div class="tw-block">
+  <h4>Day or night settings?</h4>
+  <p class="tw-hint">Cameras that go infrared at night can carry a
+     separate night profile — colour-based tracking is weaker in IR, so
+     the right settings differ. Trial the profile the footage matches.</p>
+  <label style="font-size:12.5px; margin-right:14px">
+    <input type="radio" name="profile" value="day" checked> Day
+    {%- if camera.detection %} (this camera's tuned settings){% endif %}</label>
+  <label style="font-size:12.5px">
+    <input type="radio" name="profile" value="night"> Night
+    {%- if camera.night %} (this camera's night profile){% else %} (starts from the day settings){% endif %}</label>
+</div>
+{% endif %}
+
+<div class="tw-block">
+  <h4>3 · Where these settings start from</h4>
+  <table class="tw-prov">
+    {% for row in provenance %}
+    <tr class="{% if row.field is none %}tw-fixed{% endif %}">
+      <td>{{ row.label }}</td>
+      <td>{% if row.value is not none %}<code>{{ row.value }}</code>{% else %}—{% endif %}</td>
+      <td class="tw-origin">{{ row.origin }}</td>
+      <td class="tw-meaning">{{ row.meaning }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="tw-hint">Anything not chosen above keeps these values. The
+     trial changes nothing anywhere — settings only move when you apply a
+     result you have reviewed.</p>
+</div>

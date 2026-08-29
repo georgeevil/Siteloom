@@ -34,12 +34,51 @@ the failure and the *distance* separates the plausible from the absurd.
 Distance is reported in box widths, not pixels. 165 px means nothing
 without knowing whether the subject is 40 px wide or 400; a jump of two
 box widths is implausible for a person at any distance from any camera.
+
+## Occlusion episodes, and why bridges cannot see them
+
+A bridge needs a track to go dark. When one person walks *behind*
+another, neither track goes dark — the occluder is detected throughout,
+and the hidden person's sliver of arm keeps minting fresh partial-box
+tracks. The clip that motivated this (backyard-puerta, two people
+co-moving toward the camera) produced extra IDs during the overlap and
+again when the hidden person stepped out, and the bridge count stayed
+zero the whole time.
+
+So the occlusion metrics watch box *containment* — intersection over the
+smaller box's area — rather than IoU, because the hidden subject's
+partial box is small relative to the occluder's and their IoU never gets
+large. Two co-present tracks whose containment stays high for a few
+frames open an `OcclusionEpisode`; a track first observed inside an open
+episode's region is a `mid_occlusion_birth`, and one first observed just
+after an episode closes, near where it happened, is a
+`post_occlusion_birth`. Both are fragmentation the ordinary track count
+underweights (each phantom lives a handful of frames) and both are where
+identity claims go to die — a partial-box crop is the worst kind of
+gallery evidence.
+
+`crossings` (the episode count) is reported alongside, so a config that
+zeroes the births by never overlapping boxes at all — which would mean
+the detector stopped seeing the hidden person — is visible rather than
+silently rewarded.
 """
 
 from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+
+# The occlusion arithmetic is shared with the live pipeline's
+# OcclusionMonitor (siteloom/tracking/occlusion.py) so the harness and
+# ingest cannot drift: a config the corpus judged clean is judged by the
+# same containment/episode logic ingest gates on. Re-exported here
+# because this module is the harness's single import surface.
+from siteloom.tracking.occlusion import (  # noqa: F401
+    OcclusionEpisode,
+    classify_births,
+    containment,
+    find_occlusions,
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +130,13 @@ class TrackingReport:
     observations: int = 0
     tracks: int = 0
     bridges: list[Bridge] = field(default_factory=list)
+    occlusions: list[OcclusionEpisode] = field(default_factory=list)
+    #: Track ids first observed inside an open episode's region — the
+    #: sliver-of-arm phantom minted while its subject is hidden.
+    mid_occlusion_births: list[int] = field(default_factory=list)
+    #: Track ids first observed just after an episode closed, near where
+    #: it happened — the hidden subject re-emerging as a stranger.
+    post_occlusion_births: list[int] = field(default_factory=list)
     median_box_px: float = 0.0
     #: IoU between consecutive observations of the same track, when they
     #: really are consecutive. Low values mean the sample rate is too
@@ -108,6 +154,13 @@ class TrackingReport:
     @property
     def implausible_bridges(self) -> list[Bridge]:
         return [b for b in self.bridges if b.implausible]
+
+    @property
+    def crossings(self) -> int:
+        """How often the clip actually put one box inside another. Zero
+        births over zero crossings proves nothing; zero over three is a
+        result."""
+        return len(self.occlusions)
 
     @property
     def worst_bridge(self) -> Bridge | None:
@@ -137,6 +190,10 @@ def summarize(
     bridge_gap_s: float = 2.0,
     step_tolerance: float = 1.5,
     seconds: float = 0.0,
+    occl_containment: float = 0.5,
+    occl_min_frames: int = 2,
+    birth_window_s: float = 3.0,
+    birth_radius_w: float = 1.0,
 ) -> TrackingReport:
     """Fold a clip's observations into one comparable report.
 
@@ -192,6 +249,20 @@ def summarize(
 
     if step_ious:
         report.median_step_iou = statistics.median(step_ious)
+
+    report.occlusions = find_occlusions(
+        observations,
+        occl_containment=occl_containment,
+        occl_min_frames=occl_min_frames,
+        close_gap_s=bridge_gap_s,
+    )
+    report.mid_occlusion_births, report.post_occlusion_births = classify_births(
+        observations,
+        report.occlusions,
+        birth_window_s=birth_window_s,
+        birth_radius_w=birth_radius_w,
+        close_gap_s=bridge_gap_s,
+    )
     return report
 
 
@@ -204,27 +275,57 @@ def compare(baseline: TrackingReport, candidate: TrackingReport) -> dict[str, ob
     inflating track count — the two ways of cheating are removing every
     bridge by fragmenting, and removing fragmentation by letting tracks
     absorb everything.
-    """
-    fewer_switches = len(candidate.implausible_bridges) < len(baseline.implausible_bridges)
-    no_worse_switches = len(candidate.implausible_bridges) <= len(baseline.implausible_bridges)
-    # 25% more tracks for the same footage is fragmentation, not nuance.
-    fragmented = candidate.tracks > baseline.tracks * 1.25
-    less_fragmented = candidate.tracks < baseline.tracks
 
-    if fragmented:
-        verdict = "rejected: bought it with fragmentation"
-    elif fewer_switches or (no_worse_switches and less_fragmented):
-        verdict = "better"
-    elif no_worse_switches and candidate.tracks == baseline.tracks:
-        verdict = "no change"
-    else:
-        verdict = "worse"
+    Occlusion births count on the same axis as implausible bridges: both
+    are a subject acquiring an identity it should not have, and a config
+    that trades one for the other has not improved anything.
+    """
+
+    def switch_like(r: TrackingReport) -> int:
+        return (
+            len(r.implausible_bridges)
+            + len(r.mid_occlusion_births)
+            + len(r.post_occlusion_births)
+        )
+
+    verdict = verdict_from_counts(
+        switch_like(baseline), baseline.tracks,
+        switch_like(candidate), candidate.tracks,
+    )
 
     return {
         "verdict": verdict,
         "implausible_bridges": (
             len(baseline.implausible_bridges), len(candidate.implausible_bridges)
         ),
+        "occlusion_births": (
+            len(baseline.mid_occlusion_births) + len(baseline.post_occlusion_births),
+            len(candidate.mid_occlusion_births) + len(candidate.post_occlusion_births),
+        ),
+        "crossings": (baseline.crossings, candidate.crossings),
         "tracks": (baseline.tracks, candidate.tracks),
         "detection_rate": (baseline.detection_rate, candidate.detection_rate),
     }
+
+
+def verdict_from_counts(
+    base_switch_like: int, base_tracks: int,
+    cand_switch_like: int, cand_tracks: int,
+) -> str:
+    """The verdict arithmetic, on bare counts — shared with the tuning
+    lab, which compares persisted report dicts rather than live
+    TrackingReports, so the two surfaces cannot rule differently on the
+    same numbers."""
+    fewer_switches = cand_switch_like < base_switch_like
+    no_worse_switches = cand_switch_like <= base_switch_like
+    # 25% more tracks for the same footage is fragmentation, not nuance.
+    fragmented = cand_tracks > base_tracks * 1.25
+    less_fragmented = cand_tracks < base_tracks
+
+    if fragmented:
+        return "rejected: bought it with fragmentation"
+    if fewer_switches or (no_worse_switches and less_fragmented):
+        return "better"
+    if no_worse_switches and cand_tracks == base_tracks:
+        return "no change"
+    return "worse"
